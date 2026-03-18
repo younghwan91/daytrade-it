@@ -91,6 +91,35 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         await logger.ainfo("Database connection pool closed")
 
 
+# OpenAPI Tags Metadata
+TAGS_METADATA = [
+    {
+        "name": "signals",
+        "description": "Trading signal operations. Generate, retrieve, and manage AI-driven trading signals based on news and market analysis.",
+    },
+    {
+        "name": "trades",
+        "description": "Trade execution and management. Execute trades based on signals and track trading history.",
+    },
+    {
+        "name": "portfolio",
+        "description": "Portfolio management operations. View positions, performance metrics, and portfolio analytics.",
+    },
+    {
+        "name": "news",
+        "description": "News data operations. Access market news and sentiment analysis for trading decisions.",
+    },
+    {
+        "name": "websocket",
+        "description": "WebSocket endpoints for real-time data streaming including signals, trades, and market updates.",
+    },
+    {
+        "name": "health",
+        "description": "Health check and system status endpoints.",
+    },
+]
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     """Create and configure FastAPI application.
 
@@ -104,19 +133,49 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         settings = get_settings()
 
     app = FastAPI(
-        title="GPT Quant API",
-        description=(
-            "GPT Quant V2 - AI-powered quantitative trading platform.\n\n"
-            "## Features\n"
-            "- Real-time market data analysis\n"
-            "- AI-driven trading signals\n"
-            "- Portfolio management\n"
-            "- Risk monitoring\n"
-        ),
+        title="GPT Quant V2 API",
+        description="""
+# GPT Quant V2 API
+
+AI-Agent-Friendly News-Driven Algorithmic Trading System.
+
+## Overview
+
+GPT Quant V2 is a sophisticated algorithmic trading platform that leverages AI and machine learning
+to generate trading signals from news and market data. This API provides programmatic access to
+all trading functionality.
+
+## Key Features
+
+- **AI-Driven Signals**: Generate trading signals using ML models trained on news sentiment and market data
+- **Automated Trade Execution**: Execute trades based on signals with risk management controls
+- **Portfolio Management**: Track positions, P&L, and portfolio performance metrics
+- **Real-time Updates**: WebSocket support for streaming signals, trades, and market data
+- **News Analysis**: Access processed news articles with sentiment scores
+
+## Authentication
+
+All endpoints require authentication via JWT tokens. Include the token in the `Authorization` header:
+
+```
+Authorization: Bearer <your_jwt_token>
+```
+
+## Rate Limits
+
+- Standard endpoints: 100 requests/minute
+- WebSocket connections: 5 concurrent connections per user
+- Data-intensive endpoints: 20 requests/minute
+
+## Support
+
+For API support, please open an issue on our GitHub repository.
+""",
         version="0.1.0",
         docs_url="/docs",
         redoc_url="/redoc",
         openapi_url="/openapi.json",
+        openapi_tags=TAGS_METADATA,
         lifespan=lifespan,
     )
 
@@ -302,11 +361,12 @@ def _register_routers(app: FastAPI) -> None:
 
     Add router registrations here as they are created.
     """
-    # Example:
-    # from gpt_quant_v2.interfaces.api.routers import signals, portfolio
-    # app.include_router(signals.router, prefix="/api/v1/signals", tags=["signals"])
-    # app.include_router(portfolio.router, prefix="/api/v1/portfolio", tags=["portfolio"])
-    pass
+    from gpt_quant_v2.interfaces.api.routers import news, portfolio, signals, trades
+
+    app.include_router(signals.router, prefix="/api/v1/signals", tags=["signals"])
+    app.include_router(trades.router, prefix="/api/v1/trades", tags=["trades"])
+    app.include_router(portfolio.router, prefix="/api/v1/portfolio", tags=["portfolio"])
+    app.include_router(news.router, prefix="/api/v1/news", tags=["news"])
 
 
 # Create default app instance for uvicorn

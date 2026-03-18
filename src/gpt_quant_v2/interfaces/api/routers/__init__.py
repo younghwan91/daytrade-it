@@ -4,17 +4,16 @@ This module provides router registration for the FastAPI application.
 Add new routers here and register them in the main application.
 
 Example:
-    from gpt_quant_v2.interfaces.api.routers import signals, portfolio, orders
+    from gpt_quant_v2.interfaces.api.routers import signals, portfolio, trades, news, models
 
     # In main.py create_app():
     app.include_router(signals.router, prefix="/api/v1/signals", tags=["signals"])
     app.include_router(portfolio.router, prefix="/api/v1/portfolio", tags=["portfolio"])
-    app.include_router(orders.router, prefix="/api/v1/orders", tags=["orders"])
+    app.include_router(trades.router, prefix="/api/v1/trades", tags=["trades"])
+    app.include_router(news.router, prefix="/api/v1/news", tags=["news"])
+    app.include_router(models.router, prefix="/api/v1/models", tags=["models"])
 """
 
-# Router imports will be added here as they are created
-# from . import signals
-# from . import portfolio
-# from . import orders
+from gpt_quant_v2.interfaces.api.routers import models, news, portfolio, signals, trades
 
-__all__: list[str] = []
+__all__ = ["signals", "trades", "portfolio", "news", "models"]

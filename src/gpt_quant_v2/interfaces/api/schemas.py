@@ -76,7 +76,7 @@ class PaginationParams(BaseModel):
         return self.page_size
 
 
-class PaginatedResponse(BaseModel, Generic[T]):
+class PaginatedResponse(BaseModel, Generic[T]):  # noqa: UP046
     """Generic paginated response wrapper."""
 
     items: list[T] = Field(description="List of items in current page")

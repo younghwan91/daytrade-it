@@ -10,6 +10,26 @@ env:
   PYTHON_VERSION: "3.12"
 
 jobs:
+  pre-commit:
+    name: Pre-commit Hooks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+      
+      - name: Set up Python
+        run: uv python install ${{ env.PYTHON_VERSION }}
+      
+      - name: Install dependencies
+        run: uv sync --dev
+      
+      - name: Run pre-commit
+        uses: pre-commit/action@v3.0.1
+
   lint:
     name: Lint
     runs-on: ubuntu-latest
@@ -53,8 +73,41 @@ jobs:
       - name: Run MyPy
         run: uv run mypy src/
 
-  test:
-    name: Test
+  unit-test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+      
+      - name: Set up Python
+        run: uv python install ${{ env.PYTHON_VERSION }}
+      
+      - name: Install dependencies
+        run: uv sync --dev
+      
+      - name: Run unit tests
+        env:
+          GPTQ_DATABASE_URL: sqlite+aiosqlite:///:memory:
+          GPTQ_REDIS_URL: redis://localhost:6379/0
+          GPTQ_POLYGON_API_KEY: test_key
+          GPTQ_OPENAI_API_KEY: test_key
+          GPTQ_TIINGO_API_KEY: test_key
+        run: uv run pytest tests/unit/ -v --cov=src/gpt_quant_v2 --cov-report=xml
+      
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./coverage.xml
+          flags: unit
+          fail_ci_if_error: false
+
+  integration-test:
+    name: Integration Tests
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -95,25 +148,26 @@ jobs:
       - name: Install dependencies
         run: uv sync --dev
       
-      - name: Run tests
+      - name: Run integration tests
         env:
           GPTQ_DATABASE_URL: postgresql+asyncpg://gptquant:gptquant@localhost:5432/gptquant_test
           GPTQ_REDIS_URL: redis://localhost:6379/0
           GPTQ_POLYGON_API_KEY: test_key
           GPTQ_OPENAI_API_KEY: test_key
           GPTQ_TIINGO_API_KEY: test_key
-        run: uv run pytest tests/ -v --cov=src/gpt_quant_v2 --cov-report=xml
+        run: uv run pytest tests/integration/ -v --cov=src/gpt_quant_v2 --cov-report=xml --cov-append
       
       - name: Upload coverage
         uses: codecov/codecov-action@v4
         with:
           files: ./coverage.xml
+          flags: integration
           fail_ci_if_error: false
 
   build:
     name: Build
     runs-on: ubuntu-latest
-    needs: [lint, type-check, test]
+    needs: [pre-commit, lint, type-check, unit-test, integration-test]
     steps:
       - uses: actions/checkout@v4
       
