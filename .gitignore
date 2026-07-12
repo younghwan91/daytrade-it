@@ -163,3 +163,6 @@ docker/volumes/
 secrets/
 credentials/
 frontend/node_modules/
+
+# OMC local state
+.omc/
