@@ -20,10 +20,10 @@ from httpx import AsyncClient
 async def test_list_signals_empty(async_client: AsyncClient) -> None:
     """Test listing signals returns empty paginated response when no signals exist."""
     response = await async_client.get("/api/v1/signals")
-    
+
     assert response.status_code == 200
     data = response.json()
-    
+
     assert data["items"] == []
     assert data["total"] == 0
     assert data["page"] == 1
@@ -43,10 +43,10 @@ async def test_create_signal_success(
         "/api/v1/signals",
         json=sample_signal_payload,
     )
-    
+
     assert response.status_code == 201
     data = response.json()
-    
+
     # Verify response structure
     assert "id" in data
     assert data["ticker"] == sample_signal_payload["ticker"].upper()
@@ -66,12 +66,12 @@ async def test_create_signal_minimal_payload(async_client: AsyncClient) -> None:
         "direction": "SELL",
         "confidence": 0.70,
     }
-    
+
     response = await async_client.post("/api/v1/signals", json=payload)
-    
+
     assert response.status_code == 201
     data = response.json()
-    
+
     assert data["ticker"] == "TSLA"
     assert data["direction"] == "SELL"
     assert data["confidence"] == 0.70
@@ -85,9 +85,9 @@ async def test_create_signal_invalid_ticker_too_long(async_client: AsyncClient) 
         "direction": "BUY",
         "confidence": 0.50,
     }
-    
+
     response = await async_client.post("/api/v1/signals", json=payload)
-    
+
     assert response.status_code == 422
 
 
@@ -99,9 +99,9 @@ async def test_create_signal_invalid_ticker_empty(async_client: AsyncClient) -> 
         "direction": "BUY",
         "confidence": 0.50,
     }
-    
+
     response = await async_client.post("/api/v1/signals", json=payload)
-    
+
     assert response.status_code == 422
 
 
@@ -113,9 +113,9 @@ async def test_create_signal_invalid_confidence_too_high(async_client: AsyncClie
         "direction": "BUY",
         "confidence": 1.5,
     }
-    
+
     response = await async_client.post("/api/v1/signals", json=payload)
-    
+
     assert response.status_code == 422
 
 
@@ -127,9 +127,9 @@ async def test_create_signal_invalid_confidence_negative(async_client: AsyncClie
         "direction": "BUY",
         "confidence": -0.5,
     }
-    
+
     response = await async_client.post("/api/v1/signals", json=payload)
-    
+
     assert response.status_code == 422
 
 
@@ -141,9 +141,9 @@ async def test_create_signal_invalid_direction(async_client: AsyncClient) -> Non
         "direction": "INVALID",
         "confidence": 0.50,
     }
-    
+
     response = await async_client.post("/api/v1/signals", json=payload)
-    
+
     assert response.status_code == 422
 
 
@@ -154,9 +154,9 @@ async def test_create_signal_missing_required_field(async_client: AsyncClient) -
         "ticker": "AAPL",
         # missing direction and confidence
     }
-    
+
     response = await async_client.post("/api/v1/signals", json=payload)
-    
+
     assert response.status_code == 422
 
 
@@ -164,9 +164,9 @@ async def test_create_signal_missing_required_field(async_client: AsyncClient) -
 async def test_get_signal_not_found(async_client: AsyncClient) -> None:
     """Test getting a non-existent signal returns 404."""
     non_existent_id = uuid4()
-    
+
     response = await async_client.get(f"/api/v1/signals/{non_existent_id}")
-    
+
     assert response.status_code == 404
     data = response.json()
     assert "not found" in data["detail"].lower()
@@ -176,7 +176,7 @@ async def test_get_signal_not_found(async_client: AsyncClient) -> None:
 async def test_get_signal_invalid_uuid(async_client: AsyncClient) -> None:
     """Test getting a signal with invalid UUID format returns 422."""
     response = await async_client.get("/api/v1/signals/not-a-valid-uuid")
-    
+
     assert response.status_code == 422
 
 
@@ -184,9 +184,9 @@ async def test_get_signal_invalid_uuid(async_client: AsyncClient) -> None:
 async def test_delete_signal_not_found(async_client: AsyncClient) -> None:
     """Test deleting a non-existent signal returns 404."""
     non_existent_id = uuid4()
-    
+
     response = await async_client.delete(f"/api/v1/signals/{non_existent_id}")
-    
+
     assert response.status_code == 404
     data = response.json()
     assert "not found" in data["detail"].lower()
@@ -196,7 +196,7 @@ async def test_delete_signal_not_found(async_client: AsyncClient) -> None:
 async def test_delete_signal_invalid_uuid(async_client: AsyncClient) -> None:
     """Test deleting a signal with invalid UUID format returns 422."""
     response = await async_client.delete("/api/v1/signals/invalid-uuid")
-    
+
     assert response.status_code == 422
 
 
@@ -207,10 +207,10 @@ async def test_list_signals_with_pagination(async_client: AsyncClient) -> None:
         "/api/v1/signals",
         params={"page": 2, "page_size": 10},
     )
-    
+
     assert response.status_code == 200
     data = response.json()
-    
+
     assert data["page"] == 2
     assert data["page_size"] == 10
 
@@ -226,10 +226,10 @@ async def test_list_signals_with_filters(async_client: AsyncClient) -> None:
             "direction": "BUY",
         },
     )
-    
+
     assert response.status_code == 200
     data = response.json()
-    
+
     assert "items" in data
     assert "total" in data
 
@@ -241,7 +241,7 @@ async def test_list_signals_invalid_page(async_client: AsyncClient) -> None:
         "/api/v1/signals",
         params={"page": 0},  # Must be >= 1
     )
-    
+
     assert response.status_code == 422
 
 
@@ -252,5 +252,5 @@ async def test_list_signals_invalid_page_size(async_client: AsyncClient) -> None
         "/api/v1/signals",
         params={"page_size": 500},  # Max is 100
     )
-    
+
     assert response.status_code == 422

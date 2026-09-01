@@ -8,8 +8,6 @@ Tests the complete backtesting workflow:
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
-from decimal import Decimal
 from typing import Any
 from uuid import uuid4
 
@@ -17,7 +15,6 @@ import httpx
 import pytest
 
 from tests.e2e.conftest import requires_api, requires_external_services, slow_test
-
 
 # ============================================================================
 # Backtest Execution Tests
@@ -206,9 +203,7 @@ class TestRunBacktest:
                 import asyncio
 
                 for _ in range(30):  # Max 30 attempts
-                    status_response = await api_client.get(
-                        f"/api/v1/backtest/{backtest_id}"
-                    )
+                    status_response = await api_client.get(f"/api/v1/backtest/{backtest_id}")
                     if status_response.status_code == 200:
                         status_data = status_response.json()
                         if status_data.get("status") == "completed":

@@ -5,8 +5,6 @@ Command-line interface for the trading system.
 """
 
 import typer
-from typing import Optional
-from datetime import datetime
 
 app = typer.Typer(
     name="gptq",
@@ -19,7 +17,9 @@ app = typer.Typer(
 def analyze(
     ticker: str = typer.Argument(..., help="Stock ticker to analyze (e.g., AAPL)"),
     include_news: bool = typer.Option(True, "--news/--no-news", help="Include news analysis"),
-    include_technicals: bool = typer.Option(True, "--technicals/--no-technicals", help="Include technical analysis"),
+    include_technicals: bool = typer.Option(
+        True, "--technicals/--no-technicals", help="Include technical analysis"
+    ),
 ):
     """
     Analyze a stock ticker with news and technical data.
@@ -33,8 +33,10 @@ def analyze(
 
 @app.command()
 def signals(
-    min_confidence: float = typer.Option(0.7, "--min-confidence", "-c", help="Minimum confidence threshold"),
-    ticker: Optional[str] = typer.Option(None, "--ticker", "-t", help="Filter by ticker"),
+    min_confidence: float = typer.Option(
+        0.7, "--min-confidence", "-c", help="Minimum confidence threshold"
+    ),
+    ticker: str | None = typer.Option(None, "--ticker", "-t", help="Filter by ticker"),
     limit: int = typer.Option(10, "--limit", "-l", help="Maximum number of signals to show"),
 ):
     """
@@ -57,7 +59,7 @@ def backtest(
     """
     Run a backtest on a strategy.
     """
-    typer.echo(f"📈 Running backtest...")
+    typer.echo("📈 Running backtest...")
     typer.echo(f"   Strategy: {strategy}")
     typer.echo(f"   Period: {start} to {end}")
     typer.echo(f"   Initial capital: ${initial_capital:,.2f}")
@@ -111,6 +113,7 @@ def version():
     Show version information.
     """
     from gpt_quant_v2 import __version__
+
     typer.echo(f"GPT Quant v2 - Version {__version__}")
 
 

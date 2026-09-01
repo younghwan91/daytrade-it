@@ -178,7 +178,6 @@ async def create_signal(
     This allows users to manually create trading signals
     outside of automated analysis pipelines.
     """
-    from datetime import UTC
 
     from gpt_quant_v2.domain.entities.signal import TradingSignal
     from gpt_quant_v2.domain.value_objects import Confidence, Ticker

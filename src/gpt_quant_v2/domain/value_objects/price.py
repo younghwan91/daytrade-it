@@ -56,13 +56,17 @@ class Price(ValueObject):
     def add(self, other: "Price") -> "Price":
         """Add two prices together."""
         if self.currency != other.currency:
-            raise ValueError(f"Cannot add prices with different currencies: {self.currency} vs {other.currency}")
+            raise ValueError(
+                f"Cannot add prices with different currencies: {self.currency} vs {other.currency}"
+            )
         return Price(value=self.value + other.value, currency=self.currency)
 
     def subtract(self, other: "Price") -> "Price":
         """Subtract another price from this price."""
         if self.currency != other.currency:
-            raise ValueError(f"Cannot subtract prices with different currencies: {self.currency} vs {other.currency}")
+            raise ValueError(
+                f"Cannot subtract prices with different currencies: {self.currency} vs {other.currency}"
+            )
         result = self.value - other.value
         if result <= 0:
             raise ValueError("Resulting price must be positive")

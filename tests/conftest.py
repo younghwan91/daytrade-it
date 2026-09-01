@@ -3,7 +3,6 @@ Pytest Configuration and Fixtures
 """
 
 import pytest
-from typing import Generator
 
 
 @pytest.fixture

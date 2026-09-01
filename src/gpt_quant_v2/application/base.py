@@ -1,7 +1,7 @@
 """Base classes for CQRS pattern implementation."""
 
 from abc import ABC, abstractmethod
-from typing import Generic, TypeVar
+from typing import TypeVar
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
@@ -35,7 +35,7 @@ TQuery = TypeVar("TQuery", bound=Query)
 TResult = TypeVar("TResult")
 
 
-class CommandHandler(ABC, Generic[TCommand, TResult]):
+class CommandHandler[TCommand: Command, TResult](ABC):
     """Abstract base class for command handlers.
 
     Command handlers execute commands and return results.
@@ -55,7 +55,7 @@ class CommandHandler(ABC, Generic[TCommand, TResult]):
         ...
 
 
-class QueryHandler(ABC, Generic[TQuery, TResult]):
+class QueryHandler[TQuery: Query, TResult](ABC):
     """Abstract base class for query handlers.
 
     Query handlers execute queries and return results.

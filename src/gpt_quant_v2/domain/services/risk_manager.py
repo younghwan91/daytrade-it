@@ -94,7 +94,10 @@ class RiskManager:
 
     def check_position_limit(
         self,
-        ticker: Ticker,
+        # 한도는 아직 종목별이 아니라 전체 공통(max_position_shares)이다.
+        # 시그니처에는 남겨 호출부가 종목을 넘기게 두고, 종목별 한도가 생기면
+        # 여기서 바로 쓴다.
+        ticker: Ticker,  # noqa: ARG002
         quantity: int,
         current_position_quantity: int = 0,
     ) -> bool:
@@ -131,9 +134,7 @@ class RiskManager:
         Returns:
             True if within limits, False otherwise.
         """
-        total_exposure = sum(
-            abs(pos.market_value or Decimal("0")) for pos in positions
-        )
+        total_exposure = sum(abs(pos.market_value or Decimal("0")) for pos in positions)
         return total_exposure <= self.config.max_position_value * 10  # Allow 10 positions
 
     def calculate_risk_reward(
@@ -187,14 +188,15 @@ class RiskManager:
             return ValidationResult(
                 status=ValidationStatus.REJECTED,
                 reason="Daily loss limit exceeded",
-                details={"daily_pnl": str(account.daily_pnl), "limit": str(self.config.daily_loss_limit)},
+                details={
+                    "daily_pnl": str(account.daily_pnl),
+                    "limit": str(self.config.daily_loss_limit),
+                },
             )
 
         # Check total exposure
         if not self.check_total_exposure(current_positions):
-            total_exposure = sum(
-                abs(pos.market_value or Decimal("0")) for pos in current_positions
-            )
+            total_exposure = sum(abs(pos.market_value or Decimal("0")) for pos in current_positions)
             return ValidationResult(
                 status=ValidationStatus.REJECTED,
                 reason="Total exposure limit exceeded",

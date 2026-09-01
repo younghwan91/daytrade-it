@@ -1,7 +1,8 @@
 """Dependency injection container for managing application dependencies."""
 
+from collections.abc import Callable
 from enum import Enum
-from typing import Any, Callable, Dict, Optional, Type, TypeVar, Union
+from typing import Any, TypeVar
 
 T = TypeVar("T")
 
@@ -38,14 +39,14 @@ class Container:
 
     def __init__(self) -> None:
         """Initialize an empty container."""
-        self._registrations: Dict[Type, Dict[str, Any]] = {}
-        self._singletons: Dict[Type, Any] = {}
+        self._registrations: dict[type, dict[str, Any]] = {}
+        self._singletons: dict[type, Any] = {}
 
     def register(
         self,
-        service_type: Type[T],
-        implementation: Optional[Type[T]] = None,
-        factory: Optional[Callable[["Container"], T]] = None,
+        service_type: type[T],
+        implementation: type[T] | None = None,
+        factory: Callable[["Container"], T] | None = None,
         lifetime: Lifetime = Lifetime.TRANSIENT,
     ) -> "Container":
         """Register a service type with its implementation or factory.
@@ -67,9 +68,7 @@ class Container:
             # Use service_type as its own implementation
             implementation = service_type
         elif implementation is not None and factory is not None:
-            raise ValueError(
-                "Cannot specify both implementation and factory. Choose one."
-            )
+            raise ValueError("Cannot specify both implementation and factory. Choose one.")
 
         self._registrations[service_type] = {
             "implementation": implementation,
@@ -81,7 +80,7 @@ class Container:
 
     def register_instance(
         self,
-        service_type: Type[T],
+        service_type: type[T],
         instance: T,
     ) -> "Container":
         """Register an existing instance as a singleton.
@@ -102,7 +101,7 @@ class Container:
 
         return self
 
-    def resolve(self, service_type: Type[T]) -> T:
+    def resolve(self, service_type: type[T]) -> T:
         """Resolve a service type to its implementation instance.
 
         Args:
@@ -133,7 +132,7 @@ class Container:
 
         return instance
 
-    def _create_instance(self, registration: Dict[str, Any]) -> Any:
+    def _create_instance(self, registration: dict[str, Any]) -> Any:
         """Create an instance based on registration configuration."""
         factory = registration["factory"]
         implementation = registration["implementation"]
@@ -146,7 +145,7 @@ class Container:
 
         raise ValueError("No implementation or factory available")
 
-    def is_registered(self, service_type: Type) -> bool:
+    def is_registered(self, service_type: type) -> bool:
         """Check if a service type is registered.
 
         Args:

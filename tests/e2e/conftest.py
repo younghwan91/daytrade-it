@@ -366,7 +366,11 @@ def news_article_factory() -> callable:
             "published_at": (datetime.now(UTC) - timedelta(hours=hours_ago)).isoformat(),
             "tickers": [ticker],
             "sentiment": {
-                "score": 0.75 if sentiment == "BULLISH" else -0.5 if sentiment == "BEARISH" else 0.0,
+                "score": 0.75
+                if sentiment == "BULLISH"
+                else -0.5
+                if sentiment == "BEARISH"
+                else 0.0,
                 "label": sentiment,
                 "confidence": 0.85,
             },

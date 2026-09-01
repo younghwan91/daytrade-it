@@ -24,7 +24,7 @@ from gpt_quant_v2.shared.config.settings import Settings
 @pytest.fixture
 def settings_override() -> Settings:
     """Override settings for test environment.
-    
+
     Returns:
         Settings configured for test isolation with in-memory SQLite
         and minimal external dependencies.
@@ -37,10 +37,10 @@ def settings_override() -> Settings:
 @pytest.fixture
 async def test_db() -> AsyncGenerator[async_sessionmaker[AsyncSession], None]:
     """Create an in-memory SQLite database for testing.
-    
+
     Provides an isolated database session factory that creates
     fresh tables for each test. SQLite is used for speed and simplicity.
-    
+
     Yields:
         Async session factory bound to the test database.
     """
@@ -49,21 +49,21 @@ async def test_db() -> AsyncGenerator[async_sessionmaker[AsyncSession], None]:
         "sqlite+aiosqlite:///:memory:",
         echo=False,
     )
-    
+
     # Create session factory
     session_factory = async_sessionmaker(
         engine,
         class_=AsyncSession,
         expire_on_commit=False,
     )
-    
+
     # Create tables if needed (import models to register with metadata)
     # For now, we don't have ORM models so we skip table creation
-    async with engine.begin() as conn:
+    async with engine.begin():
         pass  # Tables would be created here if we had ORM models
-    
+
     yield session_factory
-    
+
     # Cleanup
     await engine.dispose()
 
@@ -71,13 +71,13 @@ async def test_db() -> AsyncGenerator[async_sessionmaker[AsyncSession], None]:
 @pytest.fixture
 def redis_mock() -> MagicMock:
     """Create a mock Redis client for testing.
-    
+
     Returns:
         MagicMock configured to behave like an async Redis client
         with common operations returning sensible defaults.
     """
     mock = MagicMock()
-    
+
     # Configure async methods
     mock.ping = AsyncMock(return_value=True)
     mock.get = AsyncMock(return_value=None)
@@ -98,7 +98,7 @@ def redis_mock() -> MagicMock:
     mock.hgetall = AsyncMock(return_value={})
     mock.hdel = AsyncMock(return_value=1)
     mock.publish = AsyncMock(return_value=1)
-    
+
     return mock
 
 
@@ -109,28 +109,28 @@ async def async_client(
     redis_mock: MagicMock,
 ) -> AsyncGenerator[AsyncClient, None]:
     """Create an async HTTP client for API testing.
-    
+
     This fixture creates a FastAPI test application with:
     - Overridden settings for test environment
     - In-memory SQLite database
     - Mocked Redis connection
-    
+
     Args:
         settings_override: Test settings fixture
         test_db: In-memory database session factory
         redis_mock: Mocked Redis client
-        
+
     Yields:
         AsyncClient configured to send requests to the test app.
     """
     # Create app with test settings
     app = create_app(settings=settings_override)
-    
+
     # Override app state with test dependencies
     app.state.db_session_factory = test_db
     app.state.db_engine = None  # Not needed for tests
     app.state.redis = redis_mock
-    
+
     # Create async client with ASGI transport
     transport = ASGITransport(app=app)  # type: ignore[arg-type]
     async with AsyncClient(
@@ -143,7 +143,7 @@ async def async_client(
 @pytest.fixture
 def mock_db_session() -> AsyncMock:
     """Create a mock database session for unit-style tests.
-    
+
     Returns:
         AsyncMock configured as a SQLAlchemy async session.
     """

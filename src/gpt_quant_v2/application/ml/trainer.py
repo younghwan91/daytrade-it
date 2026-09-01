@@ -284,13 +284,15 @@ class ModelTrainer:
 
         # Get best params and add fixed params
         best_params: dict[str, Any] = dict(study.best_params)
-        best_params.update({
-            "objective": "multi:softprob",
-            "eval_metric": "mlogloss",
-            "random_state": 42,
-            "n_jobs": -1,
-            "use_label_encoder": False,
-        })
+        best_params.update(
+            {
+                "objective": "multi:softprob",
+                "eval_metric": "mlogloss",
+                "random_state": 42,
+                "n_jobs": -1,
+                "use_label_encoder": False,
+            }
+        )
 
         return best_params
 
@@ -367,9 +369,7 @@ class ModelTrainer:
             "recall_macro": float(
                 recall_score(true_arr, preds_arr, average="macro", zero_division=0)
             ),
-            "f1_macro": float(
-                f1_score(true_arr, preds_arr, average="macro", zero_division=0)
-            ),
+            "f1_macro": float(f1_score(true_arr, preds_arr, average="macro", zero_division=0)),
         }
 
         # Per-class metrics
@@ -446,9 +446,7 @@ class ModelTrainer:
             "recall_weighted": float(
                 recall_score(y_val, val_preds, average="weighted", zero_division=0)
             ),
-            "f1_weighted": float(
-                f1_score(y_val, val_preds, average="weighted", zero_division=0)
-            ),
+            "f1_weighted": float(f1_score(y_val, val_preds, average="weighted", zero_division=0)),
         }
 
         return TrainedModel(

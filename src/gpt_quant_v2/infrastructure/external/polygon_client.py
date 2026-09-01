@@ -102,12 +102,8 @@ class TickerDetails(BaseModel):
     total_employees: int | None = Field(None, description="Total employees")
     list_date: str | None = Field(None, description="IPO/listing date")
     branding: dict[str, Any] | None = Field(None, description="Branding info")
-    share_class_shares_outstanding: int | None = Field(
-        None, description="Shares outstanding"
-    )
-    weighted_shares_outstanding: int | None = Field(
-        None, description="Weighted shares outstanding"
-    )
+    share_class_shares_outstanding: int | None = Field(None, description="Shares outstanding")
+    weighted_shares_outstanding: int | None = Field(None, description="Weighted shares outstanding")
     round_lot: int | None = Field(None, description="Round lot size")
 
 
@@ -143,9 +139,7 @@ class Quote(BaseModel):
     timestamp: int = Field(..., alias="t", description="Unix timestamp in ns")
     conditions: list[int] | None = Field(None, alias="c", description="Condition flags")
     indicators: list[int] | None = Field(None, alias="i", description="Indicators")
-    sequence_number: int | None = Field(
-        None, alias="q", description="Sequence number"
-    )
+    sequence_number: int | None = Field(None, alias="q", description="Sequence number")
     tape: int | None = Field(None, alias="z", description="Tape")
 
     model_config = {"populate_by_name": True}
@@ -176,9 +170,7 @@ class Trade(BaseModel):
     conditions: list[int] | None = Field(None, alias="c", description="Condition flags")
     trade_id: str | None = Field(None, alias="i", description="Trade ID")
     tape: int | None = Field(None, alias="z", description="Tape")
-    sequence_number: int | None = Field(
-        None, alias="q", description="Sequence number"
-    )
+    sequence_number: int | None = Field(None, alias="q", description="Sequence number")
 
     model_config = {"populate_by_name": True}
 
@@ -244,12 +236,8 @@ class Snapshot(BaseModel):
     prev_day: PrevDayData | None = Field(
         None, alias="prevDay", description="Previous day's aggregate"
     )
-    last_trade: Trade | None = Field(
-        None, alias="lastTrade", description="Most recent trade"
-    )
-    last_quote: Quote | None = Field(
-        None, alias="lastQuote", description="Most recent quote"
-    )
+    last_trade: Trade | None = Field(None, alias="lastTrade", description="Most recent trade")
+    last_quote: Quote | None = Field(None, alias="lastQuote", description="Most recent quote")
 
     model_config = {"populate_by_name": True}
 
@@ -779,7 +767,9 @@ class PolygonClient:
         Raises:
             PolygonAPIError: On API errors
         """
-        endpoint = f"/v2/aggs/ticker/{ticker.upper()}/range/{multiplier}/{timespan}/{from_date}/{to_date}"
+        endpoint = (
+            f"/v2/aggs/ticker/{ticker.upper()}/range/{multiplier}/{timespan}/{from_date}/{to_date}"
+        )
         params = {
             "adjusted": str(adjusted).lower(),
             "sort": sort,
@@ -813,7 +803,10 @@ class PolygonClient:
         endpoint = f"/v2/last/nbbo/{ticker.upper()}"
 
         data = await self._request(
-            "GET", endpoint, use_cache=use_cache, cache_ttl=5  # Short TTL if cached
+            "GET",
+            endpoint,
+            use_cache=use_cache,
+            cache_ttl=5,  # Short TTL if cached
         )
 
         results = data.get("results", {})
@@ -840,9 +833,7 @@ class PolygonClient:
         """
         endpoint = f"/v2/last/trade/{ticker.upper()}"
 
-        data = await self._request(
-            "GET", endpoint, use_cache=use_cache, cache_ttl=5
-        )
+        data = await self._request("GET", endpoint, use_cache=use_cache, cache_ttl=5)
 
         results = data.get("results", {})
         return Trade.model_validate(results)
@@ -906,9 +897,7 @@ class PolygonClient:
         """
         endpoint = f"/v2/snapshot/locale/us/markets/stocks/tickers/{ticker.upper()}"
 
-        data = await self._request(
-            "GET", endpoint, use_cache=use_cache, cache_ttl=10
-        )
+        data = await self._request("GET", endpoint, use_cache=use_cache, cache_ttl=10)
 
         ticker_data = data.get("ticker", {})
         return Snapshot.model_validate(ticker_data)

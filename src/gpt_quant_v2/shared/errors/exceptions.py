@@ -1,6 +1,6 @@
 """Exception hierarchy for GPT Quant V2."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from gpt_quant_v2.shared.errors import error_codes
@@ -31,7 +31,7 @@ class GptQuantError(Exception):
         if error_code is not None:
             self.error_code = error_code
         self.details = details or {}
-        self.timestamp = datetime.now(timezone.utc)
+        self.timestamp = datetime.now(UTC)
         self.correlation_id = correlation_id
 
     def to_dict(self) -> dict[str, Any]:

@@ -2,10 +2,15 @@
 
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Optional
 
-from gpt_quant_v2.domain.entities import NewsArticle, Position, SignalDirection, SignalSource, TradingSignal
-from gpt_quant_v2.domain.value_objects import Confidence, Price, Sentiment, Ticker
+from gpt_quant_v2.domain.entities import (
+    NewsArticle,
+    Position,
+    SignalDirection,
+    SignalSource,
+    TradingSignal,
+)
+from gpt_quant_v2.domain.value_objects import Confidence, Price, Sentiment
 
 
 @dataclass(frozen=True)
@@ -46,7 +51,7 @@ class NewsBasedStrategy:
         self,
         news: NewsArticle,
         sentiment: Sentiment,
-    ) -> Optional[TradingSignal]:
+    ) -> TradingSignal | None:
         """Evaluate news and sentiment to generate a trading signal.
 
         Args:

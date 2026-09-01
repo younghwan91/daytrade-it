@@ -246,8 +246,6 @@ async def create_trade(
     This creates a new trade linked to the specified signal
     and submits it for execution.
     """
-    from gpt_quant_v2.domain.entities.trade import Trade
-    from gpt_quant_v2.domain.value_objects import Ticker
 
     # TODO: Lookup the signal to get ticker and direction
     # For now, we'll raise an error

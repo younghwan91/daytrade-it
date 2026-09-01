@@ -11,14 +11,12 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Any
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import httpx
 import pytest
 
 from tests.e2e.conftest import requires_api, requires_external_services, slow_test
-
 
 # ============================================================================
 # News to Signal Tests
@@ -43,7 +41,7 @@ class TestNewsToSignal:
         3. Check if a signal was generated based on sentiment
         """
         # Arrange - Create bullish news for AAPL
-        news_data = news_article_factory(
+        news_article_factory(
             ticker="AAPL",
             sentiment="BULLISH",
             hours_ago=1,
@@ -499,7 +497,7 @@ class TestFullTradingWorkflow:
         # Step 3: Get initial portfolio state
         initial_portfolio = await api_client.get("/api/v1/portfolio")
         assert initial_portfolio.status_code == 200
-        initial_state = initial_portfolio.json()
+        initial_portfolio.json()
 
         # Step 4: Execute trade from signal (if signal persisted)
         # Note: In placeholder implementation, this may fail
@@ -516,7 +514,7 @@ class TestFullTradingWorkflow:
 
         if trade_executed:
             trade = trade_response.json()
-            trade_id = trade["id"]
+            trade["id"]
 
             # Step 5: Verify trade appears in trade list
             trades_list = await api_client.get("/api/v1/trades")

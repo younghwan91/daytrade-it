@@ -15,7 +15,7 @@ from uuid import UUID
 
 import structlog
 
-from gpt_quant_v2.domain.entities.signal import SignalDirection, TradingSignal
+from gpt_quant_v2.domain.entities.signal import SignalDirection
 from gpt_quant_v2.domain.entities.trade import Trade, TradeStatus
 from gpt_quant_v2.domain.events.trading_events import TradeExecutedEvent
 from gpt_quant_v2.domain.value_objects import Money, Quantity, Ticker

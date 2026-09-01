@@ -1,7 +1,7 @@
 """Generic base repository with CRUD operations."""
 
 from abc import ABC, abstractmethod
-from typing import Any, Generic, TypeVar
+from typing import Any, TypeVar
 from uuid import UUID
 
 from sqlalchemy import func, select
@@ -14,7 +14,7 @@ TEntity = TypeVar("TEntity")
 TModel = TypeVar("TModel", bound=Base)
 
 
-class PaginationResult(Generic[TEntity]):
+class PaginationResult[TEntity]:
     """Paginated result container."""
 
     def __init__(
@@ -47,7 +47,7 @@ class PaginationResult(Generic[TEntity]):
         return self.page > 1
 
 
-class BaseRepository(ABC, Generic[TEntity, TModel]):
+class BaseRepository[TEntity, TModel: Base](ABC):
     """Abstract base repository with CRUD operations.
 
     Provides generic CRUD operations for domain entities.
@@ -213,8 +213,10 @@ class BaseRepository(ABC, Generic[TEntity, TModel]):
         Returns:
             True if exists, False otherwise
         """
-        query = select(func.count()).select_from(self._model_class).where(
-            self._model_class.id == entity_id
+        query = (
+            select(func.count())
+            .select_from(self._model_class)
+            .where(self._model_class.id == entity_id)
         )
         result = await self._session.execute(query)
         count = result.scalar() or 0

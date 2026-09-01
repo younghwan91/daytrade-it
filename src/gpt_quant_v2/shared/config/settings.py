@@ -27,13 +27,12 @@ from __future__ import annotations
 
 import re
 from datetime import time
-from enum import Enum
+from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Any, Literal
 
 from pydantic import (
-    AnyUrl,
     Field,
     PostgresDsn,
     RedisDsn,
@@ -44,7 +43,7 @@ from pydantic import (
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-class Environment(str, Enum):
+class Environment(StrEnum):
     """Application environment types."""
 
     DEV = "dev"
@@ -52,7 +51,7 @@ class Environment(str, Enum):
     PROD = "prod"
 
 
-class LogFormat(str, Enum):
+class LogFormat(StrEnum):
     """Supported logging formats."""
 
     JSON = "json"
@@ -60,7 +59,7 @@ class LogFormat(str, Enum):
     CONSOLE = "console"
 
 
-class BrokerType(str, Enum):
+class BrokerType(StrEnum):
     """Supported broker types."""
 
     PAPER = "paper"
@@ -91,7 +90,7 @@ class DatabaseSettings(BaseSettings):
     )
 
     url: PostgresDsn = Field(
-        default="postgresql+asyncpg://gptquant:gptquant@localhost:5432/gptquant",
+        default=PostgresDsn("postgresql+asyncpg://gptquant:gptquant@localhost:5432/gptquant"),
         description="PostgreSQL connection URL with asyncpg driver",
     )
     echo: bool = Field(
@@ -143,7 +142,7 @@ class RedisSettings(BaseSettings):
     )
 
     url: RedisDsn = Field(
-        default="redis://localhost:6379/0",
+        default=RedisDsn("redis://localhost:6379/0"),
         description="Redis connection URL",
     )
     max_connections: int = Field(
@@ -380,7 +379,7 @@ class TradingSettings(BaseSettings):
         raise ValueError(f"Cannot parse time from {type(v)}")
 
     @model_validator(mode="after")
-    def validate_window(self) -> "TradingSettings":
+    def validate_window(self) -> TradingSettings:
         """Ensure trading window end is after start."""
         if self.window_end <= self.window_start:
             raise ValueError("Trading window end must be after window start")
@@ -430,7 +429,7 @@ class BrokerSettings(BaseSettings):
         return v.rstrip("/")
 
     @model_validator(mode="after")
-    def validate_alpaca_credentials(self) -> "BrokerSettings":
+    def validate_alpaca_credentials(self) -> BrokerSettings:
         """Ensure Alpaca credentials are provided when using Alpaca broker."""
         if self.type == BrokerType.ALPACA:
             if not self.alpaca_api_key or not self.alpaca_api_key.get_secret_value():
@@ -603,10 +602,11 @@ class SecuritySettings(BaseSettings):
             if v.startswith("["):
                 import json
 
-                return json.loads(v)
+                parsed: list[str] = json.loads(v)
+                return parsed
             # Handle comma-separated string
             return [origin.strip() for origin in v.split(",")]
-        return v
+        return list(v)
 
 
 # =============================================================================
@@ -712,9 +712,7 @@ class Settings(BaseSettings):
             List of service names with missing API keys.
         """
         return [
-            service
-            for service, configured in self.validate_api_keys().items()
-            if not configured
+            service for service, configured in self.validate_api_keys().items() if not configured
         ]
 
 

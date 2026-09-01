@@ -2,46 +2,48 @@
 Unit Tests for Domain Events
 """
 
-import pytest
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from uuid import uuid4
+
+import pytest
+from pydantic import ValidationError
 
 from gpt_quant_v2.domain.events import (
     DomainEvent,
     NewsAnalyzed,
+    PositionUpdated,
     SignalGenerated,
     TradeExecuted,
-    PositionUpdated,
 )
 
 
 class TestDomainEvent:
     """Tests for base DomainEvent."""
-    
+
     def test_event_has_id(self):
         event = DomainEvent()
         assert event.event_id is not None
-    
+
     def test_event_has_timestamp(self):
         event = DomainEvent()
         assert event.occurred_at is not None
-    
+
     def test_event_type_set_to_class_name(self):
         event = DomainEvent()
         assert event.event_type == "DomainEvent"
-    
+
     def test_event_is_immutable(self):
         event = DomainEvent()
-        with pytest.raises(Exception):
+        with pytest.raises(ValidationError):
             event.event_type = "Modified"
-    
+
     def test_event_to_dict(self):
         event = DomainEvent()
         data = event.to_dict()
         assert "event_id" in data
         assert "event_type" in data
         assert "occurred_at" in data
-    
+
     def test_event_with_correlation_id(self):
         correlation_id = uuid4()
         event = DomainEvent()
@@ -51,7 +53,7 @@ class TestDomainEvent:
 
 class TestNewsAnalyzed:
     """Tests for NewsAnalyzed event."""
-    
+
     def test_news_analyzed_event(self):
         event = NewsAnalyzed(
             article_id=uuid4(),
@@ -68,7 +70,7 @@ class TestNewsAnalyzed:
 
 class TestSignalGenerated:
     """Tests for SignalGenerated event."""
-    
+
     def test_signal_generated_event(self):
         event = SignalGenerated(
             signal_id=uuid4(),
@@ -79,7 +81,7 @@ class TestSignalGenerated:
             predicted_return=5.0,
             predicted_drawdown=2.0,
             risk_reward_ratio=2.5,
-            expires_at=datetime.now(timezone.utc),
+            expires_at=datetime.now(UTC),
         )
         assert event.event_type == "SignalGenerated"
         assert event.direction == "BUY"
@@ -87,10 +89,10 @@ class TestSignalGenerated:
 
 class TestTradeExecuted:
     """Tests for TradeExecuted event."""
-    
+
     def test_trade_executed_event(self):
         from decimal import Decimal
-        
+
         event = TradeExecuted(
             trade_id=uuid4(),
             signal_id=uuid4(),
@@ -106,10 +108,10 @@ class TestTradeExecuted:
 
 class TestPositionUpdated:
     """Tests for PositionUpdated event."""
-    
+
     def test_position_updated_event(self):
         from decimal import Decimal
-        
+
         event = PositionUpdated(
             position_id=uuid4(),
             ticker="AAPL",

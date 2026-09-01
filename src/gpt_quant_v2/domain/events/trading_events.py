@@ -17,7 +17,7 @@ from .base import DomainEvent
 class NewsAnalyzed(DomainEvent):
     """
     Event emitted when a news article has been analyzed for sentiment.
-    
+
     Attributes:
         article_id: ID of the analyzed article
         ticker: Stock ticker the news relates to
@@ -26,7 +26,7 @@ class NewsAnalyzed(DomainEvent):
         confidence: Confidence in the sentiment analysis
         keywords: Key phrases extracted from the article
     """
-    
+
     article_id: UUID
     ticker: str
     sentiment_score: float = Field(ge=-1.0, le=1.0)
@@ -39,7 +39,7 @@ class NewsAnalyzed(DomainEvent):
 class SignalGenerated(DomainEvent):
     """
     Event emitted when a new trading signal is generated.
-    
+
     Attributes:
         signal_id: Unique identifier for the signal
         ticker: Stock ticker for the signal
@@ -51,7 +51,7 @@ class SignalGenerated(DomainEvent):
         risk_reward_ratio: Risk/reward ratio
         expires_at: When the signal expires
     """
-    
+
     signal_id: UUID
     ticker: str
     direction: Literal["BUY", "SELL"]
@@ -66,7 +66,7 @@ class SignalGenerated(DomainEvent):
 
 class SignalExpired(DomainEvent):
     """Event emitted when a trading signal expires without being executed."""
-    
+
     signal_id: UUID
     ticker: str
     reason: str = "timeout"
@@ -75,7 +75,7 @@ class SignalExpired(DomainEvent):
 class TradeExecuted(DomainEvent):
     """
     Event emitted when a trade is executed.
-    
+
     Attributes:
         trade_id: Unique identifier for the trade
         signal_id: ID of the signal that triggered this trade
@@ -87,7 +87,7 @@ class TradeExecuted(DomainEvent):
         fees: Trading fees
         broker_order_id: Order ID from the broker
     """
-    
+
     trade_id: UUID
     signal_id: UUID
     ticker: str
@@ -102,7 +102,7 @@ class TradeExecuted(DomainEvent):
 class TradeClosed(DomainEvent):
     """
     Event emitted when a trade position is closed.
-    
+
     Attributes:
         trade_id: ID of the original trade
         exit_price: Price at which the position was closed
@@ -111,7 +111,7 @@ class TradeClosed(DomainEvent):
         hold_duration_seconds: How long the position was held
         exit_reason: Why the position was closed
     """
-    
+
     trade_id: UUID
     ticker: str
     exit_price: Decimal
@@ -124,7 +124,7 @@ class TradeClosed(DomainEvent):
 class PositionUpdated(DomainEvent):
     """
     Event emitted when a position is updated.
-    
+
     Attributes:
         position_id: ID of the position
         ticker: Stock ticker
@@ -133,7 +133,7 @@ class PositionUpdated(DomainEvent):
         current_price: Current market price
         unrealized_pnl: Current unrealized P&L
     """
-    
+
     position_id: UUID
     ticker: str
     quantity: int
@@ -146,14 +146,14 @@ class PositionUpdated(DomainEvent):
 class RiskLimitBreached(DomainEvent):
     """
     Event emitted when a risk limit is breached.
-    
+
     Attributes:
         limit_type: Type of limit breached
         limit_value: The limit that was set
         actual_value: The actual value that breached it
         action_taken: What action was taken in response
     """
-    
+
     limit_type: Literal["DAILY_LOSS", "POSITION_SIZE", "TOTAL_EXPOSURE", "DRAWDOWN"]
     limit_value: Decimal
     actual_value: Decimal
@@ -163,7 +163,7 @@ class RiskLimitBreached(DomainEvent):
 
 class SystemHealthChanged(DomainEvent):
     """Event emitted when system health status changes."""
-    
+
     component: str
     previous_status: Literal["HEALTHY", "DEGRADED", "UNHEALTHY"]
     current_status: Literal["HEALTHY", "DEGRADED", "UNHEALTHY"]

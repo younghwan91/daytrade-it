@@ -1,7 +1,8 @@
 """Command and Query buses for CQRS pattern implementation."""
 
 import logging
-from typing import Any, Callable, Dict, List, Optional, Type, TypeVar
+from collections.abc import Callable
+from typing import Any, TypeVar
 
 from .base import Command, CommandHandler, Query, QueryHandler
 from .middleware import Middleware, NextHandler
@@ -30,12 +31,12 @@ class CommandBus:
 
     def __init__(self) -> None:
         """Initialize an empty command bus."""
-        self._handlers: Dict[Type[Command], CommandHandler] = {}
-        self._middleware: List[Middleware] = []
+        self._handlers: dict[type[Command], CommandHandler] = {}
+        self._middleware: list[Middleware] = []
 
     def register(
         self,
-        command_type: Type[TCommand],
+        command_type: type[TCommand],
         handler: CommandHandler[TCommand, Any],
     ) -> "CommandBus":
         """Register a handler for a command type.
@@ -51,9 +52,7 @@ class CommandBus:
             ValueError: If a handler is already registered for this command type.
         """
         if command_type in self._handlers:
-            raise ValueError(
-                f"Handler already registered for {command_type.__name__}"
-            )
+            raise ValueError(f"Handler already registered for {command_type.__name__}")
 
         self._handlers[command_type] = handler
         logger.debug(
@@ -143,7 +142,7 @@ class CommandBus:
 
         return handler
 
-    def is_registered(self, command_type: Type[Command]) -> bool:
+    def is_registered(self, command_type: type[Command]) -> bool:
         """Check if a handler is registered for a command type."""
         return command_type in self._handlers
 
@@ -165,12 +164,12 @@ class QueryBus:
 
     def __init__(self) -> None:
         """Initialize an empty query bus."""
-        self._handlers: Dict[Type[Query], QueryHandler] = {}
-        self._middleware: List[Middleware] = []
+        self._handlers: dict[type[Query], QueryHandler] = {}
+        self._middleware: list[Middleware] = []
 
     def register(
         self,
-        query_type: Type[TQuery],
+        query_type: type[TQuery],
         handler: QueryHandler[TQuery, Any],
     ) -> "QueryBus":
         """Register a handler for a query type.
@@ -186,9 +185,7 @@ class QueryBus:
             ValueError: If a handler is already registered for this query type.
         """
         if query_type in self._handlers:
-            raise ValueError(
-                f"Handler already registered for {query_type.__name__}"
-            )
+            raise ValueError(f"Handler already registered for {query_type.__name__}")
 
         self._handlers[query_type] = handler
         logger.debug(
@@ -265,6 +262,6 @@ class QueryBus:
 
         return handler
 
-    def is_registered(self, query_type: Type[Query]) -> bool:
+    def is_registered(self, query_type: type[Query]) -> bool:
         """Check if a handler is registered for a query type."""
         return query_type in self._handlers

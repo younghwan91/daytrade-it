@@ -333,9 +333,7 @@ class Cache:
             client = self._redis_client.client
 
             # Serialize all values
-            prefixed_mapping = {
-                self._make_key(k): self._serialize(v) for k, v in mapping.items()
-            }
+            prefixed_mapping = {self._make_key(k): self._serialize(v) for k, v in mapping.items()}
 
             async with client.pipeline(transaction=True) as pipe:
                 await pipe.mset(prefixed_mapping)

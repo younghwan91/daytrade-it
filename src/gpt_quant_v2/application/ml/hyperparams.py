@@ -72,10 +72,20 @@ class XGBoostParams:
     def from_dict(cls, params: dict[str, Any]) -> "XGBoostParams":
         """Create XGBoostParams from dictionary."""
         valid_keys = {
-            "n_estimators", "max_depth", "learning_rate", "subsample",
-            "colsample_bytree", "min_child_weight", "gamma", "reg_alpha",
-            "reg_lambda", "scale_pos_weight", "objective", "eval_metric",
-            "random_state", "n_jobs"
+            "n_estimators",
+            "max_depth",
+            "learning_rate",
+            "subsample",
+            "colsample_bytree",
+            "min_child_weight",
+            "gamma",
+            "reg_alpha",
+            "reg_lambda",
+            "scale_pos_weight",
+            "objective",
+            "eval_metric",
+            "random_state",
+            "n_jobs",
         }
         filtered = {k: v for k, v in params.items() if k in valid_keys}
         return cls(**filtered)

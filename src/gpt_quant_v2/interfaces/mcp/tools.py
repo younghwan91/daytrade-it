@@ -10,10 +10,11 @@ from __future__ import annotations
 
 import inspect
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any, Callable, TypeVar
+from typing import TYPE_CHECKING, Annotated, Any, TypeVar
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -286,13 +287,27 @@ class MCPToolContext:
         from gpt_quant_v2.shared.config import Settings
 
         context = cls(
-            tiingo_client=container.resolve(TiingoClient) if container.is_registered(TiingoClient) else None,
-            openai_client=container.resolve(OpenAIClient) if container.is_registered(OpenAIClient) else None,
-            signal_repository=container.resolve(SignalRepository) if container.is_registered(SignalRepository) else None,
-            trade_repository=container.resolve(TradeRepository) if container.is_registered(TradeRepository) else None,
-            news_repository=container.resolve(NewsRepository) if container.is_registered(NewsRepository) else None,
-            position_repository=container.resolve(PositionRepository) if container.is_registered(PositionRepository) else None,
-            broker=container.resolve(BrokerInterface) if container.is_registered(BrokerInterface) else None,
+            tiingo_client=container.resolve(TiingoClient)
+            if container.is_registered(TiingoClient)
+            else None,
+            openai_client=container.resolve(OpenAIClient)
+            if container.is_registered(OpenAIClient)
+            else None,
+            signal_repository=container.resolve(SignalRepository)
+            if container.is_registered(SignalRepository)
+            else None,
+            trade_repository=container.resolve(TradeRepository)
+            if container.is_registered(TradeRepository)
+            else None,
+            news_repository=container.resolve(NewsRepository)
+            if container.is_registered(NewsRepository)
+            else None,
+            position_repository=container.resolve(PositionRepository)
+            if container.is_registered(PositionRepository)
+            else None,
+            broker=container.resolve(BrokerInterface)
+            if container.is_registered(BrokerInterface)
+            else None,
             settings=container.resolve(Settings) if container.is_registered(Settings) else None,
         )
         cls.set_instance(context)
@@ -429,14 +444,18 @@ async def analyze_ticker(
         try:
             active_signals = await ctx.signal_repository.find_active(ticker=ticker)
             for sig in active_signals:
-                signals.append({
-                    "id": str(sig.id),
-                    "direction": sig.direction.value,
-                    "confidence": sig.confidence.value,
-                    "source": sig.source.value,
-                    "predicted_return": float(sig.predicted_return) if sig.predicted_return else None,
-                    "expires_at": sig.expires_at.isoformat(),
-                })
+                signals.append(
+                    {
+                        "id": str(sig.id),
+                        "direction": sig.direction.value,
+                        "confidence": sig.confidence.value,
+                        "source": sig.source.value,
+                        "predicted_return": float(sig.predicted_return)
+                        if sig.predicted_return
+                        else None,
+                        "expires_at": sig.expires_at.isoformat(),
+                    }
+                )
             ctx.update_last_signal_time()
         except Exception:
             pass
@@ -607,8 +626,12 @@ async def get_signals(
                     confidence=sig.confidence.value,
                     source=sig.source.value,
                     predicted_return=float(sig.predicted_return) if sig.predicted_return else None,
-                    predicted_drawdown=float(sig.predicted_drawdown) if sig.predicted_drawdown else None,
-                    risk_reward_ratio=float(sig.risk_reward_ratio) if sig.risk_reward_ratio else None,
+                    predicted_drawdown=float(sig.predicted_drawdown)
+                    if sig.predicted_drawdown
+                    else None,
+                    risk_reward_ratio=float(sig.risk_reward_ratio)
+                    if sig.risk_reward_ratio
+                    else None,
                     expires_at=sig.expires_at,
                     created_at=sig.created_at,
                 )
@@ -691,7 +714,9 @@ async def execute_trade(
         direction=signal.direction.value,
         quantity=quantity,
         price=result.filled_avg_price or Decimal("0"),
-        total_value=result.filled_avg_price * Decimal(str(quantity)) if result.filled_avg_price else Decimal("0"),
+        total_value=result.filled_avg_price * Decimal(str(quantity))
+        if result.filled_avg_price
+        else Decimal("0"),
         status=result.status.value,
         executed_at=result.filled_at or datetime.now(UTC),
     )
@@ -742,13 +767,17 @@ async def close_position(
     ctx.update_last_trade_time()
 
     return TradeResult(
-        trade_id=UUID(result.order_id) if result.order_id else UUID("00000000-0000-0000-0000-000000000000"),
+        trade_id=UUID(result.order_id)
+        if result.order_id
+        else UUID("00000000-0000-0000-0000-000000000000"),
         signal_id=None,
         ticker=ticker,
         direction=side.value.upper(),
         quantity=close_qty,
         price=result.filled_avg_price or Decimal("0"),
-        total_value=result.filled_avg_price * Decimal(str(close_qty)) if result.filled_avg_price else Decimal("0"),
+        total_value=result.filled_avg_price * Decimal(str(close_qty))
+        if result.filled_avg_price
+        else Decimal("0"),
         status=result.status.value,
         executed_at=result.filled_at or datetime.now(UTC),
     )
@@ -776,16 +805,18 @@ async def get_portfolio() -> Portfolio:
     total_realized_pnl = Decimal("0")
 
     for pos in positions:
-        position_list.append({
-            "ticker": pos.ticker,
-            "quantity": int(pos.quantity),
-            "side": pos.side,
-            "average_price": float(pos.average_price),
-            "current_price": float(pos.current_price) if pos.current_price else None,
-            "market_value": float(pos.market_value) if pos.market_value else None,
-            "unrealized_pnl": float(pos.unrealized_pnl) if pos.unrealized_pnl else None,
-            "realized_pnl": float(pos.realized_pnl),
-        })
+        position_list.append(
+            {
+                "ticker": pos.ticker,
+                "quantity": int(pos.quantity),
+                "side": pos.side,
+                "average_price": float(pos.average_price),
+                "current_price": float(pos.current_price) if pos.current_price else None,
+                "market_value": float(pos.market_value) if pos.market_value else None,
+                "unrealized_pnl": float(pos.unrealized_pnl) if pos.unrealized_pnl else None,
+                "realized_pnl": float(pos.realized_pnl),
+            }
+        )
         if pos.unrealized_pnl:
             total_unrealized_pnl += pos.unrealized_pnl
         total_realized_pnl += pos.realized_pnl
@@ -857,7 +888,9 @@ async def get_trade_history(
     description="Run a backtest on a trading strategy",
 )
 async def backtest(
-    strategy: Annotated[str, "Strategy name (news_momentum, technical, combined)"] = "news_momentum",
+    strategy: Annotated[
+        str, "Strategy name (news_momentum, technical, combined)"
+    ] = "news_momentum",
     start_date: Annotated[str | None, "Start date (YYYY-MM-DD)"] = None,
     end_date: Annotated[str | None, "End date (YYYY-MM-DD)"] = None,
     initial_capital: Annotated[float, "Starting capital in USD"] = 100000,
@@ -874,10 +907,7 @@ async def backtest(
     else:
         start_dt = datetime.now(UTC) - timedelta(days=365)
 
-    if end_date:
-        end_dt = datetime.strptime(end_date, "%Y-%m-%d")
-    else:
-        end_dt = datetime.now(UTC)
+    end_dt = datetime.strptime(end_date, "%Y-%m-%d") if end_date else datetime.now(UTC)
 
     # This is a placeholder implementation
     # In production, this would connect to a backtesting engine
@@ -986,7 +1016,6 @@ async def train_model(
 
     # This would connect to the actual training pipeline
     # Placeholder implementation
-    from gpt_quant_v2.application.ml.trainer import TrainedModel
 
     metrics = {
         "accuracy": 0.72,
@@ -1021,10 +1050,7 @@ async def list_models() -> list[ModelInfo]:
     results: list[ModelInfo] = []
 
     # Check for models in the models directory
-    if ctx.settings:
-        model_dir = Path(ctx.settings.ml.model_dir)
-    else:
-        model_dir = Path("models")
+    model_dir = Path(ctx.settings.ml.model_dir) if ctx.settings else Path("models")
 
     if model_dir.exists():
         for model_path in model_dir.iterdir():
@@ -1042,7 +1068,9 @@ async def list_models() -> list[ModelInfo]:
                                 model_type="XGBClassifier",
                                 metrics=metadata.get("metrics", {}),
                                 feature_count=len(metadata.get("feature_names", [])),
-                                created_at=datetime.fromisoformat(metadata.get("created_at", datetime.now(UTC).isoformat())),
+                                created_at=datetime.fromisoformat(
+                                    metadata.get("created_at", datetime.now(UTC).isoformat())
+                                ),
                                 is_active=False,
                             )
                         )
@@ -1064,7 +1092,7 @@ def get_mcp_tools() -> list[dict]:
     """
     tools = []
 
-    for name, obj in globals().items():
+    for _name, obj in globals().items():
         if not callable(obj) or not hasattr(obj, "_mcp_tool"):
             continue
 
@@ -1096,11 +1124,13 @@ def get_mcp_tools() -> list[dict]:
 
             params.append(param_info)
 
-        tools.append({
-            "name": obj._mcp_name,
-            "description": obj._mcp_description,
-            "parameters": params,
-        })
+        tools.append(
+            {
+                "name": obj._mcp_name,
+                "description": obj._mcp_description,
+                "parameters": params,
+            }
+        )
 
     return tools
 

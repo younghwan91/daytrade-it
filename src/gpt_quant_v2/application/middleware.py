@@ -3,7 +3,8 @@
 import logging
 import time
 from abc import ABC, abstractmethod
-from typing import Any, Awaitable, Callable, TypeVar, Union
+from collections.abc import Awaitable, Callable
+from typing import Any, TypeVar
 
 from pydantic import ValidationError
 
@@ -11,7 +12,7 @@ from .base import Command, Query
 
 logger = logging.getLogger(__name__)
 
-TMessage = TypeVar("TMessage", bound=Union[Command, Query])
+TMessage = TypeVar("TMessage", bound=Command | Query)
 TResult = TypeVar("TResult")
 
 NextHandler = Callable[[Any], Awaitable[Any]]
@@ -28,7 +29,7 @@ class Middleware(ABC):
     @abstractmethod
     async def __call__(
         self,
-        message: Union[Command, Query],
+        message: Command | Query,
         next_handler: NextHandler,
     ) -> Any:
         """Process the message and call the next handler in the chain.
@@ -60,7 +61,7 @@ class LoggingMiddleware(Middleware):
 
     async def __call__(
         self,
-        message: Union[Command, Query],
+        message: Command | Query,
         next_handler: NextHandler,
     ) -> Any:
         """Log the message and delegate to the next handler."""
@@ -103,7 +104,7 @@ class ValidationMiddleware(Middleware):
 
     async def __call__(
         self,
-        message: Union[Command, Query],
+        message: Command | Query,
         next_handler: NextHandler,
     ) -> Any:
         """Validate the message and delegate to the next handler."""
@@ -142,7 +143,7 @@ class TimingMiddleware(Middleware):
 
     async def __call__(
         self,
-        message: Union[Command, Query],
+        message: Command | Query,
         next_handler: NextHandler,
     ) -> Any:
         """Measure execution time and delegate to the next handler."""

@@ -7,13 +7,11 @@ Handles backtesting of trading strategies against historical data.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
 import structlog
-
-from gpt_quant_v2.domain.entities.signal import SignalDirection
 
 if TYPE_CHECKING:
     from gpt_quant_v2.infrastructure.external.polygon_client import PolygonClient
@@ -156,9 +154,7 @@ class BacktestHandler:
             end_date=command.end_date,
         )
 
-        final_capital = (
-            equity_curve[-1]["equity"] if equity_curve else command.initial_capital
-        )
+        final_capital = equity_curve[-1]["equity"] if equity_curve else command.initial_capital
 
         log.info(
             "Backtest complete",
@@ -249,10 +245,9 @@ class BacktestHandler:
                         positions=positions,
                     )
 
-                    if trade:
-                        if trade.pnl != 0:  # Closing trade
-                            capital += float(trade.pnl)
-                            trades.append(trade)
+                    if trade and trade.pnl != 0:  # Closing trade
+                        capital += float(trade.pnl)
+                        trades.append(trade)
 
             # Calculate portfolio value
             portfolio_value = capital
@@ -261,9 +256,7 @@ class BacktestHandler:
                     portfolio_value += pos["quantity"] * day_prices[ticker]["close"]
 
             # Calculate drawdown
-            peak = max(
-                [e["equity"] for e in equity_curve] + [float(initial_capital)]
-            )
+            peak = max([e["equity"] for e in equity_curve] + [float(initial_capital)])
             drawdown = (peak - portfolio_value) / peak if peak > 0 else 0
 
             equity_curve.append(
@@ -279,9 +272,7 @@ class BacktestHandler:
         for ticker, pos in list(positions.items()):
             if price_data.get(ticker):
                 last_bar = price_data[ticker][-1]
-                close_price = float(
-                    last_bar.get("close", last_bar.get("c", pos["entry_price"]))
-                )
+                close_price = float(last_bar.get("close", last_bar.get("c", pos["entry_price"])))
                 close_date = datetime.now(UTC)
 
                 pnl = (close_price - pos["entry_price"]) * pos["quantity"]
@@ -491,19 +482,15 @@ class BacktestHandler:
 
                 avg_return = statistics.mean(daily_returns)
                 std_return = statistics.stdev(daily_returns) if len(daily_returns) > 1 else 1
-                sharpe = (avg_return * 252) / (std_return * (252 ** 0.5)) if std_return > 0 else 0
+                sharpe = (avg_return * 252) / (std_return * (252**0.5)) if std_return > 0 else 0
 
                 # Sortino (downside deviation)
                 negative_returns = [r for r in daily_returns if r < 0]
                 downside_std = (
-                    statistics.stdev(negative_returns)
-                    if len(negative_returns) > 1
-                    else std_return
+                    statistics.stdev(negative_returns) if len(negative_returns) > 1 else std_return
                 )
                 sortino = (
-                    (avg_return * 252) / (downside_std * (252 ** 0.5))
-                    if downside_std > 0
-                    else 0
+                    (avg_return * 252) / (downside_std * (252**0.5)) if downside_std > 0 else 0
                 )
             else:
                 sharpe = 0

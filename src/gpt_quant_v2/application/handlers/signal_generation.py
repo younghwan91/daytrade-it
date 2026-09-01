@@ -201,8 +201,7 @@ class SignalGenerationHandler:
             predicted_return=combined.get("predicted_return"),
             predicted_drawdown=combined.get("predicted_drawdown"),
             risk_reward_ratio=combined.get("risk_reward_ratio"),
-            expires_at=datetime.now(UTC)
-            + timedelta(hours=self._config.signal_expiry_hours),
+            expires_at=datetime.now(UTC) + timedelta(hours=self._config.signal_expiry_hours),
             metadata={
                 "components": components,
                 "generated_at": datetime.now(UTC).isoformat(),
@@ -256,9 +255,7 @@ class SignalGenerationHandler:
 
             # Calculate average sentiment
             sentiments = [
-                a.sentiment.score
-                for a in articles
-                if a.sentiment and a.sentiment.score is not None
+                a.sentiment.score for a in articles if a.sentiment and a.sentiment.score is not None
             ]
 
             if not sentiments:
@@ -315,7 +312,7 @@ class SignalGenerationHandler:
             vol_ratio = recent_vol / avg_vol if avg_vol > 0 else 1
 
             # Momentum score (weighted average of returns)
-            momentum = (returns_1m * 0.5 + returns_5m * 0.3 + returns_10m * 0.2)
+            momentum = returns_1m * 0.5 + returns_5m * 0.3 + returns_10m * 0.2
 
             # Higher volume = higher confidence
             confidence = min(vol_ratio, 2.0) / 2.0  # Cap at 100%

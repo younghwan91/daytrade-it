@@ -107,7 +107,7 @@ async def wait_for_auth_message(
             logger.debug("Client authenticated via message")
             return f"user_{token[:8]}" if len(token) >= 8 else f"user_{token}"
 
-    except asyncio.TimeoutError:
+    except TimeoutError:
         logger.debug("Auth message timeout")
     except Exception as e:
         logger.warning("Error receiving auth message: %s", e)
@@ -171,11 +171,13 @@ async def websocket_endpoint(
         await manager.connect(websocket, resolved_client_id)
 
         # Send welcome message
-        await websocket.send_json({
-            "type": "connected",
-            "client_id": resolved_client_id,
-            "message": "Connected to GPT Quant WebSocket",
-        })
+        await websocket.send_json(
+            {
+                "type": "connected",
+                "client_id": resolved_client_id,
+                "message": "Connected to GPT Quant WebSocket",
+            }
+        )
 
         # If no token was provided via query, wait for auth message
         if not token and not client_id:
@@ -185,10 +187,12 @@ async def websocket_endpoint(
                 await manager.disconnect(resolved_client_id)
                 resolved_client_id = auth_client_id
                 await manager.connect(websocket, resolved_client_id)
-                await websocket.send_json({
-                    "type": "auth_success",
-                    "client_id": resolved_client_id,
-                })
+                await websocket.send_json(
+                    {
+                        "type": "auth_success",
+                        "client_id": resolved_client_id,
+                    }
+                )
 
         # Main message loop
         while True:
@@ -203,14 +207,16 @@ async def websocket_endpoint(
 
             except ValueError as e:
                 # Invalid JSON
-                await websocket.send_json({
-                    "type": "error",
-                    "error": f"Invalid message format: {e}",
-                })
+                await websocket.send_json(
+                    {
+                        "type": "error",
+                        "error": f"Invalid message format: {e}",
+                    }
+                )
 
     except WebSocketDisconnect:
         logger.info("Client %s disconnected", resolved_client_id)
-    except Exception as e:
+    except Exception:
         logger.exception("WebSocket error for client %s", resolved_client_id)
     finally:
         await manager.disconnect(resolved_client_id)

@@ -5,7 +5,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import and_, func, select
+from sqlalchemy import Integer, and_, func, select
 
 from gpt_quant_v2.domain.entities.news import NewsArticle
 from gpt_quant_v2.domain.entities.position import Position
@@ -17,8 +17,8 @@ from gpt_quant_v2.infrastructure.persistence.models import (
     NewsArticleModel,
     PositionModel,
     PriceBarModel,
-    TradingSignalModel,
     TradeModel,
+    TradingSignalModel,
 )
 
 
@@ -165,8 +165,7 @@ class SignalRepository(BaseRepository[TradingSignal, TradingSignalModel]):
         query = (
             select(TradingSignalModel)
             .where(
-                (TradingSignalModel.expires_at.is_(None))
-                | (TradingSignalModel.expires_at > now)
+                (TradingSignalModel.expires_at.is_(None)) | (TradingSignalModel.expires_at > now)
             )
             .order_by(TradingSignalModel.created_at.desc())
         )
@@ -196,8 +195,7 @@ class SignalRepository(BaseRepository[TradingSignal, TradingSignalModel]):
         if not include_expired:
             now = datetime.now(UTC)
             query = query.where(
-                (TradingSignalModel.expires_at.is_(None))
-                | (TradingSignalModel.expires_at > now)
+                (TradingSignalModel.expires_at.is_(None)) | (TradingSignalModel.expires_at > now)
             )
 
         query = query.order_by(TradingSignalModel.created_at.desc())

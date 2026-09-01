@@ -147,9 +147,7 @@ class FeatureEngineer:
 
         features["hour_of_day"] = float(published_at.hour)
         features["day_of_week"] = float(published_at.weekday())
-        features["time_since_market_open"] = self._calculate_time_since_market_open(
-            published_at
-        )
+        features["time_since_market_open"] = self._calculate_time_since_market_open(published_at)
 
         # Keyword counts
         content_lower = article.content.lower()
@@ -157,9 +155,7 @@ class FeatureEngineer:
         combined_text = f"{title_lower} {content_lower}"
 
         for keyword in self.keywords:
-            features[f"keyword_count_{keyword}"] = float(
-                combined_text.count(keyword.lower())
-            )
+            features[f"keyword_count_{keyword}"] = float(combined_text.count(keyword.lower()))
 
         return features
 

@@ -78,7 +78,9 @@ def _get_console_processors() -> list[Processor]:
         *_get_shared_processors(),
         structlog.processors.format_exc_info,
         _add_caller_info,
-        structlog.dev.ConsoleRenderer(colors=True, exception_formatter=structlog.dev.plain_traceback),
+        structlog.dev.ConsoleRenderer(
+            colors=True, exception_formatter=structlog.dev.plain_traceback
+        ),
     ]
 
 
@@ -140,6 +142,7 @@ def configure_logging(
     )
 
     # Create formatter with appropriate renderer
+    renderer: structlog.typing.Processor
     if format == "json":
         renderer = structlog.processors.JSONRenderer()
     else:
@@ -315,7 +318,7 @@ class LoggingMiddleware:
         self.app = app
         self.logger = get_logger("gpt_quant_v2.middleware")
 
-    async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
@@ -326,7 +329,9 @@ class LoggingMiddleware:
         request = Request(scope, receive)
 
         # Extract or generate correlation ID
-        correlation_id = request.headers.get(self.CORRELATION_ID_HEADER) or generate_correlation_id()
+        correlation_id = (
+            request.headers.get(self.CORRELATION_ID_HEADER) or generate_correlation_id()
+        )
 
         # Set correlation ID in context
         token = correlation_id_ctx.set(correlation_id)
@@ -342,13 +347,15 @@ class LoggingMiddleware:
         # Track response status
         response_status: int | None = None
 
-        async def send_wrapper(message: dict) -> None:
+        async def send_wrapper(message: dict[str, Any]) -> None:
             nonlocal response_status
             if message["type"] == "http.response.start":
                 response_status = message["status"]
                 # Add correlation ID to response headers
                 headers = list(message.get("headers", []))
-                headers.append((self.CORRELATION_ID_HEADER.lower().encode(), correlation_id.encode()))
+                headers.append(
+                    (self.CORRELATION_ID_HEADER.lower().encode(), correlation_id.encode())
+                )
                 message["headers"] = headers
             await send(message)
 

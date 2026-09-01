@@ -10,24 +10,24 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
-from enum import Enum
+from enum import StrEnum
 
 
-class OrderType(str, Enum):
+class OrderType(StrEnum):
     """Order type enumeration."""
 
     MARKET = "market"
     LIMIT = "limit"
 
 
-class OrderSide(str, Enum):
+class OrderSide(StrEnum):
     """Order side enumeration."""
 
     BUY = "buy"
     SELL = "sell"
 
 
-class OrderStatusEnum(str, Enum):
+class OrderStatusEnum(StrEnum):
     """Order status enumeration."""
 
     PENDING = "pending"
@@ -201,7 +201,11 @@ class OrderResult:
     @property
     def is_active(self) -> bool:
         """Check if order is still active (pending or partial)."""
-        return self.status in (OrderStatusEnum.PENDING, OrderStatusEnum.SUBMITTED, OrderStatusEnum.PARTIAL)
+        return self.status in (
+            OrderStatusEnum.PENDING,
+            OrderStatusEnum.SUBMITTED,
+            OrderStatusEnum.PARTIAL,
+        )
 
 
 @dataclass

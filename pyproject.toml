@@ -82,6 +82,18 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/gpt_quant_v2"]
 
+# 타입 검사가 켜진 적이 없던 레포다. domain·shared 는 strict 로 통과하고,
+# 아래 세 계층은 미완성 코드가 152건의 오류를 낸다(없는 이름 import, 존재하지
+# 않는 메서드 호출 등). 검사를 통째로 끄는 대신 계층별로 막아두고, 정리되는
+# 대로 한 줄씩 지우면 된다.
+[[tool.mypy.overrides]]
+module = [
+    "gpt_quant_v2.application.*",
+    "gpt_quant_v2.infrastructure.*",
+    "gpt_quant_v2.interfaces.*",
+]
+ignore_errors = true
+
 [tool.ruff]
 target-version = "py312"
 line-length = 100
@@ -103,6 +115,13 @@ ignore = [
     "E501",   # line too long (handled by formatter)
     "B008",   # do not perform function calls in argument defaults
 ]
+
+[tool.ruff.lint.per-file-ignores]
+# FastAPI·MCP 의 인자는 프레임워크가 주입한다(Depends/Query/Body). 함수 본문에서
+# 직접 안 쓰여도 시그니처에 있어야 하므로 ARG 는 이 계층에서 오탐이다.
+"src/gpt_quant_v2/interfaces/**" = ["ARG001", "ARG002"]
+"src/gpt_quant_v2/application/handlers/**" = ["ARG001", "ARG002"]
+"tests/**" = ["ARG001", "ARG002"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["gpt_quant_v2"]

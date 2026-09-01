@@ -268,9 +268,9 @@ class OpenAIClient:
             try:
                 if reset_str.endswith("s"):
                     seconds = float(reset_str[:-1])
-                    self._rate_limit_state.reset_requests_at = datetime.now(
-                        UTC
-                    ) + __import__("datetime").timedelta(seconds=seconds)
+                    self._rate_limit_state.reset_requests_at = datetime.now(UTC) + __import__(
+                        "datetime"
+                    ).timedelta(seconds=seconds)
             except (ValueError, TypeError):
                 pass
 
@@ -333,7 +333,10 @@ class OpenAIClient:
         # Use structured outputs via tools
         if tools:
             payload["tools"] = tools
-            payload["tool_choice"] = {"type": "function", "function": {"name": tools[0]["function"]["name"]}}
+            payload["tool_choice"] = {
+                "type": "function",
+                "function": {"name": tools[0]["function"]["name"]},
+            }
 
         logger.debug(
             "Making OpenAI request",

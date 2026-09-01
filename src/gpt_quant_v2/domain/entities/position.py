@@ -3,7 +3,7 @@
 from datetime import datetime
 from decimal import Decimal
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 
 from gpt_quant_v2.domain.entities.base import Entity
 from gpt_quant_v2.domain.value_objects import Ticker
@@ -22,11 +22,23 @@ class Position(Entity):
     """
 
     ticker: Ticker
-    quantity: Decimal = Field(ne=0)
+    quantity: Decimal
     average_price: Decimal = Field(gt=0)
     current_price: Decimal | None = Field(default=None, gt=0)
     unrealized_pnl: Decimal | None = Field(default=None)
     opened_at: datetime
+
+    @field_validator("quantity")
+    @classmethod
+    def quantity_must_not_be_zero(cls, v: Decimal) -> Decimal:
+        """수량 0 인 포지션은 존재할 수 없다.
+
+        pydantic v2 의 Field 에는 `ne` 가 없다. `Field(ne=0)` 은 조용히 무시돼
+        제약이 전혀 걸리지 않았다(경고만 났다). 검증기로 되살린다.
+        """
+        if v == 0:
+            raise ValueError("quantity must not be zero")
+        return v
 
     @model_validator(mode="after")
     def compute_unrealized_pnl(self) -> "Position":

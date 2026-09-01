@@ -3,10 +3,10 @@
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Any, Optional
+from typing import Any
 
 from gpt_quant_v2.domain.entities import NewsArticle, SignalDirection, SignalSource, TradingSignal
-from gpt_quant_v2.domain.value_objects import Confidence, Sentiment, SentimentLabel, Ticker
+from gpt_quant_v2.domain.value_objects import Confidence, Sentiment, Ticker
 
 
 @dataclass(frozen=True)
@@ -47,7 +47,7 @@ class SignalGenerator:
         self,
         article: NewsArticle,
         sentiment: Sentiment,
-    ) -> Optional[TradingSignal]:
+    ) -> TradingSignal | None:
         """Generate a trading signal from news article and sentiment.
 
         Args:
@@ -88,9 +88,7 @@ class SignalGenerator:
 
         # Calculate risk/reward
         risk_reward = (
-            abs(predicted_return / predicted_drawdown)
-            if predicted_drawdown != 0
-            else Decimal("0")
+            abs(predicted_return / predicted_drawdown) if predicted_drawdown != 0 else Decimal("0")
         )
 
         return TradingSignal(
@@ -115,7 +113,7 @@ class SignalGenerator:
     def generate_from_ml_prediction(
         self,
         prediction: dict[str, Any],
-    ) -> Optional[TradingSignal]:
+    ) -> TradingSignal | None:
         """Generate a trading signal from ML model prediction.
 
         Expected prediction format:
@@ -157,9 +155,12 @@ class SignalGenerator:
 
         # Calculate risk/reward if metrics provided
         risk_reward: Decimal | None = None
-        if predicted_return is not None and predicted_drawdown is not None:
-            if predicted_drawdown < 0:
-                risk_reward = Decimal(str(abs(predicted_return / predicted_drawdown)))
+        if (
+            predicted_return is not None
+            and predicted_drawdown is not None
+            and predicted_drawdown < 0
+        ):
+            risk_reward = Decimal(str(abs(predicted_return / predicted_drawdown)))
 
         return TradingSignal(
             ticker=ticker,
@@ -180,7 +181,7 @@ class SignalGenerator:
     def combine_signals(
         self,
         signals: list[TradingSignal],
-    ) -> Optional[TradingSignal]:
+    ) -> TradingSignal | None:
         """Combine multiple signals into a single composite signal.
 
         Uses confidence-weighted averaging to combine signals for the same ticker.
@@ -230,10 +231,18 @@ class SignalGenerator:
 
         # Calculate weighted average returns and drawdowns
         weighted_return = self._weighted_average(
-            [(s.predicted_return, s.confidence.value) for s in aligned_signals if s.predicted_return]
+            [
+                (s.predicted_return, s.confidence.value)
+                for s in aligned_signals
+                if s.predicted_return
+            ]
         )
         weighted_drawdown = self._weighted_average(
-            [(s.predicted_drawdown, s.confidence.value) for s in aligned_signals if s.predicted_drawdown]
+            [
+                (s.predicted_drawdown, s.confidence.value)
+                for s in aligned_signals
+                if s.predicted_drawdown
+            ]
         )
 
         # Calculate combined risk/reward

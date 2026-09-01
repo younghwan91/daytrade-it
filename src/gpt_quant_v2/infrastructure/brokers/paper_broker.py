@@ -376,9 +376,7 @@ class PaperBroker(BrokerInterface):
         commission = quantity * self._config.commission_per_share
         return max(commission, self._config.min_commission)
 
-    def _check_limit_fill(
-        self, order: Order, current_price: Decimal
-    ) -> dict[str, bool | Decimal]:
+    def _check_limit_fill(self, order: Order, current_price: Decimal) -> dict[str, bool | Decimal]:
         """Check if a limit order should be filled.
 
         Returns dict with 'can_fill' bool and 'fill_price' if fillable.
@@ -400,9 +398,7 @@ class PaperBroker(BrokerInterface):
 
         return {"can_fill": False, "fill_price": Decimal("0")}
 
-    def _execute_fill(
-        self, order: Order, fill_price: Decimal, commission: Decimal
-    ) -> None:
+    def _execute_fill(self, order: Order, fill_price: Decimal, commission: Decimal) -> None:
         """Execute a fill by updating positions and cash."""
         ticker = order.ticker
         quantity = order.quantity

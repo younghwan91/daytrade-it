@@ -15,8 +15,8 @@ from gpt_quant_v2.infrastructure.persistence.models import (
     NewsArticleModel,
     PositionModel,
     PriceBarModel,
-    TradingSignalModel,
     TradeModel,
+    TradingSignalModel,
 )
 from gpt_quant_v2.infrastructure.persistence.repositories import (
     NewsRepository,

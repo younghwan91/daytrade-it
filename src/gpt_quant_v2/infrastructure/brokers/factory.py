@@ -55,17 +55,12 @@ def create_broker(
     if broker_type == "paper":
         return _create_paper_broker(config, **kwargs)
     elif broker_type == "alpaca":
-        raise BrokerFactoryError(
-            "Alpaca broker not yet implemented. Use 'paper' for testing."
-        )
+        raise BrokerFactoryError("Alpaca broker not yet implemented. Use 'paper' for testing.")
     elif broker_type == "ibkr":
-        raise BrokerFactoryError(
-            "IBKR broker not yet implemented. Use 'paper' for testing."
-        )
+        raise BrokerFactoryError("IBKR broker not yet implemented. Use 'paper' for testing.")
     else:
         raise BrokerFactoryError(
-            f"Unknown broker type: {broker_type}. "
-            f"Supported types: paper, alpaca, ibkr"
+            f"Unknown broker type: {broker_type}. Supported types: paper, alpaca, ibkr"
         )
 
 

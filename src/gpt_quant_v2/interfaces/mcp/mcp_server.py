@@ -20,28 +20,16 @@ import asyncio
 import json
 import sys
 import traceback
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import IntEnum
-from typing import Any, Callable, Coroutine
-from uuid import uuid4
+from typing import Any
 
 from gpt_quant_v2.interfaces.mcp.tools import (
     MCPToolContext,
-    analyze_ticker,
-    backtest,
-    close_position,
-    execute_trade,
     get_mcp_tools,
-    get_news,
-    get_portfolio,
-    get_price_history,
-    get_signals,
-    get_system_status,
     get_tool_by_name,
-    get_trade_history,
-    list_models,
-    train_model,
 )
 from gpt_quant_v2.shared.logging import get_logger
 
@@ -195,7 +183,9 @@ class MCPServer:
         writer_transport, writer_protocol = await asyncio.get_event_loop().connect_write_pipe(
             asyncio.streams.FlowControlMixin, sys.stdout
         )
-        writer = asyncio.StreamWriter(writer_transport, writer_protocol, reader, asyncio.get_event_loop())
+        writer = asyncio.StreamWriter(
+            writer_transport, writer_protocol, reader, asyncio.get_event_loop()
+        )
 
         try:
             while True:
@@ -420,15 +410,17 @@ class MCPServer:
                 if param.get("required", False):
                     required.append(param["name"])
 
-            mcp_tools.append({
-                "name": tool["name"],
-                "description": tool["description"],
-                "inputSchema": {
-                    "type": "object",
-                    "properties": properties,
-                    "required": required,
-                },
-            })
+            mcp_tools.append(
+                {
+                    "name": tool["name"],
+                    "description": tool["description"],
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": properties,
+                        "required": required,
+                    },
+                }
+            )
 
         return {"tools": mcp_tools}
 

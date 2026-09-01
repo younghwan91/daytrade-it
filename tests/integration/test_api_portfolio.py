@@ -16,10 +16,10 @@ from httpx import AsyncClient
 async def test_get_portfolio_empty(async_client: AsyncClient) -> None:
     """Test getting portfolio overview returns zero values when empty."""
     response = await async_client.get("/api/v1/portfolio")
-    
+
     assert response.status_code == 200
     data = response.json()
-    
+
     # Verify portfolio structure with zero values
     assert data["total_value"] == "0"
     assert data["cash_balance"] == "0"
@@ -40,10 +40,10 @@ async def test_get_portfolio_empty(async_client: AsyncClient) -> None:
 async def test_get_positions_empty(async_client: AsyncClient) -> None:
     """Test listing positions returns empty paginated response when no positions exist."""
     response = await async_client.get("/api/v1/portfolio/positions")
-    
+
     assert response.status_code == 200
     data = response.json()
-    
+
     assert data["items"] == []
     assert data["total"] == 0
     assert data["page"] == 1
@@ -60,10 +60,10 @@ async def test_get_positions_with_pagination(async_client: AsyncClient) -> None:
         "/api/v1/portfolio/positions",
         params={"page": 1, "page_size": 10},
     )
-    
+
     assert response.status_code == 200
     data = response.json()
-    
+
     assert data["page"] == 1
     assert data["page_size"] == 10
 
@@ -75,10 +75,10 @@ async def test_get_positions_with_ticker_filter(async_client: AsyncClient) -> No
         "/api/v1/portfolio/positions",
         params={"ticker": "AAPL"},
     )
-    
+
     assert response.status_code == 200
     data = response.json()
-    
+
     assert "items" in data
     assert "total" in data
 
@@ -90,10 +90,10 @@ async def test_get_positions_with_side_filter_long(async_client: AsyncClient) ->
         "/api/v1/portfolio/positions",
         params={"side": "long"},
     )
-    
+
     assert response.status_code == 200
     data = response.json()
-    
+
     assert "items" in data
 
 
@@ -104,10 +104,10 @@ async def test_get_positions_with_side_filter_short(async_client: AsyncClient) -
         "/api/v1/portfolio/positions",
         params={"side": "short"},
     )
-    
+
     assert response.status_code == 200
     data = response.json()
-    
+
     assert "items" in data
 
 
@@ -118,7 +118,7 @@ async def test_get_positions_invalid_side(async_client: AsyncClient) -> None:
         "/api/v1/portfolio/positions",
         params={"side": "invalid"},
     )
-    
+
     assert response.status_code == 422
 
 
@@ -129,7 +129,7 @@ async def test_get_positions_invalid_page(async_client: AsyncClient) -> None:
         "/api/v1/portfolio/positions",
         params={"page": 0},
     )
-    
+
     assert response.status_code == 422
 
 
@@ -137,10 +137,10 @@ async def test_get_positions_invalid_page(async_client: AsyncClient) -> None:
 async def test_get_performance_metrics_empty(async_client: AsyncClient) -> None:
     """Test getting performance metrics returns zero/null values when empty."""
     response = await async_client.get("/api/v1/portfolio/performance")
-    
+
     assert response.status_code == 200
     data = response.json()
-    
+
     # Verify performance structure
     assert data["total_return"] == "0"
     assert data["total_return_pct"] == 0.0
@@ -168,10 +168,10 @@ async def test_get_performance_metrics_with_date_range(async_client: AsyncClient
             "date_to": "2024-12-31T23:59:59Z",
         },
     )
-    
+
     assert response.status_code == 200
     data = response.json()
-    
+
     assert data["period_start"] == "2024-01-01T00:00:00Z"
     assert data["period_end"] == "2024-12-31T23:59:59Z"
 
@@ -183,10 +183,10 @@ async def test_get_performance_metrics_with_benchmark(async_client: AsyncClient)
         "/api/v1/portfolio/performance",
         params={"benchmark": "SPY"},
     )
-    
+
     assert response.status_code == 200
     data = response.json()
-    
+
     assert "beta" in data
     assert "alpha" in data
 
@@ -198,7 +198,7 @@ async def test_close_position_not_found(async_client: AsyncClient) -> None:
         "/api/v1/portfolio/positions/AAPL/close",
         json={},
     )
-    
+
     assert response.status_code == 404
     data = response.json()
     assert "not found" in data["detail"].lower() or "no open position" in data["detail"].lower()
@@ -211,7 +211,7 @@ async def test_close_position_with_quantity(async_client: AsyncClient) -> None:
         "/api/v1/portfolio/positions/TSLA/close",
         json={"quantity": "50"},
     )
-    
+
     # Should return 404 since no position exists
     assert response.status_code == 404
 
@@ -223,7 +223,7 @@ async def test_close_position_with_limit_price(async_client: AsyncClient) -> Non
         "/api/v1/portfolio/positions/GOOG/close",
         json={"limit_price": "150.00"},
     )
-    
+
     # Should return 404 since no position exists
     assert response.status_code == 404
 
@@ -235,7 +235,7 @@ async def test_close_position_invalid_ticker(async_client: AsyncClient) -> None:
         "/api/v1/portfolio/positions/TOOLONG123/close",
         json={},
     )
-    
+
     assert response.status_code == 400
     data = response.json()
     assert "invalid ticker" in data["detail"].lower()
@@ -248,7 +248,7 @@ async def test_close_position_invalid_quantity(async_client: AsyncClient) -> Non
         "/api/v1/portfolio/positions/AAPL/close",
         json={"quantity": "-50"},  # Negative not allowed
     )
-    
+
     assert response.status_code == 422
 
 
@@ -259,5 +259,5 @@ async def test_close_position_invalid_limit_price(async_client: AsyncClient) -> 
         "/api/v1/portfolio/positions/AAPL/close",
         json={"limit_price": "0"},  # Must be > 0
     )
-    
+
     assert response.status_code == 422

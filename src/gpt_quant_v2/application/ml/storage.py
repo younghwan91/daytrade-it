@@ -39,7 +39,7 @@ class ModelStorage:
             logger.info(f"Model saved successfully to {path}")
         except Exception as e:
             logger.error(f"Failed to save model to {path}: {e}")
-            raise IOError(f"Failed to save model: {e}") from e
+            raise OSError(f"Failed to save model: {e}") from e
 
     def load_model(self, path: Path) -> Any:
         """Load a model from the specified path.
@@ -66,7 +66,7 @@ class ModelStorage:
                 return self._load_sklearn_model(path)
         except Exception as e:
             logger.error(f"Failed to load model from {path}: {e}")
-            raise IOError(f"Failed to load model: {e}") from e
+            raise OSError(f"Failed to load model: {e}") from e
 
     def _is_xgboost_model(self, model: Any) -> bool:
         """Check if model is an XGBoost model."""
