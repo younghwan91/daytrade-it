@@ -87,7 +87,6 @@ Pipfile.lock
 
 # UV
 .uv/
-uv.lock
 
 # PEP 582
 __pypackages__/

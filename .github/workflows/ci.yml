@@ -25,7 +25,7 @@ jobs:
         run: uv python install ${{ env.PYTHON_VERSION }}
       
       - name: Install dependencies
-        run: uv sync --dev
+        run: uv sync --extra dev
       
       - name: Run pre-commit
         uses: pre-commit/action@v3.0.1
@@ -45,7 +45,7 @@ jobs:
         run: uv python install ${{ env.PYTHON_VERSION }}
       
       - name: Install dependencies
-        run: uv sync --dev
+        run: uv sync --extra dev
       
       - name: Run Ruff linter
         run: uv run ruff check src/ tests/
@@ -68,7 +68,7 @@ jobs:
         run: uv python install ${{ env.PYTHON_VERSION }}
       
       - name: Install dependencies
-        run: uv sync --dev
+        run: uv sync --extra dev
       
       - name: Run MyPy
         run: uv run mypy src/
@@ -88,11 +88,11 @@ jobs:
         run: uv python install ${{ env.PYTHON_VERSION }}
       
       - name: Install dependencies
-        run: uv sync --dev
+        run: uv sync --extra dev
       
       - name: Run unit tests
         env:
-          GPTQ_DATABASE_URL: sqlite+aiosqlite:///:memory:
+          GPTQ_DATABASE_URL: "sqlite+aiosqlite:///:memory:"
           GPTQ_REDIS_URL: redis://localhost:6379/0
           GPTQ_POLYGON_API_KEY: test_key
           GPTQ_OPENAI_API_KEY: test_key
@@ -146,7 +146,7 @@ jobs:
         run: uv python install ${{ env.PYTHON_VERSION }}
       
       - name: Install dependencies
-        run: uv sync --dev
+        run: uv sync --extra dev
       
       - name: Run integration tests
         env:
