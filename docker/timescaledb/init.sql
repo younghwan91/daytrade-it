@@ -44,7 +44,7 @@ CREATE TABLE IF NOT EXISTS trading.trading_signals (
 CREATE INDEX idx_trading_signals_symbol ON trading.trading_signals (symbol);
 CREATE INDEX idx_trading_signals_created_at ON trading.trading_signals (created_at DESC);
 CREATE INDEX idx_trading_signals_symbol_type ON trading.trading_signals (symbol, signal_type);
-CREATE INDEX idx_trading_signals_active ON trading.trading_signals (symbol, created_at DESC) 
+CREATE INDEX idx_trading_signals_active ON trading.trading_signals (symbol, created_at DESC)
     WHERE expires_at IS NULL OR expires_at > NOW();
 
 -- Trades table

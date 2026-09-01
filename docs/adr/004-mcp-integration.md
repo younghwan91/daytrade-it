@@ -64,14 +64,10 @@ We will expose all major system capabilities as MCP-compatible tools:
 ## Implementation
 
 ```python
-@mcp_tool(
-    name="analyze_ticker",
-    description="Get comprehensive analysis for a stock ticker"
-)
+@mcp_tool(name="analyze_ticker", description="Get comprehensive analysis for a stock ticker")
 async def analyze_ticker(
     ticker: Annotated[str, "Stock ticker symbol (e.g., AAPL)"],
     include_news: bool = True,
     include_technicals: bool = True,
-) -> TickerAnalysis:
-    ...
+) -> TickerAnalysis: ...
 ```

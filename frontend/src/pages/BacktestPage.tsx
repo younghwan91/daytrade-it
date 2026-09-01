@@ -212,7 +212,7 @@ export default function BacktestPage() {
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
-    
+
     const config = {
       tickers: tickers.split(',').map((t) => t.trim()).filter(Boolean),
       startDate,

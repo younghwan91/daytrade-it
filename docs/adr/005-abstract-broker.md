@@ -20,32 +20,32 @@ We will define an abstract broker interface that all broker implementations must
 ```python
 class BrokerInterface(ABC):
     """Abstract interface for trading brokers."""
-    
+
     @abstractmethod
     async def connect(self) -> bool:
         """Establish connection to broker."""
         ...
-    
+
     @abstractmethod
     async def get_account(self) -> Account:
         """Get account information."""
         ...
-    
+
     @abstractmethod
     async def get_positions(self) -> list[Position]:
         """Get current positions."""
         ...
-    
+
     @abstractmethod
     async def place_order(self, order: Order) -> OrderResult:
         """Place a new order."""
         ...
-    
+
     @abstractmethod
     async def cancel_order(self, order_id: str) -> bool:
         """Cancel an existing order."""
         ...
-    
+
     @abstractmethod
     async def get_order_status(self, order_id: str) -> OrderStatus:
         """Get status of an order."""

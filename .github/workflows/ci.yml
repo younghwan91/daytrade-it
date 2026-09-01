@@ -15,18 +15,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Install uv
         uses: astral-sh/setup-uv@v3
         with:
           enable-cache: true
-      
+
       - name: Set up Python
         run: uv python install ${{ env.PYTHON_VERSION }}
-      
+
       - name: Install dependencies
         run: uv sync --extra dev
-      
+
       - name: Run pre-commit
         uses: pre-commit/action@v3.0.1
 
@@ -35,21 +35,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Install uv
         uses: astral-sh/setup-uv@v3
         with:
           enable-cache: true
-      
+
       - name: Set up Python
         run: uv python install ${{ env.PYTHON_VERSION }}
-      
+
       - name: Install dependencies
         run: uv sync --extra dev
-      
+
       - name: Run Ruff linter
         run: uv run ruff check src/ tests/
-      
+
       - name: Run Ruff formatter check
         run: uv run ruff format --check src/ tests/
 
@@ -58,18 +58,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Install uv
         uses: astral-sh/setup-uv@v3
         with:
           enable-cache: true
-      
+
       - name: Set up Python
         run: uv python install ${{ env.PYTHON_VERSION }}
-      
+
       - name: Install dependencies
         run: uv sync --extra dev
-      
+
       - name: Run MyPy
         run: uv run mypy src/
 
@@ -78,18 +78,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Install uv
         uses: astral-sh/setup-uv@v3
         with:
           enable-cache: true
-      
+
       - name: Set up Python
         run: uv python install ${{ env.PYTHON_VERSION }}
-      
+
       - name: Install dependencies
         run: uv sync --extra dev
-      
+
       - name: Run unit tests
         env:
           GPTQ_DATABASE_URL: "sqlite+aiosqlite:///:memory:"
@@ -98,7 +98,7 @@ jobs:
           GPTQ_OPENAI_API_KEY: test_key
           GPTQ_TIINGO_API_KEY: test_key
         run: uv run pytest tests/unit/ -v --cov=src/gpt_quant_v2 --cov-report=xml
-      
+
       - name: Upload coverage
         uses: codecov/codecov-action@v4
         with:
@@ -123,7 +123,7 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
-      
+
       redis:
         image: redis:7-alpine
         ports:
@@ -133,21 +133,21 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
-    
+
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Install uv
         uses: astral-sh/setup-uv@v3
         with:
           enable-cache: true
-      
+
       - name: Set up Python
         run: uv python install ${{ env.PYTHON_VERSION }}
-      
+
       - name: Install dependencies
         run: uv sync --extra dev
-      
+
       - name: Run integration tests
         env:
           GPTQ_DATABASE_URL: postgresql+asyncpg://gptquant:gptquant@localhost:5432/gptquant_test
@@ -156,7 +156,7 @@ jobs:
           GPTQ_OPENAI_API_KEY: test_key
           GPTQ_TIINGO_API_KEY: test_key
         run: uv run pytest tests/integration/ -v --cov=src/gpt_quant_v2 --cov-report=xml --cov-append
-      
+
       - name: Upload coverage
         uses: codecov/codecov-action@v4
         with:
@@ -170,18 +170,18 @@ jobs:
     needs: [pre-commit, lint, type-check, unit-test, integration-test]
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Install uv
         uses: astral-sh/setup-uv@v3
         with:
           enable-cache: true
-      
+
       - name: Set up Python
         run: uv python install ${{ env.PYTHON_VERSION }}
-      
+
       - name: Build package
         run: uv build
-      
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:

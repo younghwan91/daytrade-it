@@ -460,6 +460,7 @@ GPTQ_LOG_FILE=logs/gptquant.log
    ```python
    # Add to FastAPI app
    from prometheus_fastapi_instrumentator import Instrumentator
+
    Instrumentator().instrument(app).expose(app)
    ```
 

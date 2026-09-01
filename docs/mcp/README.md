@@ -450,9 +450,11 @@ python -m gpt_quant_v2.interfaces.mcp.mcp_server
 import asyncio
 from gpt_quant_v2.interfaces.mcp.mcp_server import MCPServer
 
+
 async def main():
     server = MCPServer()
     await server.run()
+
 
 asyncio.run(main())
 ```
@@ -501,16 +503,17 @@ from langchain.tools import StructuredTool
 import subprocess
 import json
 
+
 class GPTQuantMCPClient:
     def __init__(self):
         self.process = subprocess.Popen(
             ["python", "-m", "gpt_quant_v2.interfaces.mcp.mcp_server"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            text=True
+            text=True,
         )
         self._initialize()
-    
+
     def _initialize(self):
         request = {
             "jsonrpc": "2.0",
@@ -518,24 +521,25 @@ class GPTQuantMCPClient:
             "method": "initialize",
             "params": {
                 "protocolVersion": "2024-11-05",
-                "clientInfo": {"name": "langchain", "version": "1.0.0"}
-            }
+                "clientInfo": {"name": "langchain", "version": "1.0.0"},
+            },
         }
         self._send(request)
-    
+
     def _send(self, request):
         self.process.stdin.write(json.dumps(request) + "\n")
         self.process.stdin.flush()
         return json.loads(self.process.stdout.readline())
-    
+
     def call_tool(self, name: str, arguments: dict):
         request = {
             "jsonrpc": "2.0",
             "id": 2,
             "method": "tools/call",
-            "params": {"name": name, "arguments": arguments}
+            "params": {"name": name, "arguments": arguments},
         }
         return self._send(request)
+
 
 # Create LangChain tool
 client = GPTQuantMCPClient()
@@ -543,7 +547,7 @@ client = GPTQuantMCPClient()
 analyze_tool = StructuredTool.from_function(
     func=lambda ticker: client.call_tool("analyze_ticker", {"ticker": ticker}),
     name="analyze_ticker",
-    description="Analyze a stock ticker with price, news, and signals"
+    description="Analyze a stock ticker with price, news, and signals",
 )
 ```
 
@@ -744,7 +748,7 @@ def handle_mcp_response(response: dict):
         error = response["error"]
         code = error["code"]
         message = error["message"]
-        
+
         if code == -32001:  # Tool not found
             raise ToolNotFoundError(message)
         elif code == -32002:  # Tool execution error
@@ -759,7 +763,7 @@ def handle_mcp_response(response: dict):
             raise RateLimitError(message)
         else:
             raise MCPError(code, message)
-    
+
     return response.get("result")
 ```
 
