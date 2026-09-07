@@ -310,3 +310,29 @@ This is where the five research findings actually change behavior, not just data
 
 **Report:** status, what was removed/added/rewired, test results, and the report file path.
 
+---
+
+## Phase 1 Results (informs Phase 2 tasks below)
+
+Tasks 5-8 all complete, reviewed clean. Ticker/Exchange are KRX-native (pulled forward from Phase 2 into Task 5). `quant_airflow_db_client.py` (read-only TimescaleDB reader) and `toss_news_client.py`/`dart_client.py`/`news_poller.py` (lightweight Toss/DART poller, circuit-breaker fallback) both exist and are tested, but neither is wired into any application-layer entry point yet — that's later-phase work (Phase 5 backtest rework, Phase 6 interfaces). `PolygonSettings`/`TiingoSettings` are retired; `PolygonClient`/`TiingoClient` classes and their handler consumers (`backtest.py`, `signal_generation.py`, `news_analysis.py`, MCP `tools.py`) still exist as dead code, not yet rewired — flagged for Phase 5/6, not fixed here.
+
+**Carried-forward debt (do not re-discover, just be aware):**
+- `interfaces/api/routers/portfolio.py:318` and `interfaces/api/routers/news.py:194` still gate on `ticker.isalpha()` + 1-5 chars (US format) — will reject real KRX codes. Phase 6 (interfaces rework) territory.
+- 40 pre-existing test failures (stale `AAPL`/`NASDAQ` fixtures in `test_entities.py`, `test_api_signals.py`, and possibly `conftest.py`) — a fixture-migration task, not yet scheduled. Any task touching these files should fix fixtures it directly needs, not the whole set at once.
+- kiwoom-client's own README vs. examples disagree on order-request field names (`ord_dv`/`orig_ord_no` vs `trde_tp`/`org_ord_no`) — must be resolved with a real mock call or Kiwoom's official TR docs before Phase 3 (`KiwoomBroker`) trusts either.
+- Task 1's OpenAI-vs-FinBERT sentiment comparison is parked pending a user-supplied `OPENAI_API_KEY` — Phase 4 (risk-gate design) must not assume FinBERT's 60.5%/18.2% numbers are the final word; re-run Task 1's spike script once a key is available.
+
+## Task 9: Market-cap buckets, tick-size, currency/timezone sweep (Phase 2 completion)
+
+**Goal:** finish Phase 2's domain-model KRX adjustments that Task 5 explicitly deferred (market-cap thresholds, tick-size) plus the remaining currency/timezone sweep the original plan scoped for Phase 2.
+
+**Steps:**
+1. **Market-cap buckets** (`domain/entities/stock.py`, `is_large_cap`/`is_mid_cap`/`is_small_cap`, currently `NotImplementedError` per Task 5): research KRX's actual, current market-cap classification convention (this is public regulatory/market-convention information, not something requiring the user's personal knowledge — look it up rather than guessing or asking; if using web search, cite the source in code comments and the report). Implement thresholds in KRW. If authoritative current thresholds can't be confirmed with reasonable confidence, leave the `NotImplementedError` in place rather than guessing, and say so clearly in the report — don't silently ship invented numbers.
+2. **Tick-size table** (호가단위): KRX price-band tick sizes vary by price level and differ between KOSPI/KOSDAQ in places — research the actual current table (again, public market-convention information) and implement it as a pure function (e.g. `tick_size_for(price: Decimal, market: Exchange) -> Decimal`) in an appropriate domain/shared location — check if `Price`/`Order` value objects are the natural home, or if a new small module is warranted. Add `lot_size`/`tick_size` awareness to `Order`/`Quote` in `infrastructure/brokers/base.py` per the original plan's Phase 2 section, if that's a clean additive change; if it requires restructuring, stop and report DONE_WITH_CONCERNS rather than improvising.
+3. **Currency default**: `infrastructure/brokers/base.py` `Account.currency` default → `"KRW"`. `infrastructure/brokers/paper_broker.py` currency literal → `"KRW"` (commission/slippage defaults can stay as placeholders for now — Phase 5 owns the real KRX cost model; just fix the currency string, don't invent a cost model here).
+4. **Timezone sweep**: `shared/config/settings.py` `TradingSettings.window_start/end` docstrings/defaults currently reference Eastern Time — update to KRX hours (09:00–15:30 KST, no separate pre/post-market session in the same sense as US markets). Sweep `infrastructure/brokers/paper_broker.py` (and anywhere else a grep for `datetime.now()` without explicit timezone turns up within `src/gpt_quant_v2/`) for naive/local-time calls that should be explicit `Asia/Seoul` or UTC-with-KST-display — fix what's directly related to trading-hours logic; if the sweep turns up something ambiguous or far outside this task's scope, list it in the report rather than fixing everything found.
+5. Do not touch broker credential/order-placement code (that's Phase 3), backtest cost-model code (Phase 5), or interfaces (Phase 6).
+6. Write/update tests: market-cap bucket boundaries (if implemented) with real KRW figures, tick-size table against known price points, currency defaults, and timezone-sensitive logic with fixed inputs.
+
+**Report:** status, the market-cap/tick-size sources used (or why they were left as `NotImplementedError`), what currency/timezone changes were made, test results, and the report file path.
+
