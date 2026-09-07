@@ -98,7 +98,7 @@ function RecentTrades() {
             </div>
             <div className="text-right">
               <p className="font-medium text-gray-900">
-                {trade.amount} @ ${trade.price}
+                {trade.amount} @ ₩{trade.price}
               </p>
               <span
                 className={`text-sm ${
@@ -122,13 +122,13 @@ export default function DashboardPage() {
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
         <StatCard
           title="Portfolio Value"
-          value="$125,430"
+          value="₩125,430,000"
           change="+2.5% today"
           changeType="positive"
         />
         <StatCard
           title="Daily P&L"
-          value="+$3,120"
+          value="+₩3,120,000"
           change="+2.5%"
           changeType="positive"
         />

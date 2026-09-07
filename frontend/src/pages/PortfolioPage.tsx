@@ -33,7 +33,7 @@ function StatCard({ title, value, subtitle, valueColor = 'default' }: StatCardPr
 
 function formatCurrency(value: number): string {
   const prefix = value >= 0 ? '' : '-'
-  return `${prefix}$${Math.abs(value).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+  return `${prefix}₩${Math.abs(value).toLocaleString('ko-KR', { maximumFractionDigits: 0 })}`
 }
 
 function formatPercent(value: number): string {
@@ -275,7 +275,7 @@ function PerformanceChart() {
               />
               <YAxis
                 tick={{ fontSize: 12, fill: '#6b7280' }}
-                tickFormatter={(value) => `$${(value / 1000).toFixed(0)}k`}
+                tickFormatter={(value) => `₩${(value / 1000).toFixed(0)}k`}
               />
               <Tooltip
                 contentStyle={{

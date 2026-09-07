@@ -59,10 +59,10 @@ function EquityCurveChart({ data }: EquityCurveChartProps) {
             />
             <YAxis
               tick={{ fontSize: 12 }}
-              tickFormatter={(value) => `$${value.toLocaleString()}`}
+              tickFormatter={(value) => `₩${value.toLocaleString()}`}
             />
             <Tooltip
-              formatter={(value: number) => [`$${value.toLocaleString()}`, 'Equity']}
+              formatter={(value: number) => [`₩${value.toLocaleString()}`, 'Equity']}
               labelFormatter={(label) => new Date(label).toLocaleDateString()}
             />
             <Line
@@ -134,17 +134,17 @@ function TradesTable({ trades }: TradesTableProps) {
                   </span>
                 </td>
                 <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 text-right">
-                  ${trade.entryPrice.toFixed(2)}
+                  ₩{trade.entryPrice.toFixed(2)}
                 </td>
                 <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 text-right">
-                  ${trade.exitPrice.toFixed(2)}
+                  ₩{trade.exitPrice.toFixed(2)}
                 </td>
                 <td
                   className={`px-6 py-4 whitespace-nowrap text-sm font-medium text-right ${
                     trade.pnl >= 0 ? 'text-green-600' : 'text-red-600'
                   }`}
                 >
-                  {trade.pnl >= 0 ? '+' : ''}${trade.pnl.toFixed(2)}
+                  {trade.pnl >= 0 ? '+' : ''}₩{trade.pnl.toFixed(2)}
                 </td>
               </tr>
             ))}
@@ -298,7 +298,7 @@ export default function BacktestPage() {
             {/* Initial Capital */}
             <div>
               <label htmlFor="initialCapital" className="block text-sm font-medium text-gray-700 mb-1">
-                Initial Capital ($)
+                Initial Capital (₩)
               </label>
               <input
                 type="number"
