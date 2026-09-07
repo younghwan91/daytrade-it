@@ -236,6 +236,14 @@ class BacktestHandler:
 
         capital = float(initial_capital)
         positions: dict[str, dict] = {}  # ticker -> {quantity, entry_price, entry_date}
+        # ticker -> signal generated from a PRIOR day's bar, staged to fill
+        # at the NEXT available bar's open (see the same-bar look-ahead
+        # fix below).
+        pending_signals: dict[str, dict] = {}
+        # Running peak equity, updated once per day instead of recomputed
+        # from the whole equity_curve every iteration (was O(n^2) over the
+        # backtest window; trivial fix, whole-branch review minor finding).
+        running_peak = float(initial_capital)
 
         # Index each ticker's bars by ISO date string for O(1) same-day
         # lookups below (AdjustedDailyBar.date is already a real date, so
@@ -272,8 +280,47 @@ class BacktestHandler:
             if not day_prices:
                 continue
 
-            # Generate signals for each ticker
+            # Execute trades STAGED from a prior day's signal, filling at
+            # TODAY's open -- see the same-bar look-ahead fix below for
+            # why this runs before today's own signal generation.
+            for ticker in list(pending_signals.keys()):
+                if ticker not in day_prices:
+                    continue  # no bar today for this ticker; keep staged
+                staged_signal = pending_signals.pop(ticker)
+                fill_prices = dict(day_prices[ticker])
+                # Fill reference is the CURRENT bar's open (the earliest
+                # price observable today), not its close -- the signal was
+                # decided using a PRIOR day's data, so today's open is the
+                # first tradeable price after that decision.
+                fill_prices["close"] = fill_prices["open"]
+                trade = self._execute_backtest_trade(
+                    ticker=ticker,
+                    signal=staged_signal,
+                    prices=fill_prices,
+                    date=date,
+                    capital=capital,
+                    positions=positions,
+                )
+                if trade and trade.pnl != 0:  # Closing trade
+                    capital += float(trade.pnl)
+                    trades.append(trade)
+
+            # Generate signals for each ticker from TODAY's bar (including
+            # today's full volume) and STAGE them -- do not fill today.
+            #
+            # Same-bar look-ahead bias fix (whole-branch review finding
+            # #9): a live system cannot know a full day's volume/close
+            # before that day's close, so a signal generated from day t's
+            # bar cannot legitimately fill at day t's own close (the old
+            # behavior). Signals are now filled at the next available
+            # bar's open (handled above, at the top of the NEXT
+            # iteration) -- this day's own close is still a legitimate
+            # input to the signal *decision* (you know it once today's
+            # bar closes), it just can't be the fill price for a decision
+            # made from that same bar.
             for ticker, prices in day_prices.items():
+                if ticker in pending_signals:
+                    continue  # already have an unfilled signal staged
                 signal = self._generate_signal(
                     ticker=ticker,
                     prices=prices,
@@ -281,20 +328,8 @@ class BacktestHandler:
                     params=params,
                     position=positions.get(ticker),
                 )
-
                 if signal and signal["action"]:
-                    trade = self._execute_backtest_trade(
-                        ticker=ticker,
-                        signal=signal,
-                        prices=prices,
-                        date=date,
-                        capital=capital,
-                        positions=positions,
-                    )
-
-                    if trade and trade.pnl != 0:  # Closing trade
-                        capital += float(trade.pnl)
-                        trades.append(trade)
+                    pending_signals[ticker] = signal
 
             # Calculate portfolio value
             portfolio_value = capital
@@ -302,9 +337,9 @@ class BacktestHandler:
                 if ticker in day_prices:
                     portfolio_value += pos["quantity"] * day_prices[ticker]["close"]
 
-            # Calculate drawdown
-            peak = max([e["equity"] for e in equity_curve] + [float(initial_capital)])
-            drawdown = (peak - portfolio_value) / peak if peak > 0 else 0
+            # Calculate drawdown against the running peak equity so far.
+            running_peak = max(running_peak, portfolio_value)
+            drawdown = (running_peak - portfolio_value) / running_peak if running_peak > 0 else 0
 
             equity_curve.append(
                 {
@@ -315,11 +350,21 @@ class BacktestHandler:
                 }
             )
 
+        # Any signal staged on the very last date (no subsequent bar to
+        # fill it against) simply never fills -- consistent with the
+        # look-ahead fix above (a signal must wait for the next bar), and
+        # harmless: it just means the backtest window ended one day too
+        # early to observe that trade, not a bug to work around here.
+        pending_signals.clear()
+
         # Close any remaining open positions at the last available price
         # (end-of-backtest forced liquidation), applying the same cost
         # model as a normal SELL -- an open position that was never exited
         # by a signal shouldn't get a cost-free exit just because the
-        # backtest window ended.
+        # backtest window ended. This is intentionally still same-bar
+        # (last_bar.close): there is no further bar to defer to at the
+        # end of the backtest window, so this terminal liquidation isn't
+        # subject to the same look-ahead concern as an in-window signal.
         for ticker, pos in list(positions.items()):
             bars = price_data.get(ticker)
             if not bars:
