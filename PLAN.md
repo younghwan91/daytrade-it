@@ -392,3 +392,24 @@ Complete (Task 10, approved). `KiwoomBroker` implements `BrokerInterface`'s 8 me
 
 **Report:** status, the keyword/constant changes made, the MCP audit findings (clean, or what was fixed/flagged), test results, and the report file path.
 
+---
+
+## Phase 4 Results
+
+Complete (Tasks 11-12). `domain/services/risk_gate.py` is the flagship deliverable — entry-blocker-primary, structurally verified (single `FORCE_EXIT` construction site, gated strictly on hard-severity disclosure taxonomy, never on sentiment alone) via an adversarial test. Sentiment-only signal path retired. Korean ML feature keywords in place; **XGBoost retraining itself is still not done** — it needs the backtest harness (this phase) to validate against, and real historical KRX price data (Task 6's `quant_airflow_db_client` can supply this). MCP computation-discipline audit complete; `BacktestResult`/`TrainingResult` now carry a caller-visible `is_placeholder` field since neither has a real engine behind it yet — which is exactly what this phase (5) builds.
+
+## Task 13: KRX cost model + backtest market-data swap (Phase 5)
+
+**Goal:** replace `application/handlers/backtest.py`'s `PolygonClient` dependency and flat US-style cost assumptions with a real KRX cost model and Task 6's read-only market-data client — this is the task that turns `BacktestResult` from a hardcoded placeholder into a genuine computation.
+
+**Steps:**
+1. Read `application/handlers/backtest.py` in full first. Replace its `PolygonClient` dependency with Task 6's `quant_airflow_db_client.py` (adjusted daily bars) for historical price data — this was flagged as dead/unwired in Task 8's report, so this is the first task that actually wires it into a live handler path.
+2. Build `domain/services/cost_model.py` (or similar — check for a natural existing home first): a Korean transaction-cost model covering (a) 증권거래세 (securities transaction tax, sell-side only — research the actual current KOSPI/KOSDAQ rate; this is public regulatory information, same research approach as Tasks 9/11, cite your source, and if you can't confirm current rates confidently, use a clearly-labeled placeholder rate with a prominent comment rather than a silently-wrong number), (b) 위탁수수료 (brokerage commission — use a clearly-labeled representative default since Task 10's `KiwoomBroker` has no live fee schedule to read from; make it configurable, not hardcoded deep in logic), (c) slippage calibrated by market-cap/liquidity tier if reasonably implementable (KOSDAQ small-caps slip more than KOSPI large-caps) — if a full liquidity-tier model is too much for this task, a simpler placeholder (e.g. a flat rate with a comment flagging it needs calibration against real historical spreads later) is acceptable, documented honestly rather than presented as calibrated.
+3. Reuse this cost model in `infrastructure/brokers/paper_broker.py` (currently has its own separate, unconfirmed commission/slippage defaults per Task 9's report) so paper trading and backtesting share one source of truth rather than two hand-maintained numbers.
+4. Wire `BacktestHandler` (or whatever the actual class/function is — verify the name) to actually compute `sharpe_ratio`/`sortino_ratio`/`max_drawdown_pct`/`win_rate`/`profit_factor` from real simulated trades using the new price source and cost model, and set `BacktestResult.is_placeholder = False` once real computation replaces the hardcoded stub in `interfaces/mcp/tools.py`'s `backtest()` MCP tool function.
+5. Do NOT retrain the XGBoost model in this task either — that's a follow-up once this backtest harness exists and can validate a retrained model's output; say so explicitly if you get close to that boundary and stop.
+6. Do NOT touch interfaces/frontend beyond the one `BacktestResult.is_placeholder` flag flip described in step 4 — broader interface work is Phase 6.
+7. Write tests: cost-model unit tests against known price/quantity inputs (tax + commission + slippage arithmetic), a backtest run against real historical KRX bars (e.g. 005930) producing genuinely computed (not hardcoded) metrics, and a regression test confirming `BacktestResult.is_placeholder` is `False` when the real engine runs.
+
+**Report:** status, the cost-model rates/sources used (or what was left as an honestly-labeled placeholder and why), what got wired into `backtest.py`/`paper_broker.py`, test results (including whether a real backtest run against real KRX data was actually executed), and the report file path.
+
