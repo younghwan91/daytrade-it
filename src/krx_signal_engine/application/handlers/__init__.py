@@ -37,13 +37,28 @@ from krx_signal_engine.application.handlers.backtest import (
 # for whoever owns those handlers next.
 _logger = structlog.get_logger(__name__)
 
+# Whole-branch review minor finding: names from a broken handler module
+# used to be bound at module level as plain `None` (see `_optional_import`
+# below), which let `from krx_signal_engine.application.handlers import
+# NewsAnalysisHandler` succeed silently -- the caller would only discover
+# the problem later, as a confusing `TypeError: 'NoneType' object is not
+# callable` (or similar) at the point of use, with no link back to the
+# real cause. `_BROKEN_NAMES` + the module `__getattr__` below fix that:
+# a broken name is simply never bound, so accessing it falls through to
+# `__getattr__`, which raises a clear `ImportError` chained to the
+# original cause instead.
+_BROKEN_NAMES: dict[str, ImportError] = {}
 
-def _optional_import(module_path: str, names: tuple[str, ...]) -> dict[str, object | None]:
+
+def _optional_import(module_path: str, names: tuple[str, ...]) -> dict[str, object]:
     """Best-effort import of `names` from `module_path`.
 
-    Returns a dict of name -> imported object, or name -> None (with a
-    logged warning) if the module fails to import. See the module-level
-    NOTE above for why this exists.
+    Returns a dict of name -> imported object for names that imported
+    successfully. If the module fails to import, none of `names` are
+    included in the returned dict -- instead each is recorded in
+    `_BROKEN_NAMES` so the module-level `__getattr__` below can raise a
+    clear, chained `ImportError` when/if something actually tries to use
+    one of them. See the module-level NOTE above for why this exists.
     """
     try:
         module = importlib.import_module(module_path)
@@ -53,17 +68,31 @@ def _optional_import(module_path: str, names: tuple[str, ...]) -> dict[str, obje
             "(pre-existing, unrelated defect -- see this module's NOTE)",
             error=str(exc),
         )
-        return dict.fromkeys(names)
+        for name in names:
+            _BROKEN_NAMES[name] = exc
+        return {}
     return {name: getattr(module, name) for name in names}
+
+
+def __getattr__(name: str) -> object:
+    """Raise a clear, chained ImportError for a name whose defining
+    handler module failed to import, instead of the normal
+    AttributeError -- see `_BROKEN_NAMES` above."""
+    if name in _BROKEN_NAMES:
+        raise ImportError(
+            f"krx_signal_engine.application.handlers.{name} is unavailable: "
+            "its defining module failed to import at package-init time "
+            "(pre-existing, unrelated defect -- see this package's "
+            "__init__.py module-level NOTE for details, not fixed here)."
+        ) from _BROKEN_NAMES[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 _news_analysis = _optional_import(
     "krx_signal_engine.application.handlers.news_analysis",
     ("AnalyzeNewsCommand", "NewsAnalysisHandler", "NewsAnalysisResult"),
 )
-AnalyzeNewsCommand = _news_analysis["AnalyzeNewsCommand"]
-NewsAnalysisHandler = _news_analysis["NewsAnalysisHandler"]
-NewsAnalysisResult = _news_analysis["NewsAnalysisResult"]
+globals().update(_news_analysis)
 
 _signal_generation = _optional_import(
     "krx_signal_engine.application.handlers.signal_generation",
@@ -74,10 +103,7 @@ _signal_generation = _optional_import(
         "SignalGenerationResult",
     ),
 )
-GenerateSignalCommand = _signal_generation["GenerateSignalCommand"]
-SignalGenerationConfig = _signal_generation["SignalGenerationConfig"]
-SignalGenerationHandler = _signal_generation["SignalGenerationHandler"]
-SignalGenerationResult = _signal_generation["SignalGenerationResult"]
+globals().update(_signal_generation)
 
 _trade_execution = _optional_import(
     "krx_signal_engine.application.handlers.trade_execution",
@@ -89,11 +115,7 @@ _trade_execution = _optional_import(
         "TradeExecutionResult",
     ),
 )
-ExecuteTradeCommand = _trade_execution["ExecuteTradeCommand"]
-ManualTradeCommand = _trade_execution["ManualTradeCommand"]
-PositionSizingConfig = _trade_execution["PositionSizingConfig"]
-TradeExecutionHandler = _trade_execution["TradeExecutionHandler"]
-TradeExecutionResult = _trade_execution["TradeExecutionResult"]
+globals().update(_trade_execution)
 
 __all__ = [
     # News Analysis

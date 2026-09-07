@@ -44,7 +44,11 @@ class ModelVersionResponse(BaseModel):
 class PredictionRequest(BaseModel):
     """Single prediction request."""
 
-    ticker: str = Field(min_length=1, max_length=10, description="Stock ticker symbol")
+    ticker: str = Field(
+        min_length=6,
+        max_length=6,
+        description="Stock ticker to predict for (6-digit KRX code, e.g. '005930')",
+    )
 
 
 class BatchPredictionRequest(BaseModel):
