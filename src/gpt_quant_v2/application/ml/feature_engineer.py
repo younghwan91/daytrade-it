@@ -12,32 +12,71 @@ import numpy as np
 import pandas as pd
 from sklearn.preprocessing import StandardScaler
 
-# Market hours (US Eastern Time)
-MARKET_OPEN = time(9, 30)
-MARKET_CLOSE = time(16, 0)
+# Market hours (KRX regular session, KST/Asia-Seoul -- see
+# shared/config/settings.py's TradingSettings.trading_start/trading_end for
+# the corresponding operational config, confirmed 09:00-15:30 KST with no
+# separate pre/post-market session; this module has its own separate
+# constants used purely for feature calculation, so Task 9's fix to
+# TradingSettings did not automatically cover this file -- fixed here too).
+MARKET_OPEN = time(9, 0)
+MARKET_CLOSE = time(15, 30)
 
-# Default keywords for financial analysis
+# Default keywords for financial-news feature extraction (KRX/Korean-market
+# vocabulary). These are ML *signal* features -- keyword-count inputs to the
+# XGBoost model -- not gate/severity decisions; contrast with
+# domain/services/risk_gate.py's `_HARD_SEVERITY_KEYWORDS`, a narrow,
+# conservative taxonomy of unambiguous hard-severity DART disclosure titles
+# used to force REJECT/HALT_ENTRY/FORCE_EXIT. Some vocabulary overlap with
+# that list is expected (e.g. 관리종목/거래정지/상장폐지 are both severe
+# disclosure language and informative model features); this list is
+# deliberately broader, covering routine earnings/corporate-action/analyst
+# language that risk_gate.py intentionally leaves UNCLASSIFIED because it's
+# too ambiguous to gate trading on, but which is still useful, cheap signal
+# for a keyword-count ML feature.
 DEFAULT_KEYWORDS = [
-    "earnings",
-    "revenue",
-    "profit",
-    "loss",
-    "guidance",
-    "upgrade",
-    "downgrade",
-    "buy",
-    "sell",
-    "merger",
-    "acquisition",
-    "dividend",
-    "buyback",
-    "lawsuit",
-    "fda",
-    "approval",
-    "beat",
-    "miss",
-    "outlook",
-    "growth",
+    # Earnings / financial results (실적)
+    "실적",
+    "매출",
+    "매출액",
+    "영업이익",
+    "당기순이익",
+    "순이익",
+    "적자",
+    "흑자전환",
+    "어닝서프라이즈",
+    "어닝쇼크",
+    "잠정실적",
+    # Guidance / analyst actions
+    "목표주가",
+    "상향",
+    "하향",
+    "매수",
+    "매도",
+    "투자의견",
+    # Corporate actions / capital events
+    "유상증자",
+    "무상증자",
+    "자사주매입",
+    "배당",
+    "액면분할",
+    "인수합병",
+    "신규계약",
+    "수주",
+    # Price-limit events (KRX +-30% daily limit convention)
+    "상한가",
+    "하한가",
+    # Disclosure / regulatory severity (routine-to-severe spectrum; see
+    # module docstring above re: overlap with risk_gate.py)
+    "감사의견",
+    "관리종목",
+    "거래정지",
+    "상장폐지",
+    "소송",
+    # Outlook / growth language
+    "전망",
+    "성장",
+    "호재",
+    "악재",
 ]
 
 

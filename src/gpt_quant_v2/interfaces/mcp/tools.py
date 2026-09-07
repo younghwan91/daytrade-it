@@ -29,6 +29,28 @@ T = TypeVar("T")
 # =============================================================================
 # Response Models
 # =============================================================================
+#
+# Computation-discipline convention (Task 12 / deep-research finding #6):
+# LLM/agent callers make errors on multi-step derived risk metrics (Sharpe,
+# max drawdown, Sortino, win rate, risk/reward ratio, ...) unless those
+# values are verified via actual code execution rather than eyeballed from
+# raw trade/price lists. Every numeric risk-metric field on the response
+# models below (sharpe_ratio, max_drawdown_pct, win_rate, predicted_return,
+# predicted_drawdown, risk_reward_ratio, total_value, unrealized_pnl,
+# realized_pnl, etc.) MUST be populated ONLY by copying a value that was
+# already computed by domain/application code -- a handler
+# (application/handlers/*), a domain service (domain/services/risk_manager.py,
+# signal_generator.py), a repository-persisted entity field, or a broker
+# response -- never left blank/None for an agent to "fill in" by reasoning
+# over raw data returned in the same or an earlier tool call, and never
+# computed inline in a tool function via multi-step arithmetic an agent
+# could instead be tempted to redo itself. Deterministic single-expression
+# arithmetic over already-authoritative inputs (e.g. `price * quantity` from
+# a broker fill) is fine; re-deriving a *risk* metric (Sharpe/MDD/win-rate/
+# risk-reward) inline is not -- route those through the owning domain
+# service/handler instead. When adding a new response model or field here,
+# preserve this: the tool function's job is to relay/format an
+# already-computed value, not to compute one.
 
 
 class TickerAnalysis(BaseModel):
@@ -46,7 +68,15 @@ class TickerAnalysis(BaseModel):
 
 
 class Signal(BaseModel):
-    """Trading signal."""
+    """Trading signal.
+
+    predicted_return/predicted_drawdown/risk_reward_ratio are relayed
+    verbatim from the persisted ``TradingSignal`` entity (populated by
+    ``domain/services/signal_generator.py`` and
+    ``domain/services/risk_manager.py::calculate_risk_reward``) -- see the
+    computation-discipline convention above. Never recompute these from
+    ``predicted_return``/other raw fields inside a tool function.
+    """
 
     id: UUID
     ticker: str
@@ -61,7 +91,14 @@ class Signal(BaseModel):
 
 
 class TradeResult(BaseModel):
-    """Result of a trade execution."""
+    """Result of a trade execution.
+
+    price/total_value are relayed from the broker's fill response
+    (``BrokerResult.filled_avg_price``); total_value's single-expression
+    ``price * quantity`` is deterministic arithmetic over that
+    already-authoritative broker value, not a re-derived risk metric -- see
+    the computation-discipline convention above.
+    """
 
     trade_id: UUID
     signal_id: UUID | None = None
@@ -75,7 +112,21 @@ class TradeResult(BaseModel):
 
 
 class BacktestResult(BaseModel):
-    """Result of a backtest run."""
+    """Result of a backtest run.
+
+    sharpe_ratio/max_drawdown_pct/win_rate/total_return_pct and the trade
+    counts MUST come from a real backtest engine's computed results, never
+    be estimated by an agent or hand-computed inline in the ``backtest()``
+    tool function -- see the computation-discipline convention above. As of
+    Task 12 (Phase 4a/4d), the ``backtest()`` tool below is a KNOWN,
+    OUT-OF-SCOPE placeholder: no backtest engine/handler is wired up yet
+    (that's Phase 5), so it currently returns hardcoded stub numbers rather
+    than real handler-computed ones. That is a "no real answer yet" gap, not
+    a "let the agent compute it" violation -- but it means these fields are
+    NOT trustworthy real metrics until Phase 5 replaces the stub with an
+    actual backtest-engine call. Do not remove this stub without wiring a
+    real engine in its place.
+    """
 
     strategy: str
     start_date: str
