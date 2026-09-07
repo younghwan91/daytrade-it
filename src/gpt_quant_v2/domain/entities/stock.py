@@ -10,14 +10,11 @@ from gpt_quant_v2.domain.value_objects import Ticker
 
 
 class Exchange(StrEnum):
-    """Stock exchange identifiers."""
+    """Stock exchange identifiers (Korea Exchange markets)."""
 
-    NASDAQ = "NASDAQ"
-    NYSE = "NYSE"
-    AMEX = "AMEX"
-    ARCA = "ARCA"
-    BATS = "BATS"
-    OTC = "OTC"
+    KOSPI = "KOSPI"
+    KOSDAQ = "KOSDAQ"
+    KONEX = "KONEX"
 
 
 class Stock(Entity):
@@ -26,9 +23,9 @@ class Stock(Entity):
     Attributes:
         ticker: Stock ticker symbol (value object)
         name: Company name
-        exchange: Stock exchange (NASDAQ, NYSE, etc.)
+        exchange: Stock exchange (KOSPI, KOSDAQ, KONEX)
         sector: Industry sector (optional)
-        market_cap: Market capitalization in USD (optional)
+        market_cap: Market capitalization (currency TBD; see NOTE below, optional)
     """
 
     ticker: Ticker
@@ -46,23 +43,50 @@ class Stock(Entity):
             f"exchange={self.exchange!r}, sector={self.sector!r})"
         )
 
+    # NOTE: is_large_cap / is_mid_cap / is_small_cap below are USD-denominated
+    # market-cap buckets left over from the US-equity system. `market_cap` is
+    # now expected to carry KRW values (KOSPI/KOSDAQ/KONEX), so these
+    # thresholds are meaningless as-is and would silently misclassify every
+    # stock if left enabled. They are intentionally disabled here rather than
+    # guessed at; defining real KRW thresholds is out of scope for this task
+    # and is tracked under the redevelopment plan's Phase 2 section (market-cap
+    # bucket thresholds / KRW conversion). See .superpowers/sdd/PLAN for details.
+
     @property
     def is_large_cap(self) -> bool:
-        """Check if stock is large cap (>$10B market cap)."""
-        if self.market_cap is None:
-            return False
-        return self.market_cap >= Decimal("10_000_000_000")
+        """Whether the stock is large cap.
+
+        Raises:
+            NotImplementedError: KRW large-cap threshold not yet defined
+                (see Phase 2 of the redevelopment plan).
+        """
+        raise NotImplementedError(
+            "is_large_cap uses stale USD thresholds; KRW market-cap buckets "
+            "are defined in Phase 2 of the redevelopment plan, not here."
+        )
 
     @property
     def is_mid_cap(self) -> bool:
-        """Check if stock is mid cap ($2B-$10B market cap)."""
-        if self.market_cap is None:
-            return False
-        return Decimal("2_000_000_000") <= self.market_cap < Decimal("10_000_000_000")
+        """Whether the stock is mid cap.
+
+        Raises:
+            NotImplementedError: KRW mid-cap threshold not yet defined
+                (see Phase 2 of the redevelopment plan).
+        """
+        raise NotImplementedError(
+            "is_mid_cap uses stale USD thresholds; KRW market-cap buckets "
+            "are defined in Phase 2 of the redevelopment plan, not here."
+        )
 
     @property
     def is_small_cap(self) -> bool:
-        """Check if stock is small cap (<$2B market cap)."""
-        if self.market_cap is None:
-            return False
-        return self.market_cap < Decimal("2_000_000_000")
+        """Whether the stock is small cap.
+
+        Raises:
+            NotImplementedError: KRW small-cap threshold not yet defined
+                (see Phase 2 of the redevelopment plan).
+        """
+        raise NotImplementedError(
+            "is_small_cap uses stale USD thresholds; KRW market-cap buckets "
+            "are defined in Phase 2 of the redevelopment plan, not here."
+        )

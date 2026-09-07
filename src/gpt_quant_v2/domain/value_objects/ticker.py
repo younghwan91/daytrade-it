@@ -11,8 +11,10 @@ from gpt_quant_v2.domain.value_objects.base import ValueObject
 class Ticker(ValueObject):
     """Represents a stock ticker symbol.
 
-    A ticker is a 1-5 character uppercase alphabetic string
-    used to identify a publicly traded company.
+    A ticker is a 6-digit numeric KRX (Korea Exchange) code used to
+    identify a publicly traded company, e.g. "005930" (Samsung
+    Electronics). Preferred-share codes are also 6 digits
+    (e.g. "005935").
     """
 
     value: str
@@ -20,20 +22,13 @@ class Ticker(ValueObject):
     @field_validator("value")
     @classmethod
     def validate_ticker(cls, v: str) -> str:
-        """Validate ticker format: 1-5 uppercase letters only."""
+        """Validate ticker format: 6-digit numeric KRX code."""
         if not v:
             raise ValueError("Ticker cannot be empty")
 
-        # Convert to uppercase
-        v = v.upper()
-
-        # Check length
-        if not 1 <= len(v) <= 5:
-            raise ValueError("Ticker must be 1-5 characters")
-
-        # Check for uppercase letters only (no special chars or numbers)
-        if not re.match(r"^[A-Z]+$", v):
-            raise ValueError("Ticker must contain only uppercase letters (A-Z)")
+        # Check for exactly 6 digits (KRX stock code format)
+        if not re.match(r"^\d{6}$", v):
+            raise ValueError("Ticker must be a 6-digit KRX code (e.g. '005930')")
 
         return v
 

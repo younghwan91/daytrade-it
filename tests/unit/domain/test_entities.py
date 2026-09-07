@@ -6,7 +6,10 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import uuid4
 
+import pytest
+
 from gpt_quant_v2.domain.entities import (
+    Exchange,
     NewsArticle,
     Position,
     Stock,
@@ -16,29 +19,62 @@ from gpt_quant_v2.domain.entities import (
 from gpt_quant_v2.domain.value_objects import Confidence, Ticker
 
 
+class TestExchange:
+    """Tests for the Exchange enum (KRX markets)."""
+
+    def test_krx_markets_present(self):
+        assert Exchange.KOSPI == "KOSPI"
+        assert Exchange.KOSDAQ == "KOSDAQ"
+        assert Exchange.KONEX == "KONEX"
+
+    def test_old_us_markets_removed(self):
+        assert not hasattr(Exchange, "NASDAQ")
+        assert not hasattr(Exchange, "NYSE")
+
+
 class TestStock:
     """Tests for Stock entity."""
 
     def test_create_stock(self):
         stock = Stock(
-            ticker=Ticker(value="AAPL"),
-            name="Apple Inc.",
-            exchange="NASDAQ",
+            ticker=Ticker(value="005930"),
+            name="삼성전자",
+            exchange="KOSPI",
         )
-        assert stock.ticker.value == "AAPL"
-        assert stock.name == "Apple Inc."
+        assert stock.ticker.value == "005930"
+        assert stock.name == "삼성전자"
         assert stock.id is not None
 
     def test_stock_equality_by_id(self):
         id1 = uuid4()
-        stock1 = Stock(id=id1, ticker=Ticker(value="AAPL"), name="Apple", exchange="NASDAQ")
-        stock2 = Stock(id=id1, ticker=Ticker(value="AAPL"), name="Apple", exchange="NASDAQ")
+        stock1 = Stock(id=id1, ticker=Ticker(value="005930"), name="삼성전자", exchange="KOSPI")
+        stock2 = Stock(id=id1, ticker=Ticker(value="005930"), name="삼성전자", exchange="KOSPI")
         assert stock1 == stock2
 
     def test_different_stocks_not_equal(self):
-        stock1 = Stock(ticker=Ticker(value="AAPL"), name="Apple", exchange="NASDAQ")
-        stock2 = Stock(ticker=Ticker(value="AAPL"), name="Apple", exchange="NASDAQ")
+        stock1 = Stock(ticker=Ticker(value="005930"), name="삼성전자", exchange="KOSPI")
+        stock2 = Stock(ticker=Ticker(value="005930"), name="삼성전자", exchange="KOSPI")
         assert stock1 != stock2  # Different IDs
+
+    def test_market_cap_buckets_not_implemented(self):
+        """USD market-cap thresholds are disabled, not silently wrong.
+
+        Real KRW thresholds are out of scope for this task (see plan
+        Phase 2); until they exist these properties must fail loudly
+        rather than misclassify a KRW market cap.
+        """
+        stock = Stock(
+            ticker=Ticker(value="005930"),
+            name="삼성전자",
+            exchange="KOSPI",
+            market_cap=Decimal("500_000_000_000_000"),
+        )
+        with pytest.raises(NotImplementedError):
+            _ = stock.is_large_cap
+        with pytest.raises(NotImplementedError):
+            _ = stock.is_mid_cap
+        with pytest.raises(NotImplementedError):
+            _ = stock.is_small_cap
 
 
 class TestNewsArticle:

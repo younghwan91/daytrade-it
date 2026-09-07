@@ -17,31 +17,53 @@ from gpt_quant_v2.domain.value_objects import (
 
 
 class TestTicker:
-    """Tests for Ticker value object."""
+    """Tests for Ticker value object.
 
-    def test_valid_ticker(self):
-        ticker = Ticker(value="AAPL")
-        assert ticker.value == "AAPL"
-        assert str(ticker) == "AAPL"
+    Tickers are 6-digit numeric KRX (Korea Exchange) stock codes,
+    e.g. "005930" (Samsung Electronics / 삼성전자).
+    """
 
-    def test_ticker_uppercase_conversion(self):
-        ticker = Ticker(value="aapl")
-        assert ticker.value == "AAPL"
+    def test_valid_ticker_samsung(self):
+        ticker = Ticker(value="005930")
+        assert ticker.value == "005930"
+        assert str(ticker) == "005930"
+
+    def test_valid_ticker_sk_hynix(self):
+        ticker = Ticker(value="000660")
+        assert ticker.value == "000660"
+
+    def test_valid_ticker_kakao(self):
+        ticker = Ticker(value="035720")
+        assert ticker.value == "035720"
+
+    def test_valid_ticker_preferred_share(self):
+        """Preferred-share codes are still 6 digits (e.g. 005935 삼성전자우)."""
+        ticker = Ticker(value="005935")
+        assert ticker.value == "005935"
 
     def test_ticker_equality(self):
-        t1 = Ticker(value="AAPL")
-        t2 = Ticker(value="AAPL")
+        t1 = Ticker(value="005930")
+        t2 = Ticker(value="005930")
         assert t1 == t2
 
     def test_ticker_hash(self):
-        t1 = Ticker(value="AAPL")
-        t2 = Ticker(value="AAPL")
+        t1 = Ticker(value="005930")
+        t2 = Ticker(value="005930")
         assert hash(t1) == hash(t2)
         assert len({t1, t2}) == 1
 
+    def test_invalid_ticker_old_us_format(self):
+        """Old US-style alphabetic tickers must now be rejected."""
+        with pytest.raises(ValueError):
+            Ticker(value="AAPL")
+
+    def test_invalid_ticker_too_short(self):
+        with pytest.raises(ValueError):
+            Ticker(value="12345")
+
     def test_invalid_ticker_too_long(self):
         with pytest.raises(ValueError):
-            Ticker(value="TOOLONG")
+            Ticker(value="1234567")
 
     def test_invalid_ticker_empty(self):
         with pytest.raises(ValueError):
