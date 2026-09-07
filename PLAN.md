@@ -336,3 +336,25 @@ Tasks 5-8 all complete, reviewed clean. Ticker/Exchange are KRX-native (pulled f
 
 **Report:** status, the market-cap/tick-size sources used (or why they were left as `NotImplementedError`), what currency/timezone changes were made, test results, and the report file path.
 
+---
+
+## Phase 2 Results
+
+Complete (Task 5 + Task 9). Domain model is KRX-native: `Ticker` (6-digit codes), `Exchange` (KOSPI/KOSDAQ/KONEX), tick-size table (`domain/services/tick_size.py`, cited 2023-01-25 unified table, reviewer-verified plausible), `Account`/`PaperBroker` currency = KRW, trading-window settings = KRX hours (KST). Market-cap buckets remain `NotImplementedError` — genuinely a cross-sectional/rank-based classification, not a per-stock KRW-threshold problem; out of scope until something needs it.
+
+**No live credentials of any kind are available in this environment** (confirmed independently by Task 3 and Task 6's searches: no `.env` beyond `.env.example` anywhere in `gpt-quant-v2`, `gpt-quant-v2-krx`, or `kiwoom-client`). Per the operating directive for this whole plan, this is the one category of gap that stays open pending the user — everything buildable without live credentials should still get built, tested against mocks, and clearly marked where a real credential would need to close the loop.
+
+## Task 10: KiwoomBroker implementation (Phase 3)
+
+**Goal:** implement the broker adapter for Korean equities, per the plan's original Phase 3 section, working entirely from Task 3's source-reading spike (no live credentials available) — mocked at the `KiwoomAPI` boundary.
+
+**Steps:**
+1. Read Task 3's spike doc (`docs/spikes/003-kiwoom-mock-trading.md`) first — it already documents `kiwoom-client`'s actual shapes and flags a real ambiguity: its own README and examples **disagree** on order-request field names (`ord_dv`/`orig_ord_no` vs `trde_tp`/`org_ord_no`). Do not silently pick one and hope — either (a) support both via a small compatibility shim with a clear comment explaining why, or (b) pick the one that looks more authoritative (the actual `domestic/order.py` source, if it settles the question — check again, don't just trust the spike doc's summary) and add a loud `TODO`/comment + a report note that this must be verified against a real mock call before Phase 3 code goes anywhere near live capital. Do not guess silently.
+2. Implement `src/gpt_quant_v2/infrastructure/brokers/kiwoom_broker.py`, a `KiwoomBroker` implementing whatever abstract interface `infrastructure/brokers/base.py` defines (`connect`/`get_account`/`get_positions`/`place_order`/`cancel_order`/`get_order_status`/`get_quote` or however it's actually named — read `base.py` first, don't assume method names). Map `kiwoom_client.KiwoomAPI`/`AsyncKiwoomAPI` calls (from `domestic/order.py`, `domestic/account.py`) into this interface. Since `kiwoom-client` has no schema/validation layer (raw dict in/out, per Task 3's finding), add explicit mapping/validation at this boundary — don't pass raw dicts through untyped.
+3. Add `BrokerType.KIWOOM` to whatever enum currently has `PAPER`/`ALPACA`/`IBKR` (check Task 8's settings.py changes first — it may already be partially prepared), with `kiwoom_app_key`/`kiwoom_app_secret`/`is_mock` settings sourced from env vars, never hardcoded. Wire the broker factory (wherever `BrokerType` is switched on to construct a broker instance) to construct `KiwoomBroker` for `BrokerType.KIWOOM`.
+4. Since there are no live credentials, all tests must mock `KiwoomAPI` at the boundary (don't attempt a live call — Task 3 already confirmed none is possible here). Write tests for: successful order placement mapping, the field-name ambiguity handling from step 1, error/failure response mapping, account/position/quote mapping.
+5. Write a new ADR: `docs/adr/006-kiwoom-broker.md` — per the original plan's note, explicitly supersedes parts of ADR-005 (the abstraction is kept, but concrete adapters are now `PaperBroker` + `KiwoomBroker`, replacing Alpaca/IBKR); note the historical irony that the pre-v2 system was KIS-based and this is a return to a Korean broker via a different vendor. Check `docs/adr/005-abstract-broker.md` and the existing ADR index/README first for this repo's ADR format/conventions.
+6. Do not touch `PaperBroker`'s cost-model/commission logic (that's Phase 5), and do not touch interfaces/API routers (Phase 6).
+
+**Report:** status, how the field-name ambiguity was resolved (and the explicit flag that it needs real-credential verification before live use), what was implemented, test results, and the report file path.
+
