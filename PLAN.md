@@ -445,3 +445,26 @@ Complete (Task 13, approved). `BacktestResult` is no longer a placeholder: `back
 
 **Report:** status, what was changed (or confirmation nothing needed changing, with evidence), build/typecheck results if applicable, and the report file path.
 
+---
+
+## Phase 6 Results
+
+Complete (Tasks 14-15). All tracked interface-layer debt closed: both `isalpha()` gates + 4 sibling length constraints fixed in `portfolio.py`/`news.py` (reusing domain `Ticker`), `BrokerSettings.type` env-prefix bug fixed and end-to-end tested (`GPTQ_BROKER_TYPE=kiwoom` → `KiwoomBroker` via unmocked `create_broker()`), ADR-006 corrected, MCP tool language KRX-ified without touching Task 12's `is_placeholder` discipline, frontend currency `$`→`₩`. **Remaining known, deliberately-untouched debt**: `signals.py`/`trades.py` still carry the same `min_length`/`max_length` US-format constraint pattern (same bug class, different files, never in any task's named scope) — track for whenever those files are next touched, not urgent since no live trading loop calls them yet.
+
+## Task 16: Local rename mechanics (Phase 7, prep only — no GitHub rename)
+
+**Goal:** do all the local, worktree-contained rename work so the repo is ready to become its new identity, WITHOUT executing the actual GitHub repository rename — that's a real, semi-irreversible action affecting a public repo's URL/identity and needs the user's explicit go-ahead, tracked as an open item alongside the OpenAI API key gap from Task 1.
+
+**Chosen name (provisional, pending user confirmation): `krx-signal-engine`.** Rationale, from Task 4's own findings: this repo is confirmed to sit downstream of `quant-airflow` (batch data) and alongside `kr-quant` (research) as the live trading/signal-generation component — `krx-signal-engine` is the plan's own candidate that "emphasizes it's the signal-generation/execution engine of the stack, distinguishing it from krx-news-client (data) and kr-quant (research) — clearest fit if this repo is meant to sit downstream of quant-airflow/kr-quant," which Task 4 confirmed is exactly the architecture. The other two candidates (`kr-news-quant`, `toss-alpha`) remain on record in this plan's earlier section if the user prefers a different name — this task's renames are mechanical and can be re-run with a different slug if the user picks otherwise.
+
+**Steps:**
+1. Rename the Python package: `src/gpt_quant_v2/` → `src/krx_signal_engine/` (or the confirmed final slug), updating every internal import (`from gpt_quant_v2...` → `from krx_signal_engine...`) across `src/`, `tests/`, `scripts/`. This is a large mechanical rename — a careful find-and-replace plus a full test-suite run to confirm nothing broke is the right approach, not a manual file-by-file edit.
+2. Update `pyproject.toml`: `name = "gpt-quant-v2"` → the new slug, `[project.scripts]`/entry points if any reference the old package name, `packages`/`include` paths if explicitly listed.
+3. Update `docker/docker-compose.yml` and `Dockerfile`: container names, network name, any `gpt_quant`/`gpt-quant-v2` string throughout.
+4. Update `.github/workflows/*.yml`: workflow names/job names referencing the old name (cosmetic, doesn't need to be exhaustive — CI will still function either way, this is about not leaving a confusing old name in workflow UI).
+5. Update `README.md` and `docs/adr/README.md`/ADR index for the new name; add a note (in README, one paragraph) that this repo was redeveloped from `gpt-quant-v2` (link back for provenance) per the plan's own suggestion.
+6. Do NOT rename the actual GitHub repository (no `gh repo rename`, no remote URL change). Do NOT touch `origin`'s remote config. Do NOT push anything that asserts the new identity is final/live — this task's commits stay on the `feat/krx-toss-redevelopment` branch like everything else in this plan.
+7. Run the full test suite after the package rename to confirm the mechanical rewrite didn't silently break imports (expect the same 40-failure baseline, zero new regressions — the rename itself shouldn't touch test logic, just import paths).
+
+**Report:** status, confirmation of the chosen provisional name and rationale, what was renamed, test results (full suite, confirming the established 40-failure baseline held), and an explicit reminder in the report that the actual GitHub rename is NOT done and needs a separate, explicit go-ahead — same category of open item as Task 1's pending API key.
+
