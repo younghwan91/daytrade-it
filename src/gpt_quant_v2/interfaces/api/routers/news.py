@@ -7,9 +7,10 @@ from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, Field, HttpUrl, ValidationError
 
 from gpt_quant_v2.domain.value_objects.sentiment import SentimentLabel
+from gpt_quant_v2.domain.value_objects.ticker import Ticker
 from gpt_quant_v2.interfaces.api.dependencies import (
     CorrelationIdDep,
     CurrentUserDep,
@@ -58,9 +59,9 @@ class NewsAnalyzeRequest(BaseModel):
     """Request to trigger news analysis for a ticker."""
 
     ticker: str = Field(
-        min_length=1,
-        max_length=5,
-        description="Stock ticker to analyze news for",
+        min_length=6,
+        max_length=6,
+        description="Stock ticker to analyze news for (6-digit KRX code, e.g. '005930')",
     )
     hours: int = Field(
         default=24,
@@ -113,9 +114,9 @@ async def list_news(
     current_user: CurrentUserDep,
     ticker: str | None = Query(
         default=None,
-        description="Filter by stock ticker",
-        min_length=1,
-        max_length=5,
+        description="Filter by stock ticker (KRX 6-digit code, e.g. '005930')",
+        min_length=6,
+        max_length=6,
     ),
     hours: int = Query(
         default=24,
@@ -188,14 +189,14 @@ async def analyze_news(
     The analysis runs asynchronously and updates the
     sentiment and analysis_result fields of each article.
     """
-    ticker = request.ticker.upper()
-
-    # Validate ticker format
-    if not ticker.isalpha():
+    # Validate ticker format (KRX 6-digit numeric code, e.g. "005930")
+    try:
+        ticker = Ticker(value=request.ticker).value
+    except ValidationError as exc:
         raise HTTPException(
             status_code=400,
-            detail="Invalid ticker format. Must be 1-5 uppercase letters.",
-        )
+            detail="Invalid ticker format. Must be a 6-digit KRX code (e.g. '005930').",
+        ) from exc
 
     # TODO: Implement actual news fetching and analysis
     # This would typically:

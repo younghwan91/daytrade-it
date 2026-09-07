@@ -7,8 +7,9 @@ from decimal import Decimal
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
+from gpt_quant_v2.domain.value_objects.ticker import Ticker
 from gpt_quant_v2.interfaces.api.dependencies import (
     CorrelationIdDep,
     CurrentUserDep,
@@ -212,9 +213,9 @@ async def list_positions(
     current_user: CurrentUserDep,
     ticker: str | None = Query(
         default=None,
-        description="Filter by stock ticker",
-        min_length=1,
-        max_length=5,
+        description="Filter by stock ticker (KRX 6-digit code, e.g. '005930')",
+        min_length=6,
+        max_length=6,
     ),
     side: str | None = Query(
         default=None,
@@ -258,9 +259,9 @@ async def get_performance_metrics(
     ),
     benchmark: str | None = Query(
         default=None,
-        description="Benchmark ticker for comparison (e.g., SPY)",
-        min_length=1,
-        max_length=5,
+        description="Benchmark ticker for comparison (e.g., '069500' for KODEX 200)",
+        min_length=6,
+        max_length=6,
     ),
 ) -> PerformanceMetrics:
     """Get portfolio performance metrics.
@@ -312,14 +313,14 @@ async def close_position(
     If quantity is not specified, closes the entire position.
     If quantity is specified, partially closes the position.
     """
-    ticker = ticker.upper()
-
-    # Validate ticker format
-    if not ticker.isalpha() or len(ticker) > 5:
+    # Validate ticker format (KRX 6-digit numeric code, e.g. "005930")
+    try:
+        ticker = Ticker(value=ticker).value
+    except ValidationError as exc:
         raise HTTPException(
             status_code=400,
-            detail="Invalid ticker format. Must be 1-5 uppercase letters.",
-        )
+            detail="Invalid ticker format. Must be a 6-digit KRX code (e.g. '005930').",
+        ) from exc
 
     # TODO: Implement actual position lookup and closing
     raise HTTPException(

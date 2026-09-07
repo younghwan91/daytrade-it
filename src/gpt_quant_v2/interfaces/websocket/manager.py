@@ -31,8 +31,8 @@ class ConnectionManager:
     Usage:
         >>> manager = ConnectionManager()
         >>> await manager.connect(websocket, "client-123")
-        >>> await manager.subscribe("client-123", ["signals:AAPL", "trades:all"])
-        >>> await manager.broadcast("signals:AAPL", {"type": "signal", "data": {...}})
+        >>> await manager.subscribe("client-123", ["signals:005930", "trades:all"])
+        >>> await manager.broadcast("signals:005930", {"type": "signal", "data": {...}})
         >>> await manager.disconnect("client-123")
     """
 

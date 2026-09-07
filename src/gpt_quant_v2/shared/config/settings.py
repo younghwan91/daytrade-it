@@ -452,7 +452,15 @@ class BrokerSettings(BaseSettings):
 
     type: BrokerType = Field(
         default=BrokerType.PAPER,
-        alias="broker_type",
+        # NOTE: pydantic-settings treats an `alias` as the *complete* env
+        # var name for that field and ignores `env_prefix` entirely once an
+        # alias is set (this is documented pydantic-settings behavior, not
+        # a bug in pydantic-settings itself -- the bug was here, using an
+        # unprefixed alias). So the alias must spell out the fully
+        # prefixed name (`GPTQ_BROKER_TYPE`) rather than the bare
+        # `broker_type`, or `env_prefix="GPTQ_"` above silently has no
+        # effect on this field and only the unprefixed `BROKER_TYPE` works.
+        alias="GPTQ_BROKER_TYPE",
         description="Broker type",
     )
     alpaca_api_key: SecretStr | None = Field(

@@ -64,9 +64,11 @@ support.
 
 `BrokerType` (`shared/config/settings.py`) gains a `KIWOOM = "kiwoom"`
 member. `BrokerSettings` gains `kiwoom_app_key`/`kiwoom_app_secret`
-(`SecretStr`, required when `type == KIWOOM`, sourced only from
-`GPTQ_BROKER__KIWOOM_APP_KEY`/`GPTQ_BROKER__KIWOOM_APP_SECRET` env vars --
-never hardcoded), `kiwoom_account_no` (reporting only), and
+(`SecretStr`, required when `type == KIWOOM`, sourced only from the flat
+`GPTQ_KIWOOM_APP_KEY`/`GPTQ_KIWOOM_APP_SECRET` env vars -- `BrokerSettings`
+uses `env_prefix="GPTQ_"` directly, not a nested `GPTQ_BROKER__` prefix, so
+there is no double `BROKER` segment; never hardcoded), `kiwoom_account_no`
+(reporting only), and
 `kiwoom_is_mock` (defaults `True`, so a missing env var never silently
 targets live capital). The broker factory
 (`infrastructure/brokers/factory.py`) constructs a `kiwoom_client.KiwoomAPI`

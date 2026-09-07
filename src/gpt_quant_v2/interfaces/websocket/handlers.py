@@ -70,7 +70,7 @@ class WebSocketMessageHandler:
 
     Usage:
         >>> handler = WebSocketMessageHandler(connection_manager)
-        >>> response = await handler.handle_message(client_id, {"type": "subscribe", "channels": ["signals:AAPL"]})
+        >>> response = await handler.handle_message(client_id, {"type": "subscribe", "channels": ["signals:005930"]})
     """
 
     # Valid channel patterns
@@ -108,7 +108,7 @@ class WebSocketMessageHandler:
         if channel in self.VALID_WILDCARD_CHANNELS:
             return True
 
-        # Check prefix-based channels (e.g., signals:AAPL)
+        # Check prefix-based channels (e.g., signals:005930)
         for prefix in self.VALID_CHANNEL_PREFIXES:
             if channel.startswith(prefix) and len(channel) > len(prefix):
                 return True

@@ -73,7 +73,7 @@ async def test_get_positions_with_ticker_filter(async_client: AsyncClient) -> No
     """Test listing positions filtered by ticker."""
     response = await async_client.get(
         "/api/v1/portfolio/positions",
-        params={"ticker": "AAPL"},
+        params={"ticker": "005930"},
     )
 
     assert response.status_code == 200
@@ -181,7 +181,7 @@ async def test_get_performance_metrics_with_benchmark(async_client: AsyncClient)
     """Test getting performance metrics with benchmark comparison."""
     response = await async_client.get(
         "/api/v1/portfolio/performance",
-        params={"benchmark": "SPY"},
+        params={"benchmark": "069500"},
     )
 
     assert response.status_code == 200
@@ -195,7 +195,7 @@ async def test_get_performance_metrics_with_benchmark(async_client: AsyncClient)
 async def test_close_position_not_found(async_client: AsyncClient) -> None:
     """Test closing a non-existent position returns 404."""
     response = await async_client.post(
-        "/api/v1/portfolio/positions/AAPL/close",
+        "/api/v1/portfolio/positions/005930/close",
         json={},
     )
 
@@ -208,7 +208,7 @@ async def test_close_position_not_found(async_client: AsyncClient) -> None:
 async def test_close_position_with_quantity(async_client: AsyncClient) -> None:
     """Test closing a position with specific quantity."""
     response = await async_client.post(
-        "/api/v1/portfolio/positions/TSLA/close",
+        "/api/v1/portfolio/positions/000660/close",
         json={"quantity": "50"},
     )
 
@@ -220,7 +220,7 @@ async def test_close_position_with_quantity(async_client: AsyncClient) -> None:
 async def test_close_position_with_limit_price(async_client: AsyncClient) -> None:
     """Test closing a position with limit price."""
     response = await async_client.post(
-        "/api/v1/portfolio/positions/GOOG/close",
+        "/api/v1/portfolio/positions/035420/close",
         json={"limit_price": "150.00"},
     )
 
@@ -245,7 +245,7 @@ async def test_close_position_invalid_ticker(async_client: AsyncClient) -> None:
 async def test_close_position_invalid_quantity(async_client: AsyncClient) -> None:
     """Test closing a position with invalid quantity returns 422."""
     response = await async_client.post(
-        "/api/v1/portfolio/positions/AAPL/close",
+        "/api/v1/portfolio/positions/005930/close",
         json={"quantity": "-50"},  # Negative not allowed
     )
 
@@ -256,7 +256,7 @@ async def test_close_position_invalid_quantity(async_client: AsyncClient) -> Non
 async def test_close_position_invalid_limit_price(async_client: AsyncClient) -> None:
     """Test closing a position with invalid limit price returns 422."""
     response = await async_client.post(
-        "/api/v1/portfolio/positions/AAPL/close",
+        "/api/v1/portfolio/positions/005930/close",
         json={"limit_price": "0"},  # Must be > 0
     )
 

@@ -434,7 +434,7 @@ def _get_context() -> MCPToolContext:
     description="Get comprehensive analysis for a stock ticker including price data, news sentiment, and active signals",
 )
 async def analyze_ticker(
-    ticker: Annotated[str, "Stock ticker symbol (e.g., AAPL, MSFT, GOOGL)"],
+    ticker: Annotated[str, "KRX 6-digit stock code (e.g., '005930', '000660')"],
     include_news: Annotated[bool, "Whether to include recent news analysis"] = True,
     include_signals: Annotated[bool, "Whether to include active trading signals"] = True,
     news_hours: Annotated[int, "Hours of news history to analyze"] = 24,
@@ -570,7 +570,7 @@ async def analyze_ticker(
     description="Get recent news articles for a ticker with optional sentiment analysis",
 )
 async def get_news(
-    ticker: Annotated[str, "Stock ticker symbol"],
+    ticker: Annotated[str, "KRX 6-digit stock code (e.g., '005930')"],
     hours: Annotated[int, "Hours of news history to fetch"] = 24,
     limit: Annotated[int, "Maximum number of articles"] = 20,
     analyze_sentiment: Annotated[bool, "Whether to analyze sentiment"] = True,
@@ -630,7 +630,7 @@ async def get_news(
     description="Get historical OHLCV price data for a ticker",
 )
 async def get_price_history(
-    ticker: Annotated[str, "Stock ticker symbol"],
+    ticker: Annotated[str, "KRX 6-digit stock code (e.g., '005930')"],
     days: Annotated[int, "Number of days of history"] = 30,
     interval: Annotated[str, "Data interval (daily, weekly, monthly)"] = "daily",
 ) -> list[PriceBar]:
@@ -679,7 +679,7 @@ async def get_price_history(
 )
 async def get_signals(
     min_confidence: Annotated[float, "Minimum confidence threshold (0.0-1.0)"] = 0.7,
-    ticker: Annotated[str | None, "Filter by specific ticker"] = None,
+    ticker: Annotated[str | None, "Filter by specific KRX 6-digit stock code"] = None,
     direction: Annotated[str | None, "Filter by direction (BUY/SELL)"] = None,
     limit: Annotated[int, "Maximum signals to return"] = 20,
 ) -> list[Signal]:
@@ -743,7 +743,7 @@ async def get_signals(
 )
 async def execute_trade(
     signal_id: Annotated[str, "UUID of the trading signal to execute"],
-    quantity: Annotated[int | None, "Number of shares (None = auto-size)"] = None,
+    quantity: Annotated[int | None, "Number of shares (주, None = auto-size)"] = None,
     order_type: Annotated[str, "Order type (MARKET/LIMIT)"] = "MARKET",
     limit_price: Annotated[float | None, "Limit price (required for LIMIT orders)"] = None,
 ) -> TradeResult:
@@ -819,8 +819,8 @@ async def execute_trade(
     description="Close an open position for a ticker",
 )
 async def close_position(
-    ticker: Annotated[str, "Stock ticker symbol"],
-    quantity: Annotated[int | None, "Shares to close (None = close all)"] = None,
+    ticker: Annotated[str, "KRX 6-digit stock code (e.g., '005930')"],
+    quantity: Annotated[int | None, "Shares (주) to close (None = close all)"] = None,
 ) -> TradeResult:
     """Close an open position.
 
@@ -928,7 +928,7 @@ async def get_portfolio() -> Portfolio:
     description="Get historical trade records",
 )
 async def get_trade_history(
-    ticker: Annotated[str | None, "Filter by specific ticker"] = None,
+    ticker: Annotated[str | None, "Filter by specific KRX 6-digit stock code"] = None,
     status: Annotated[str | None, "Filter by status (OPEN/CLOSED/ALL)"] = None,
     limit: Annotated[int, "Maximum trades to return"] = 50,
 ) -> list[TradeHistoryItem]:
@@ -1163,7 +1163,7 @@ async def get_system_status() -> SystemStatus:
 )
 async def train_model(
     model_name: Annotated[str, "Name for the trained model"],
-    tickers: Annotated[list[str] | None, "Tickers to train on (None = all)"] = None,
+    tickers: Annotated[list[str] | None, "KRX 6-digit stock codes to train on (None = all)"] = None,
     lookback_days: Annotated[int, "Days of historical data to use"] = 365,
     optimize_hyperparams: Annotated[bool, "Whether to run hyperparameter optimization"] = True,
 ) -> TrainingResult:

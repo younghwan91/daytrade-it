@@ -129,8 +129,8 @@ async def websocket_endpoint(
         - Via first message: {"type": "auth", "token": "<jwt_token>"}
 
     Message Types (client -> server):
-        - subscribe: {"type": "subscribe", "channels": ["signals:AAPL", "trades:all"]}
-        - unsubscribe: {"type": "unsubscribe", "channels": ["signals:AAPL"]}
+        - subscribe: {"type": "subscribe", "channels": ["signals:005930", "trades:all"]}
+        - unsubscribe: {"type": "unsubscribe", "channels": ["signals:005930"]}
         - ping: {"type": "ping"}
 
     Message Types (server -> client):
