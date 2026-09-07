@@ -528,29 +528,28 @@ class MCPServer:
 
 
 def create_server(
-    tiingo_api_key: str | None = None,
     openai_api_key: str | None = None,
 ) -> MCPServer:
     """Create an MCP server with configured services.
 
     Args:
-        tiingo_api_key: Optional Tiingo API key
         openai_api_key: Optional OpenAI API key
 
     Returns:
         Configured MCPServer instance
+
+    Note (whole-branch review finding #2): this used to also accept
+    ``tiingo_api_key`` and construct a ``TiingoClient`` (US market
+    data/news) into the live MCP context here. That's been removed --
+    ``TiingoClient`` is not this system's market (KRX), and Task 7's
+    Toss/DART poller (``infrastructure/external/news_poller.py``) has no
+    MCP-layer consumer yet to construct instead. See ``tools.py``'s
+    ``get_news()``/``get_price_history()`` (now raise
+    ``NotImplementedError``) and ``PLAN.md``'s Phase 6 Results for the
+    tracked gap.
     """
     # Create context with available services
     context = MCPToolContext()
-
-    # Initialize Tiingo client if API key provided
-    if tiingo_api_key:
-        try:
-            from krx_signal_engine.infrastructure.external.tiingo_client import TiingoClient
-
-            context.tiingo_client = TiingoClient(api_key=tiingo_api_key)
-        except Exception as e:
-            logger.warning("Failed to initialize Tiingo client", error=str(e))
 
     # Initialize OpenAI client if API key provided
     if openai_api_key:
@@ -575,11 +574,9 @@ async def main() -> None:
     import os
 
     # Get API keys from environment
-    tiingo_key = os.environ.get("TIINGO_API_KEY") or os.environ.get("GPTQ_TIINGO_API_KEY")
     openai_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("GPTQ_OPENAI_API_KEY")
 
     server = create_server(
-        tiingo_api_key=tiingo_key,
         openai_api_key=openai_key,
     )
 

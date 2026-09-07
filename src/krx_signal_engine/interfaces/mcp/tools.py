@@ -137,6 +137,14 @@ class BacktestResult(BaseModel):
     metrics, and would only be ``True`` again if some future caller path
     reintroduces a stub (which should not happen without also reverting
     this docstring and the tool's description).
+
+    WHOLE-BRANCH REVIEW FINDING (unresolved as of this fix wave): engine
+    real-ness (``is_placeholder``) and strategy real-ness are two
+    different things. See ``strategy_is_placeholder`` below -- it is
+    currently ALWAYS ``True`` because ``BacktestHandler._generate_signal()``
+    is a demo volume-momentum stub, not this system's real
+    ``SignalGenerator``/``RiskGate``. Do not treat ``is_placeholder=False``
+    alone as evidence the news-driven strategy was validated.
     """
 
     strategy: str
@@ -158,6 +166,30 @@ class BacktestResult(BaseModel):
             "backtest engine's computed output (see Phase 5). Callers "
             "MUST check this before treating sharpe_ratio/max_drawdown_pct/"
             "win_rate/etc. as real performance data."
+        ),
+    )
+    strategy_is_placeholder: bool = Field(
+        default=True,
+        description=(
+            "ALWAYS True today -- distinct from is_placeholder above, and "
+            "just as important. is_placeholder=False means the BACKTEST "
+            "ENGINE is real: real KRX historical bars (Task 6), a real "
+            "Korean cost model (증권거래세 + 위탁수수료 + slippage, Task 13), "
+            "and genuinely simulated fills/P&L. It says nothing about the "
+            "STRATEGY being tested. `application/handlers/backtest.py`'s "
+            "`_generate_signal()` is still an unchanged demo "
+            "volume-momentum stub (buy on volume > 1.5x average, exit on "
+            "+5%/-2%) -- it never consults this system's real "
+            "`domain/services/signal_generator.py::SignalGenerator`, "
+            "`risk_gate.py::RiskGate`, `risk_manager.py::RiskManager`, or "
+            "any news/sentiment data. A caller seeing is_placeholder=False "
+            "must NOT conclude the news-driven strategy was validated -- "
+            "only that a toy strategy was backtested with real data and "
+            "real costs. strategy_is_placeholder will become False only "
+            "once backtest.py is rewired to route signal generation "
+            "through the real SignalGenerator/RiskGate (tracked as "
+            "follow-up work, not done as of this fix wave -- see PLAN.md "
+            "Phase 5 Results)."
         ),
     )
 
@@ -333,6 +365,7 @@ class MCPToolContext:
         model_trainer: Any | None = None,
         settings: Any | None = None,
         backtest_handler: Any | None = None,
+        risk_manager: Any | None = None,
     ) -> None:
         """Initialize the tool context with service dependencies."""
         self.tiingo_client = tiingo_client
@@ -348,6 +381,14 @@ class MCPToolContext:
         #: the backtest() tool below (Task 13) if not injected here via a
         #: DI container -- see backtest()'s docstring.
         self.backtest_handler = backtest_handler
+        #: domain.services.risk_manager.RiskManager (wraps Task 11's
+        #: RiskGate). Whole-branch review finding #4: RiskManager/RiskGate
+        #: had zero production call sites -- execute_trade() below now
+        #: calls ctx.risk_manager.validate_trade(...) before place_order().
+        #: Defaults to a plain ``RiskManager()`` (default RiskConfig +
+        #: RiskGate) if not injected, same lazy-default pattern as
+        #: backtest_handler above.
+        self.risk_manager = risk_manager
         self._last_signal_at: datetime | None = None
         self._last_trade_at: datetime | None = None
 
@@ -367,6 +408,7 @@ class MCPToolContext:
     def from_container(cls, container: Container) -> MCPToolContext:
         """Create a context from a DI container."""
         # Lazy imports to avoid circular dependencies
+        from krx_signal_engine.domain.services.risk_manager import RiskManager
         from krx_signal_engine.infrastructure.brokers.base import BrokerInterface
         from krx_signal_engine.infrastructure.external.openai_client import OpenAIClient
         from krx_signal_engine.infrastructure.external.tiingo_client import TiingoClient
@@ -401,6 +443,9 @@ class MCPToolContext:
             if container.is_registered(BrokerInterface)
             else None,
             settings=container.resolve(Settings) if container.is_registered(Settings) else None,
+            risk_manager=container.resolve(RiskManager)
+            if container.is_registered(RiskManager)
+            else RiskManager(),
         )
         cls.set_instance(context)
         return context
@@ -579,50 +624,26 @@ async def get_news(
 
     Returns list of news items with optional sentiment analysis including
     scores, labels, and key extracted points.
+
+    NOT WIRED TO A REAL SOURCE (whole-branch review finding #2): this tool
+    is still implemented against ``TiingoClient`` (US market news), which
+    is no longer constructed anywhere in this application (see
+    ``mcp_server.py::create_server``/``main``). Task 7's
+    ``infrastructure/external/toss_news_client.py``/``dart_client.py``/
+    ``news_poller.py`` (Toss/DART, the actual news source for this KRX
+    system) have zero MCP-layer consumers. Always raises until that wiring
+    is done -- see ``PLAN.md``'s Phase 1 Results / Task 7 and Phase 6
+    Results for the tracked gap.
+
+    Raises:
+        NotImplementedError: Always, until Toss/DART is wired in here.
     """
-    ctx = _get_context()
-    ticker = ticker.upper().strip()
-    results: list[NewsItem] = []
-
-    if not ctx.tiingo_client:
-        return results
-
-    try:
-        news_start = datetime.now(UTC) - timedelta(hours=hours)
-        articles = await ctx.tiingo_client.get_news(
-            tickers=[ticker],
-            start_date=news_start,
-            limit=limit,
-        )
-
-        for article in articles:
-            news_item = NewsItem(
-                id=article.id,
-                title=article.title,
-                source=article.source,
-                url=str(article.url),
-                published_at=article.published_date,
-                tickers=article.tickers,
-            )
-
-            # Analyze sentiment if requested and OpenAI client available
-            if analyze_sentiment and ctx.openai_client:
-                try:
-                    domain_article = article.to_domain_entity()
-                    analysis = await ctx.openai_client.analyze_sentiment(domain_article)
-                    news_item.sentiment_score = analysis.sentiment_score
-                    news_item.sentiment_label = analysis.sentiment_label
-                    news_item.sentiment_confidence = analysis.confidence
-                    news_item.key_points = analysis.key_points
-                except Exception:
-                    pass
-
-            results.append(news_item)
-
-    except Exception:
-        pass
-
-    return results
+    raise NotImplementedError(
+        "get_news() is not wired to a real news source -- Toss/DART "
+        "(infrastructure/external/toss_news_client.py, dart_client.py, "
+        "news_poller.py, Task 7) have zero MCP-layer consumers yet. See "
+        "PLAN.md Phase 1 Results / Task 7 and Phase 6 Results."
+    )
 
 
 @mcp_tool(
@@ -637,40 +658,28 @@ async def get_price_history(
     """Get historical OHLCV price data.
 
     Returns list of price bars with open, high, low, close, volume.
+
+    NOT WIRED TO A REAL SOURCE (whole-branch review finding #2): this tool
+    is still implemented against ``TiingoClient`` (US market data), which
+    is no longer constructed anywhere in this application (see
+    ``mcp_server.py::create_server``/``main``). Task 6's
+    ``infrastructure/external/quant_airflow_db_client.py`` (the real KRX
+    daily-bar source, already wired into ``backtest()`` below) has no
+    MCP-layer tool exposing it directly yet. See ``PLAN.md``'s Phase 1
+    Results / Task 6 and Phase 6 Results for the tracked gap.
+
+    Raises:
+        NotImplementedError: Always, until a real KRX price source is
+            wired in here.
     """
-    ctx = _get_context()
-    ticker = ticker.upper().strip()
-    results: list[PriceBar] = []
-
-    if not ctx.tiingo_client:
-        return results
-
-    try:
-        end_date = datetime.now(UTC)
-        start_date = end_date - timedelta(days=days)
-
-        prices = await ctx.tiingo_client.get_eod_prices(
-            tickers=[ticker],
-            start_date=start_date,
-            end_date=end_date,
-        )
-
-        for bar in prices:
-            results.append(
-                PriceBar(
-                    timestamp=bar.get("date", datetime.now(UTC)),
-                    open=Decimal(str(bar.get("open", 0))),
-                    high=Decimal(str(bar.get("high", 0))),
-                    low=Decimal(str(bar.get("low", 0))),
-                    close=Decimal(str(bar.get("close", 0))),
-                    volume=int(bar.get("volume", 0)),
-                )
-            )
-
-    except Exception:
-        pass
-
-    return results
+    raise NotImplementedError(
+        "get_price_history() is not wired to a real KRX price source -- "
+        "TiingoClient (US market data) is no longer constructed anywhere "
+        "in this application. Task 6's QuantAirflowDBClient "
+        "(infrastructure/external/quant_airflow_db_client.py) has no "
+        "MCP-layer tool exposing it directly yet. See PLAN.md Phase 1 "
+        "Results / Task 6 and Phase 6 Results."
+    )
 
 
 @mcp_tool(
@@ -737,6 +746,79 @@ async def get_signals(
     return results
 
 
+def _default_risk_manager() -> Any:
+    """Build a default ``RiskManager`` (default ``RiskConfig`` + ``RiskGate``).
+
+    Lazily imported/constructed, same pattern as ``_default_backtest_handler``
+    below -- importing this module shouldn't require constructing domain
+    services eagerly, only calling a tool that needs one without an
+    injected ``ctx.risk_manager`` does.
+    """
+    from krx_signal_engine.domain.services.risk_manager import RiskManager  # noqa: PLC0415
+
+    return RiskManager()
+
+
+def _risk_manager_account_from_broker(account: Any) -> Any:
+    """Map a broker ``Account`` (``infrastructure/brokers/base.py``) to
+    ``RiskManager``'s own ``Account`` dataclass (``domain/services/risk_manager.py``).
+
+    The two are structurally similar but distinct types. ``daily_pnl``
+    defaults to 0 -- nothing in this MCP context currently tracks
+    intraday realized P&L for the account, so ``RiskManager``'s daily-loss
+    check is a no-op via this call site until that's wired up separately;
+    every other check (risk gate, exposure, buying power, risk/reward,
+    position size) still runs against real broker data.
+    """
+    from krx_signal_engine.domain.services.risk_manager import (
+        Account as RiskAccount,  # noqa: PLC0415
+    )
+
+    return RiskAccount(
+        balance=account.cash,
+        equity=account.equity,
+        buying_power=account.buying_power,
+        daily_pnl=Decimal("0"),
+    )
+
+
+def _risk_manager_positions_from_broker(positions: list[Any]) -> list[Any]:
+    """Map broker ``Position`` objects to domain ``Position`` entities for
+    ``RiskManager.validate_trade``'s ``current_positions`` argument.
+
+    Best-effort: the domain entity requires ``opened_at``, which the
+    broker's own ``Position`` doesn't carry, so ``now_kst()`` is used as a
+    placeholder -- fine here since ``validate_trade``'s exposure/position
+    checks read ``ticker``/``quantity``/``market_value``, never
+    ``opened_at``. Positions the domain entity would reject (zero
+    quantity, non-positive average_price) are skipped rather than raising,
+    since risk validation shouldn't fail *because of* a malformed existing
+    position -- it should still evaluate the trade against the positions
+    it can understand.
+    """
+    from krx_signal_engine.domain.entities import Position as DomainPosition  # noqa: PLC0415
+    from krx_signal_engine.domain.value_objects import Ticker as DomainTicker  # noqa: PLC0415
+    from krx_signal_engine.infrastructure.brokers.base import now_kst  # noqa: PLC0415
+
+    mapped: list[Any] = []
+    for p in positions:
+        if p.quantity == 0 or p.average_price <= 0:
+            continue
+        try:
+            mapped.append(
+                DomainPosition(
+                    ticker=DomainTicker(value=p.ticker),
+                    quantity=p.quantity,
+                    average_price=p.average_price,
+                    current_price=p.current_price,
+                    opened_at=now_kst(),
+                )
+            )
+        except ValueError:
+            continue
+    return mapped
+
+
 @mcp_tool(
     name="execute_trade",
     description="Execute a trade based on a trading signal",
@@ -786,6 +868,30 @@ async def execute_trade(
         else:
             quantity = 1
 
+    # Risk-gate check (whole-branch review finding #4): RiskManager/RiskGate
+    # (Task 11's flagship deliverable) had zero production call sites --
+    # every order placed through this tool now must clear
+    # RiskManager.validate_trade() first. sentiment/disclosure_type are
+    # passed as None here (best-effort): the MCP context has no wired
+    # Toss/DART consumer yet (see finding #2 / PLAN.md Phase 6 Results),
+    # so the risk gate runs on account/exposure/position/risk-reward
+    # checks only until that's wired up -- it does not silently skip the
+    # gate, it evaluates it with the data actually available.
+    if ctx.risk_manager is None:
+        ctx.risk_manager = _default_risk_manager()
+
+    risk_account = _risk_manager_account_from_broker(ctx.broker.get_account())
+    risk_positions = _risk_manager_positions_from_broker(ctx.broker.get_positions())
+    validation = ctx.risk_manager.validate_trade(
+        signal=signal,
+        account=risk_account,
+        current_positions=risk_positions,
+        sentiment=None,
+        disclosure_type=None,
+    )
+    if not validation.is_approved:
+        raise ValueError(f"Trade rejected by risk gate: {validation.reason}")
+
     # Create and place order
     order = Order(
         ticker=signal.ticker.value,
@@ -825,6 +931,19 @@ async def close_position(
     """Close an open position.
 
     If quantity is not specified, closes the entire position.
+
+    Deliberately NOT routed through ``RiskManager.validate_trade()``
+    (whole-branch review finding #4, considered and rejected for this
+    call site): ``RiskGate`` is designed as an entry-blocker, not a
+    liquidator -- see ``domain/services/risk_gate.py``'s module docstring
+    ("Generic bearish/bad sentiment -> entry-blocker only. Existing
+    positions are left alone."). Closing a position is a risk-reducing
+    exit; gating it the same way as a new entry could block a trader from
+    reducing risk exactly when they most need to, which would be actively
+    harmful. If a future caller needs the hard-severity
+    FORCE_EXIT path, that's ``RiskGate.evaluate()``/``RiskManager``'s
+    ``check_force_exit``-style logic to poll separately, not a gate on
+    this tool's own call to ``place_order()``.
     """
     ctx = _get_context()
     ticker = ticker.upper().strip()
@@ -999,7 +1118,12 @@ def _default_backtest_handler() -> Any:
         "slippage). Requires at least one KRX 6-digit ticker code. Check "
         "the response's is_placeholder field (should be False) before "
         "treating sharpe_ratio/max_drawdown_pct/win_rate/etc. as real "
-        "performance data."
+        "performance data -- BUT ALSO check strategy_is_placeholder "
+        "(currently always True): the backtest ENGINE (data/costs/fills) "
+        "is real, while the STRATEGY being simulated is still a demo "
+        "volume-momentum stub, not this system's real news-driven "
+        "SignalGenerator/RiskGate. Do not present these results as "
+        "validating the news-driven strategy."
     ),
 )
 async def backtest(
@@ -1023,6 +1147,12 @@ async def backtest(
     ``application.handlers.backtest.BacktestHandler`` runs a genuine
     simulation against real KRX daily bars and a real Korean cost model --
     see ``BacktestResult`` docstring. Returns ``is_placeholder=False``.
+
+    STRATEGY IS STILL A STUB (whole-branch review finding, unresolved as
+    of this fix wave): ``BacktestHandler._generate_signal()`` is a demo
+    volume-momentum rule, not this system's real news-driven
+    SignalGenerator/RiskGate. Returns ``strategy_is_placeholder=True`` --
+    see ``BacktestResult.strategy_is_placeholder``'s field description.
 
     Raises:
         ValueError: If `tickers` is empty/None -- a backtest needs at
@@ -1081,6 +1211,12 @@ async def backtest(
         losing_trades=metrics.losing_trades,
         win_rate=float(metrics.win_rate),
         is_placeholder=False,
+        # See BacktestResult.strategy_is_placeholder's field description:
+        # the ENGINE (data/costs/simulation) is real, but backtest.py's
+        # _generate_signal() is still a demo volume-momentum stub, not this
+        # system's real SignalGenerator/RiskGate. Always True until that's
+        # rewired -- do not flip this without also doing that rewiring.
+        strategy_is_placeholder=True,
     )
 
 
@@ -1098,11 +1234,26 @@ async def get_system_status() -> SystemStatus:
 
     components: dict[str, dict] = {}
 
-    # Check Tiingo client
-    if ctx.tiingo_client:
-        components["tiingo"] = {"status": "connected", "type": "market_data"}
-    else:
-        components["tiingo"] = {"status": "not_configured", "type": "market_data"}
+    # KRX news/market-data source status (whole-branch review finding #2):
+    # this used to report a "tiingo" component as "connected" whenever
+    # ctx.tiingo_client was set, implying a live, connected market-data
+    # source -- but TiingoClient is US market data/news, not this system's
+    # actual KRX market. mcp_server.py's create_server()/main() no longer
+    # construct a TiingoClient at all, and Task 7's Toss/DART poller
+    # (infrastructure/external/news_poller.py) has zero MCP-layer
+    # consumers -- see PLAN.md Phase 1 Results / Task 7 and Phase 6
+    # Results. Report this honestly rather than claiming a connected
+    # source that isn't the market this system trades.
+    components["krx_news_market_data"] = {
+        "status": "not_wired",
+        "type": "market_data",
+        "detail": (
+            "Toss/DART poller (infrastructure/external/news_poller.py) "
+            "exists but has no MCP-layer consumer; get_news()/"
+            "get_price_history() raise NotImplementedError. See PLAN.md "
+            "Phase 6 Results."
+        ),
+    }
 
     # Check OpenAI client
     if ctx.openai_client:

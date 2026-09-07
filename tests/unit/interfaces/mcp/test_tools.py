@@ -21,15 +21,24 @@ metrics verbatim, never re-derive them inline.
 
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from uuid import UUID
 
 import pytest
 
 from krx_signal_engine.domain.entities.signal import SignalDirection, SignalSource, TradingSignal
 from krx_signal_engine.domain.services.risk_manager import RiskManager
 from krx_signal_engine.domain.value_objects import Confidence, Ticker
+from krx_signal_engine.infrastructure.brokers.base import Account as BrokerAccount
+from krx_signal_engine.infrastructure.brokers.base import (
+    OrderResult,
+    OrderStatusEnum,
+)
 from krx_signal_engine.interfaces.mcp.tools import (
     MCPToolContext,
     backtest,
+    execute_trade,
+    get_news,
+    get_price_history,
     get_signals,
     train_model,
 )
@@ -165,6 +174,10 @@ async def test_backtest_tool_relays_real_handler_metrics_not_placeholder() -> No
         MCPToolContext.set_instance(None)  # type: ignore[arg-type]
 
     assert result.is_placeholder is False
+    # Whole-branch review finding #3: engine real-ness (is_placeholder)
+    # and strategy real-ness are different things -- the strategy being
+    # simulated is still a demo stub regardless of engine wiring.
+    assert result.strategy_is_placeholder is True
     # Every numeric field must be relayed verbatim from the handler's
     # BacktestMetrics, not re-derived inline in the tool function.
     assert result.sharpe_ratio == float(expected_metrics.sharpe_ratio)
@@ -195,3 +208,131 @@ async def test_train_model_tool_flags_placeholder_metrics_in_response_data() -> 
         MCPToolContext.set_instance(None)  # type: ignore[arg-type]
 
     assert result.is_placeholder is True
+
+
+class _FakeQuote:
+    def __init__(self, price: Decimal) -> None:
+        self.last_price = price
+        self.mid_price = price
+
+
+class _FakeBroker:
+    """Minimal broker stub for execute_trade() risk-gate wiring tests
+    (whole-branch review finding #4)."""
+
+    def __init__(self, account: BrokerAccount) -> None:
+        self._account = account
+        self.place_order_calls: list[object] = []
+
+    def get_account(self) -> BrokerAccount:
+        return self._account
+
+    def get_quote(self, ticker: str) -> _FakeQuote:  # noqa: ARG002
+        return _FakeQuote(Decimal("70000"))
+
+    def get_positions(self) -> list:
+        return []
+
+    def place_order(self, order):  # noqa: ANN001
+        self.place_order_calls.append(order)
+        return OrderResult(
+            order_id=str(UUID(int=1)),
+            client_order_id=None,
+            ticker=order.ticker,
+            quantity=order.quantity,
+            filled_quantity=order.quantity,
+            side=order.side,
+            order_type=order.order_type,
+            status=OrderStatusEnum.FILLED,
+            filled_avg_price=Decimal("70000"),
+        )
+
+
+def _make_signal_repository() -> _FakeSignalRepository:
+    signal = TradingSignal(
+        ticker=Ticker(value="005930"),
+        direction=SignalDirection.BUY,
+        confidence=Confidence(value=0.8),
+        source=SignalSource.COMPOSITE,
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
+    )
+
+    class _ById:
+        async def get_by_id(self, _sig_id):  # noqa: ANN001
+            return signal
+
+    return _ById()
+
+
+@pytest.mark.asyncio
+async def test_execute_trade_rejects_when_risk_manager_disapproves() -> None:
+    """Whole-branch review finding #4: RiskManager/RiskGate had zero
+    production call sites. execute_trade() must now call
+    RiskManager.validate_trade() before place_order() and refuse the
+    trade (never touching the broker) when it's not approved -- here,
+    insufficient buying power (a real, deterministic RiskManager check).
+    """
+    account = BrokerAccount(
+        account_id="acct-1",
+        cash=Decimal("1000000"),
+        buying_power=Decimal("1"),  # far below the 20% min-buying-power check
+        equity=Decimal("1000000"),
+    )
+    broker = _FakeBroker(account=account)
+
+    ctx = MCPToolContext(
+        signal_repository=_make_signal_repository(),
+        broker=broker,
+        risk_manager=RiskManager(),
+    )
+    MCPToolContext.set_instance(ctx)
+    try:
+        with pytest.raises(ValueError, match="rejected by risk gate"):
+            await execute_trade(signal_id=str(UUID(int=0)), quantity=10)
+    finally:
+        MCPToolContext.set_instance(None)  # type: ignore[arg-type]
+
+    assert broker.place_order_calls == []  # never reached the broker
+
+
+@pytest.mark.asyncio
+async def test_execute_trade_places_order_when_risk_manager_approves() -> None:
+    """Same wiring, opposite outcome: a healthy account clears the risk
+    gate and the order is actually placed."""
+    account = BrokerAccount(
+        account_id="acct-1",
+        cash=Decimal("10000000"),
+        buying_power=Decimal("10000000"),
+        equity=Decimal("10000000"),
+    )
+    broker = _FakeBroker(account=account)
+
+    ctx = MCPToolContext(
+        signal_repository=_make_signal_repository(),
+        broker=broker,
+        risk_manager=RiskManager(),
+    )
+    MCPToolContext.set_instance(ctx)
+    try:
+        result = await execute_trade(signal_id=str(UUID(int=0)), quantity=10)
+    finally:
+        MCPToolContext.set_instance(None)  # type: ignore[arg-type]
+
+    assert len(broker.place_order_calls) == 1
+    assert result.status == OrderStatusEnum.FILLED.value
+
+
+@pytest.mark.asyncio
+async def test_get_news_not_wired_to_real_source() -> None:
+    """Whole-branch review finding #2: get_news() used to silently return
+    [] (or serve stale Tiingo/US data) when no news source was
+    configured. It must now raise, pointing at the real gap, rather than
+    look like a working-but-empty result."""
+    with pytest.raises(NotImplementedError, match="Toss/DART"):
+        await get_news(ticker="005930")
+
+
+@pytest.mark.asyncio
+async def test_get_price_history_not_wired_to_real_source() -> None:
+    with pytest.raises(NotImplementedError, match="KRX price source"):
+        await get_price_history(ticker="005930")
