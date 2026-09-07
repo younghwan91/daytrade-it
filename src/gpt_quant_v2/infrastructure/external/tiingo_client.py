@@ -16,7 +16,6 @@ from pydantic import BaseModel, Field, HttpUrl, field_validator
 
 from gpt_quant_v2.domain.entities.news import NewsArticle
 from gpt_quant_v2.domain.value_objects import Ticker
-from gpt_quant_v2.shared.config import get_settings
 from gpt_quant_v2.shared.errors import error_codes
 from gpt_quant_v2.shared.errors.exceptions import TiingoAPIError
 from gpt_quant_v2.shared.logging import get_logger
@@ -25,6 +24,16 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 logger = get_logger(__name__)
+
+# Retired defaults: this client is superseded for Korean-equity news by
+# TossNewsClient/DartClient (Task 7). `TiingoSettings` was removed from
+# shared.config.settings (Task 8) since Tiingo is a dead US-vendor
+# dependency -- these module-level defaults keep this file constructible
+# (e.g. by legacy interfaces/mcp callers) without depending on a settings
+# class that no longer exists.
+_DEFAULT_BASE_URL = "https://api.tiingo.com"
+_DEFAULT_TIMEOUT = 30.0
+_DEFAULT_RATE_LIMIT = 50
 
 # Namespace UUID for generating deterministic article IDs from Tiingo IDs
 TIINGO_NAMESPACE = UUID("6ba7b810-9dad-11d1-80b4-00c04fd430c8")
@@ -159,23 +168,22 @@ class TiingoClient:
         """Initialize the Tiingo client.
 
         Args:
-            api_key: Tiingo API key. If not provided, uses settings.
-            base_url: API base URL. If not provided, uses settings.
-            timeout: Request timeout in seconds. If not provided, uses settings.
-            rate_limit: Maximum requests per minute. If not provided, uses settings.
+            api_key: Tiingo API key. If not provided, defaults to empty
+                (this client is retired for Korean-equity use -- see the
+                module-level note above).
+            base_url: API base URL. Defaults to the Tiingo API.
+            timeout: Request timeout in seconds. Defaults to 30s.
+            rate_limit: Maximum requests per minute. Defaults to 50.
             max_retries: Maximum number of retry attempts for failed requests.
             initial_retry_delay: Initial delay in seconds for exponential backoff.
         """
-        settings = get_settings()
-        tiingo_settings = settings.tiingo
-
-        self.api_key = api_key or tiingo_settings.api_key.get_secret_value()
-        self.base_url = (base_url or tiingo_settings.base_url).rstrip("/")
-        self.timeout = timeout or tiingo_settings.timeout
+        self.api_key = api_key or ""
+        self.base_url = (base_url or _DEFAULT_BASE_URL).rstrip("/")
+        self.timeout = timeout or _DEFAULT_TIMEOUT
         self.max_retries = max_retries
         self.initial_retry_delay = initial_retry_delay
 
-        rate_limit_value = rate_limit or tiingo_settings.rate_limit
+        rate_limit_value = rate_limit or _DEFAULT_RATE_LIMIT
         self.rate_limiter = RateLimiter(rate_limit_value)
 
         self._client: httpx.AsyncClient | None = None

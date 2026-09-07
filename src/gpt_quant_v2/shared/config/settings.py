@@ -16,7 +16,7 @@ Usage:
     >>> from gpt_quant_v2.shared.config import get_settings
     >>> settings = get_settings()
     >>> print(settings.database.url)
-    >>> print(settings.polygon.api_key.get_secret_value())
+    >>> print(settings.krx_news.dart_api_key.get_secret_value())
 
 Environment Variables:
     All settings can be overridden via environment variables with GPTQ_ prefix.
@@ -165,49 +165,6 @@ class RedisSettings(BaseSettings):
     )
 
 
-class PolygonSettings(BaseSettings):
-    """
-    Polygon.io API configuration settings.
-
-    Attributes:
-        api_key: Polygon.io API key (required for market data).
-        rate_limit: Maximum requests per minute.
-        base_url: API base URL.
-        timeout: Request timeout in seconds.
-    """
-
-    model_config = SettingsConfigDict(
-        env_prefix="GPTQ_POLYGON_",
-        extra="ignore",
-    )
-
-    api_key: SecretStr = Field(
-        default=SecretStr(""),
-        description="Polygon.io API key",
-    )
-    rate_limit: int = Field(
-        default=5,
-        ge=1,
-        le=1000,
-        description="Maximum requests per minute",
-    )
-    base_url: str = Field(
-        default="https://api.polygon.io",
-        description="Polygon API base URL",
-    )
-    timeout: float = Field(
-        default=30.0,
-        ge=1.0,
-        le=300.0,
-        description="Request timeout in seconds",
-    )
-
-    @property
-    def is_configured(self) -> bool:
-        """Check if API key is configured."""
-        return bool(self.api_key.get_secret_value())
-
-
 class OpenAISettings(BaseSettings):
     """
     OpenAI API configuration settings.
@@ -250,49 +207,6 @@ class OpenAISettings(BaseSettings):
         ge=1.0,
         le=600.0,
         description="Request timeout in seconds",
-    )
-
-    @property
-    def is_configured(self) -> bool:
-        """Check if API key is configured."""
-        return bool(self.api_key.get_secret_value())
-
-
-class TiingoSettings(BaseSettings):
-    """
-    Tiingo API configuration settings.
-
-    Attributes:
-        api_key: Tiingo API key (required for news data).
-        base_url: API base URL.
-        timeout: Request timeout in seconds.
-        rate_limit: Maximum requests per minute.
-    """
-
-    model_config = SettingsConfigDict(
-        env_prefix="GPTQ_TIINGO_",
-        extra="ignore",
-    )
-
-    api_key: SecretStr = Field(
-        default=SecretStr(""),
-        description="Tiingo API key",
-    )
-    base_url: str = Field(
-        default="https://api.tiingo.com",
-        description="Tiingo API base URL",
-    )
-    timeout: float = Field(
-        default=30.0,
-        ge=1.0,
-        le=300.0,
-        description="Request timeout in seconds",
-    )
-    rate_limit: int = Field(
-        default=50,
-        ge=1,
-        le=1000,
-        description="Maximum requests per minute",
     )
 
     @property
@@ -753,9 +667,10 @@ class Settings(BaseSettings):
         app_name: Application name.
         database: Database configuration.
         redis: Redis configuration.
-        polygon: Polygon.io API configuration.
         openai: OpenAI API configuration.
-        tiingo: Tiingo API configuration.
+        krx_news: Toss/DART news poller configuration (Task 7).
+        quant_airflow_db: Read-only quant-airflow TimescaleDB configuration
+            (Task 6).
         trading: Trading configuration.
         broker: Broker configuration.
         server: Server configuration.
@@ -793,9 +708,7 @@ class Settings(BaseSettings):
     # Nested settings - initialized with defaults
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)
     redis: RedisSettings = Field(default_factory=RedisSettings)
-    polygon: PolygonSettings = Field(default_factory=PolygonSettings)
     openai: OpenAISettings = Field(default_factory=OpenAISettings)
-    tiingo: TiingoSettings = Field(default_factory=TiingoSettings)
     krx_news: KrxNewsSettings = Field(default_factory=KrxNewsSettings)
     quant_airflow_db: QuantAirflowDBSettings = Field(default_factory=QuantAirflowDBSettings)
     trading: TradingSettings = Field(default_factory=TradingSettings)
@@ -822,15 +735,15 @@ class Settings(BaseSettings):
 
     def validate_api_keys(self) -> dict[str, bool]:
         """
-        Validate that all required API keys are configured.
+        Validate that all required API keys/credentials are configured.
 
         Returns:
             Dictionary mapping service name to configuration status.
         """
         return {
-            "polygon": self.polygon.is_configured,
             "openai": self.openai.is_configured,
-            "tiingo": self.tiingo.is_configured,
+            "dart": self.krx_news.is_dart_configured,
+            "quant_airflow_db": self.quant_airflow_db.is_configured,
         }
 
     def get_missing_api_keys(self) -> list[str]:

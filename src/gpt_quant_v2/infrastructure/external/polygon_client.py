@@ -9,11 +9,19 @@ Provides async access to Polygon.io REST API with:
 
 Usage:
     >>> from gpt_quant_v2.infrastructure.external import PolygonClient
-    >>> from gpt_quant_v2.shared.config import get_settings
     >>>
-    >>> async with PolygonClient(get_settings().polygon) as client:
+    >>> settings = PolygonClientSettings(api_key=SecretStr("..."))
+    >>> async with PolygonClient(settings) as client:
     ...     details = await client.get_ticker_details("AAPL")
     ...     bars = await client.get_aggregates("AAPL", 1, "day", "2024-01-01", "2024-01-31")
+
+Note (Task 8):
+    `PolygonSettings` was removed from `shared.config.settings` -- Polygon
+    is a dead US-vendor dependency, superseded for Korean-equity market
+    data by `QuantAirflowDBClient` (Task 6). This client is retained
+    as-is (nothing in the running app constructs it) but no longer takes
+    its settings from the global `Settings` object; `PolygonClientSettings`
+    below is a minimal local stand-in describing the shape it still needs.
 """
 
 from __future__ import annotations
@@ -25,19 +33,30 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any
+from typing import Any, Protocol
 
 import httpx
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SecretStr
 
 from gpt_quant_v2.shared.errors import error_codes
 from gpt_quant_v2.shared.errors.exceptions import PolygonAPIError
 from gpt_quant_v2.shared.logging import get_logger
 
-if TYPE_CHECKING:
-    from gpt_quant_v2.shared.config.settings import PolygonSettings
-
 logger = get_logger(__name__)
+
+
+class PolygonClientSettings(Protocol):
+    """Minimal shape `PolygonClient` needs from a settings object.
+
+    Stands in for the retired `PolygonSettings` (removed from
+    `shared.config.settings` in Task 8) so this module has no dependency
+    on that class existing.
+    """
+
+    api_key: SecretStr
+    rate_limit: int
+    base_url: str
+    timeout: float
 
 
 # =============================================================================
@@ -471,7 +490,7 @@ class PolygonClient:
         - Structured logging with correlation ID
 
     Example:
-        >>> async with PolygonClient(settings.polygon) as client:
+        >>> async with PolygonClient(polygon_settings) as client:
         ...     details = await client.get_ticker_details("AAPL")
         ...     print(f"Market cap: ${details.market_cap:,.0f}")
     """
@@ -482,7 +501,7 @@ class PolygonClient:
 
     def __init__(
         self,
-        settings: PolygonSettings,
+        settings: PolygonClientSettings,
         *,
         cache: CacheBackend[Any] | None = None,
         cache_ttl: int = DEFAULT_TTL,
