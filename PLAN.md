@@ -244,3 +244,69 @@ This is where the five research findings actually change behavior, not just data
 
 **Report:** status, the recommendation (self-ingest vs. consume quant-airflow vs. hybrid), and the path to `docs/spikes/004-data-layer-scope.md`.
 
+---
+
+## Phase 0 Results (informs Phase 1 tasks below)
+
+- **Task 1 (sentiment):** FinBERT (`snunlp/KR-FinBert-SC`) scored 60.5% accuracy / 18.2% BEARISH recall on 76 hand-labeled Toss articles — not usable for a risk-gate as-is. OpenAI comparison leg parked pending a user-supplied `OPENAI_API_KEY` (Ruling: do not block Phase 1 on this — Phase 4's risk-gate work will need to revisit this before it ships).
+- **Task 2 (Toss reliability):** stable across 23 live calls this session (0 errors, consistent shape, no rate-limiting observed), but Toss ToS-for-automation is unverified — a policy risk, not something a technical spike resolves.
+- **Task 3 (kiwoom shapes):** no live credentials available; source-reading only. kiwoom-client has no schema/validation layer (raw dict in/out), and its own README and examples **disagree** on order-request field names (`ord_dv`/`orig_ord_no` vs `trde_tp`/`org_ord_no`) — Phase 3's `KiwoomBroker` must verify against a real mock call or Kiwoom's official TR docs before trusting either.
+- **Task 4 (data-layer scope):** confirmed hybrid — consume `quant-airflow`'s TimescaleDB read-only (LAN, `psycopg2`, same pattern as `kr-quant`'s `storage.py`) for all batch/EOD data (`daily_bars_adjusted`, `supply_demand`, `sector_index`, `earnings`, `consensus`, historical `news_articles`/`disclosures`/`news_judgments`); build gpt-quant-v2's own lightweight Toss/DART poller only for latency-sensitive news-to-signal, since quant-airflow's own design spec explicitly excludes sub-minute reaction. Do not write into quant-airflow's tables/upsert keys — read-only consumer only. `news_judgments.judged_at` is stored in UTC — convert before joining KST-naive data.
+
+**Ruling (sequencing):** Phase 1's data-mapping code (both the quant-airflow DB reader and the Toss/DART poller) needs to construct domain `Ticker` value objects for 6-digit KRX codes, but `Ticker` currently validates `^[A-Z]+$` (US-only) — this was originally scoped as Phase 2 work. Pulling the `Ticker`/`Exchange` fix forward to the start of Phase 1 (Task 5 below) rather than building Phase 1's data clients against a value object that will reject every real input. This is a scope-order change, not a scope change — Phase 2's other domain-model work (market-cap buckets, tick-size, broker currency) still happens later, on schedule.
+
+## Task 5: Ticker/Exchange domain fix for KRX codes
+
+**Goal:** unblock every later task that needs to construct a domain `Ticker` for a Korean stock — currently impossible.
+
+**Steps:**
+1. In `src/gpt_quant_v2/domain/value_objects/ticker.py`, replace the `^[A-Z]+$` (1-5 char) validator with one accepting 6-digit numeric KRX codes (`^\d{6}$`, e.g. `005930`). Confirm this also accepts preferred-share codes (still 6 digits, e.g. `005935`).
+2. In `src/gpt_quant_v2/domain/entities/stock.py`, replace the `Exchange` enum (`NASDAQ/NYSE/AMEX/ARCA/BATS/OTC`) with `KOSPI/KOSDAQ/KONEX`.
+3. Do **not** attempt to fix market-cap bucket thresholds (`is_large_cap`/`is_mid_cap`/`is_small_cap`) in this task — those need a real KRW threshold source per the plan's Phase 2 section and are explicitly out of scope here. If leaving them as unconverted USD thresholds would silently produce wrong classifications when called with KRW prices, add a `NotImplementedError` or an explicit TODO with a comment pointing at this plan's Phase 2 section — do not guess at KRW numbers.
+4. Sweep the codebase (`grep -rn "A-Z" src/`) for any other module that regex-matches on the old US ticker format and would break silently on a 6-digit input — list what you find in your report even if you don't fix it (flag as a concern for the controller to triage into a later task).
+5. Write/update unit tests for `Ticker` against real KRX codes (005930 삼성전자, 000660 SK하이닉스, 035720 카카오) plus the preferred-share edge case, and against invalid inputs (should still reject, e.g. `"AAPL"`, `"12345"` (5 digits), `"1234567"` (7 digits)).
+6. Do not touch broker/settings/backtest code in this task — scope is `ticker.py` + `stock.py` (Exchange enum) + their direct tests only. Downstream currency/broker changes are separate later tasks.
+
+**Report:** status, what the grep sweep in step 4 found (list of affected files even if unfixed), test results, and the report file path.
+
+## Task 6: quant-airflow read-only TimescaleDB market-data client
+
+**Goal:** replace `infrastructure/external/polygon_client.py` (US market data) with a read-only client over `quant-airflow`'s TimescaleDB, per Task 4's confirmed recommendation — no new ingestion, no writes.
+
+**Steps:**
+1. First, verify LAN reachability to the TimescaleDB host from this machine (the connection details are in `quant-airflow/README.md:36-46` — read them, don't guess) — a plain `psycopg2.connect(...)` + `SELECT 1` is enough to confirm. If unreachable, stop and report BLOCKED/NEEDS_CONTEXT rather than building a client you can't test — this was flagged in spike 004 as unverified and needs a real check now.
+2. If reachable: write `src/gpt_quant_v2/infrastructure/external/quant_airflow_db_client.py`, a read-only client (reuse `kr-quant`'s `storage.py` connection pattern — read it first at `~/Documents/git/kr-quant/` for the exact pattern, don't reinvent) exposing at minimum: fetch adjusted daily bars for a ticker/date-range from `daily_bars_adjusted`, fetch latest `supply_demand`/`sector_index` rows, fetch `earnings`/`consensus` for a ticker. Map rows to this repo's existing domain entities (check `domain/entities/` for an existing `Bar`/`PriceBar`-shaped entity to map into, or note if one doesn't exist and a new lightweight DTO is needed instead — don't invent a domain entity without checking first).
+3. Enforce read-only at the connection level (e.g. `psycopg2` connection opened with a read-only role/transaction if quant-airflow exposes one, or at minimum never issue INSERT/UPDATE/DELETE in this client's code) — this client must never write into quant-airflow's schema.
+4. Handle the `news_judgments.judged_at` UTC-storage gotcha explicitly if this client touches that table (convert to KST before any date-boundary comparison) — cite spike 004's note on this.
+5. Write tests: with the LAN reachable, an integration-style test that reads a known real row (pick a well-known large-cap ticker like 005930) and confirms shape; a unit test for the KST/UTC conversion logic using fixed inputs (no DB needed).
+6. Do not modify `quant-airflow` or `kr-quant` themselves — this repo's client only, read-only.
+
+**Report:** status, whether LAN reachability was confirmed, what tables/queries were implemented, test results, and the report file path. If blocked on reachability, say so clearly — this is a legitimate stop condition, not a task failure to route around by guessing at data shapes.
+
+## Task 7: Toss/DART lightweight news poller
+
+**Goal:** replace `infrastructure/external/tiingo_client.py` (US news) with a poller over `krx-news-client`, scoped as the low-latency path quant-airflow's own design explicitly excludes (spike 004).
+
+**Steps:**
+1. Write `src/gpt_quant_v2/infrastructure/external/toss_news_client.py` wrapping `krx_news_client.TossScraper` — since `scrape_news()` returns only the current snapshot with no pagination (confirmed in Task 2's spike), implement a poll loop + dedup-by-id cache, following the pattern Task 2's `scripts/spikes/toss_reliability_spike.py` already exercised (read it first for the working call pattern — don't reinvent the wheel it already validated). Recommended poll interval: something in the few-minutes range, not seconds — Task 2 found no rate-limiting at faster intervals in-session, but this is a production poller, not a spike, so default conservatively and make the interval configurable.
+2. Write `src/gpt_quant_v2/infrastructure/external/dart_client.py` wrapping `krx_news_client.DartScraper` for disclosures — this feeds Phase 4's risk-gate work later, so at minimum surface `disclosure_type` on whatever it returns; don't build the risk-gate classification logic itself in this task, that's Phase 4.
+3. Map both to the domain `NewsArticle` entity (`to_domain_entity()`, same pattern `TiingoClient.NewsItem.to_domain_entity()` used) — construct `Ticker` from the 6-digit codes krx-news-client already returns (this now works after Task 5). The domain `NewsArticle` entity has no `category`/`disclosure_type` field today (checked in the plan's grounding section) — add one if it's a clean, additive Pydantic field change; if it requires restructuring the entity, stop and report DONE_WITH_CONCERNS rather than improvising a bigger change.
+4. Store this poller's own output separately from anything quant-airflow owns — per spike 004, do not write into quant-airflow's `news_articles`/`news_judgments` tables or reuse its upsert keys. A new table/store is out of scope for this task unless the plan's persistence layer already has an obvious place for it — if unsure, keep it in-memory/ephemeral for now and flag persistence as a follow-up, don't invent new TimescaleDB schema without checking with the controller first.
+5. Build a circuit-breaker/fallback path per the plan's original Phase 1 note: if Toss polling fails repeatedly, degrade to DART-only rather than hard-failing the whole poller.
+6. Write tests: dedup logic (duplicate article IDs across polls don't re-emit), circuit-breaker behavior (simulated Toss failures fall back to DART), domain mapping correctness.
+
+**Report:** status, what was implemented, test results, any concerns about the `NewsArticle` entity change (if made), and the report file path.
+
+## Task 8: settings.py rewire for Phase 1
+
+**Goal:** wire Tasks 6 and 7's new clients into configuration, retiring the now-dead US-vendor settings.
+
+**Steps:**
+1. In `src/gpt_quant_v2/shared/config/settings.py`, remove `PolygonSettings` and `TiingoSettings` (or repurpose `TiingoSettings` if Task 7's implementer left useful structure — check Task 7's actual diff before deciding remove-vs-repurpose).
+2. Add `QuantAirflowDBSettings` (read-only DSN/connection params for Task 6's client — host/port/db/user/password/sslmode as applicable, sourced from env vars, never hardcoded) and `TossNewsSettings`/`DartSettings` (poll interval, DART API key env var name) for Task 7's clients.
+3. Update dependency-injection wiring (wherever `PolygonClient`/`TiingoClient` were constructed and injected — check `application/` for a container/factory) to construct and inject the new clients instead.
+4. Do not touch broker settings (`BrokerSettings`/`AlpacaSettings`/etc.) — that's Phase 3, separate task, not this one.
+5. Run the existing test suite for `settings.py` and the DI wiring to confirm nothing else silently depended on the removed settings classes.
+
+**Report:** status, what was removed/added/rewired, test results, and the report file path.
+
