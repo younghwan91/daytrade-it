@@ -413,3 +413,35 @@ Complete (Tasks 11-12). `domain/services/risk_gate.py` is the flagship deliverab
 
 **Report:** status, the cost-model rates/sources used (or what was left as an honestly-labeled placeholder and why), what got wired into `backtest.py`/`paper_broker.py`, test results (including whether a real backtest run against real KRX data was actually executed), and the report file path.
 
+---
+
+## Phase 5 Results
+
+Complete (Task 13, approved). `BacktestResult` is no longer a placeholder: `backtest.py` uses Task 6's `QuantAirflowDBClient` for real historical bars, `domain/services/cost_model.py`'s `KoreanCostModel` (0.20% 증권거래세, cited; commission/slippage honestly labeled unconfirmed placeholders) is shared by both the backtest engine and `PaperBroker`, and a real backtest run against 005930 was independently reproduced byte-for-byte by the reviewer. Full-suite baseline corrected and confirmed: 40 failed/293 passed/5 skipped, zero regressions across the whole plan so far. Three genuinely pre-existing broken handler imports (`news_analysis.py`, `signal_generation.py`, `trade_execution.py` — reference nonexistent classes, confirmed broken before this plan started) are isolated (not fixed) behind a loud, narrowly-scoped `try/except ImportError` in `application/handlers/__init__.py` — tracked as follow-up debt, not blocking.
+
+## Task 14: Interfaces cleanup — API validators, broker wiring, MCP language (Phase 6, backend half)
+
+**Goal:** close out the accumulated interface-layer debt from Tasks 5, 8, and 10, and finish the MCP-facing language cleanup Task 12 didn't fully cover.
+
+**Steps:**
+1. **Fix the two US-ticker `isalpha()` gates** flagged in Task 5's review: `interfaces/api/routers/portfolio.py:318` and `interfaces/api/routers/news.py:194` (line numbers may have drifted across 8 subsequent tasks — search fresh, don't trust stale line numbers) currently reject any real 6-digit KRX ticker with a "Must be 1-5 uppercase letters" error. Update both to accept KRX's `^\d{6}$` format (reuse the domain `Ticker` value object's validation logic if these routers can cleanly import it, rather than re-deriving a second regex).
+2. **Fix the `BrokerSettings.type`/`alias="broker_type"` bug** flagged in Task 10's review: pydantic-settings' `alias` bypasses `env_prefix` entirely, so `GPTQ_BROKER_TYPE` currently cannot select any broker type (only the unprefixed `BROKER_TYPE` works). This was dormant because nothing called `create_broker(settings.broker.type, ...)` yet — check whether anything now does (Task 13 didn't touch broker wiring, so this may still be unwired; if truly nothing calls it yet, fix the alias bug anyway since it's cheap and this is exactly the phase where interface-layer config bugs get closed out) and confirm `GPTQ_BROKER_TYPE=kiwoom` genuinely selects `KiwoomBroker` after the fix, with a test.
+3. **Correct ADR-006's env var documentation** (flagged as a Minor in Task 10's review): it currently documents `GPTQ_BROKER__KIWOOM_APP_KEY`/`GPTQ_BROKER__KIWOOM_APP_SECRET` (nested double-underscore) but the actual implementation uses flat `GPTQ_KIWOOM_APP_KEY`/`GPTQ_KIWOOM_APP_SECRET` — a one-line fix in `docs/adr/006-kiwoom-broker.md`.
+4. **Update MCP tool docstrings/descriptions in `interfaces/mcp/tools.py`** that still reference US concepts (tickers as letters, "shares", USD amounts) to KRX-equivalent language (6-digit codes, 주, KRW/원) — Task 12 already fixed the computation-discipline issue here; this is the remaining cosmetic-but-accuracy-relevant language pass. Re-verify the `is_placeholder` discipline from Task 12 still holds after these edits (don't accidentally regress it while touching descriptions).
+5. **Quick pass over `interfaces/websocket/*`** (if it exists — check) for any US-specific assumptions; Task 3's original grounding notes flagged this as "likely low-risk, mostly pass-through, quick pass needed" — confirm or fix, don't assume clean without checking.
+6. Do NOT touch the three broken handlers (`news_analysis.py`/`signal_generation.py`/`trade_execution.py`) — that's separate, already-tracked debt, not this task's job. Do NOT touch the frontend (that's Task 15, next).
+
+**Report:** status, what was fixed in each of the 5 areas above, test results (including the `GPTQ_BROKER_TYPE=kiwoom` selection test), and the report file path.
+
+## Task 15: Frontend cosmetic pass (Phase 6, frontend half)
+
+**Goal:** the low-risk, presentational remainder of Phase 6 — the plan's original grounding assessed the frontend as "presentational/generic (ticker as free-text, BUY/SELL/ALL), low risk, cosmetic Korean-market labeling changes only."
+
+**Steps:**
+1. In `frontend/src/pages/` (`SignalsPage.tsx`, `DashboardPage.tsx`, `PortfolioPage.tsx`, `BacktestPage.tsx`, or whatever the actual current file names are — check first, they may have changed), update currency formatting from `$`/USD conventions to `₩`/KRW where hardcoded.
+2. Confirm ticker input fields don't have a client-side validation pattern hardcoded to the old US format (1-5 uppercase letters) that would reject real KRX codes — fix if found, matching Task 14's backend validator fix.
+3. This is explicitly a low-risk, minimal task per the plan's own grounding assessment — do not restructure components, add new pages, or redesign layout. If the frontend build/type-check step exists in this repo (check `frontend/package.json` for a `build`/`typecheck` script), run it to confirm nothing broke.
+4. If no currency/ticker-format hardcoding is actually found (i.e. the frontend was already generic enough), say so plainly in the report rather than inventing changes to justify the task.
+
+**Report:** status, what was changed (or confirmation nothing needed changing, with evidence), build/typecheck results if applicable, and the report file path.
+
