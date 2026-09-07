@@ -26,6 +26,7 @@ from krx_news_client import DartQuotaExceededError
 from krx_signal_engine.infrastructure.external.dart_client import DartClient
 from krx_signal_engine.infrastructure.external.toss_news_client import TossNewsClient
 from krx_signal_engine.shared.config import get_settings
+from krx_signal_engine.shared.errors.exceptions import DartAPIError
 from krx_signal_engine.shared.logging import get_logger
 
 if TYPE_CHECKING:
@@ -124,19 +125,21 @@ class NewsPoller:
         return elapsed >= self.circuit_reset_seconds
 
     async def poll_once(self) -> list[NewsArticle]:
-        """Poll Toss (unless the circuit is open) and DART, merging new articles.
+        """Poll Toss and DART, merging new articles.
 
-        ``DartQuotaExceededError`` is caught and swallowed here (logged,
-        this cycle's disclosures skipped) -- quota exhaustion is an
-        expected, recoverable-tomorrow condition (the library's own
-        ``krx_news_client.scrapers.dart`` docstring calls this out as
-        distinct from "no disclosures in range"), not a poller-fatal error.
-        Any other DART failure propagates -- DART has no further fallback.
+        Toss is polled first: it's the key-free, always-available primary
+        source (per spike 004 / Task 7), so it should never be blocked by
+        DART trouble. DART is polled second and degrades gracefully on
+        failure -- see ``_poll_dart`` (whole-branch review finding #6: this
+        used to poll DART first and only catch ``DartQuotaExceededError``,
+        so in an environment with no DART key configured (this one), a
+        DART failure would raise ``DartAPIError`` uncaught and block the
+        *entire* poll even though Toss was healthy).
         """
         articles: list[NewsArticle] = []
 
-        articles.extend(await self._poll_dart())
         articles.extend(await self._poll_toss())
+        articles.extend(await self._poll_dart())
 
         return articles
 
@@ -178,10 +181,29 @@ class NewsPoller:
             return new_articles
 
     async def _poll_dart(self) -> list[NewsArticle]:
+        """Poll DART, degrading gracefully on any failure -- never blocks the poll.
+
+        DART is optional and secondary to Toss (see ``poll_once``): if no
+        API key is configured (``settings.krx_news.dart_api_key`` empty --
+        the case in this environment), DART is skipped entirely without
+        even attempting the call. Otherwise, both the quota-specific
+        ``DartQuotaExceededError`` and the general ``DartAPIError``
+        (network errors, unexpected response shapes, etc. -- see
+        ``dart_client.DartClient.poll_once``'s docstring) are caught the
+        same way: logged, this cycle's disclosures skipped, Toss unaffected.
+        """
+        if not self._dart.api_key:
+            logger.debug("DART API key not configured, skipping DART poll (Toss remains primary)")
+            return []
         try:
             return await self._dart.poll_once()
         except DartQuotaExceededError as exc:
             logger.warning("DART quota exhausted, skipping this cycle's disclosures", error=str(exc))
+            return []
+        except DartAPIError as exc:
+            logger.warning(
+                "DART poll failed, degrading gracefully (Toss remains primary)", error=str(exc)
+            )
             return []
 
     async def poll_forever(

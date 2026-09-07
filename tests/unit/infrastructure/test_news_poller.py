@@ -14,7 +14,8 @@ from krx_news_client import DartQuotaExceededError
 from krx_signal_engine.domain.entities.news import NewsArticle
 from krx_signal_engine.domain.value_objects import Ticker
 from krx_signal_engine.infrastructure.external.news_poller import CircuitState, NewsPoller
-from krx_signal_engine.shared.errors.exceptions import TossNewsAPIError
+from krx_signal_engine.shared.errors import error_codes
+from krx_signal_engine.shared.errors.exceptions import DartAPIError, TossNewsAPIError
 
 
 def make_article(title: str = "Test") -> NewsArticle:
@@ -54,6 +55,11 @@ class FakeDartClient:
         self._responses = list(responses) if responses is not None else None
         self.calls = 0
         self.closed = False
+        # NewsPoller._poll_dart skips the DART call entirely when no API
+        # key is configured (whole-branch review finding #6) -- these
+        # tests exercise the DART call path itself, so the fake must look
+        # "configured" the way a real DartClient with a key would.
+        self.api_key = "fake-dart-key-for-tests"
 
     async def poll_once(self) -> list[NewsArticle]:
         self.calls += 1
@@ -202,3 +208,58 @@ class TestNewsPollerDartQuotaHandling:
         # Must not raise -- the poller degrades gracefully, doesn't hard-fail.
         result = await poller.poll_once()
         assert result == []
+
+
+class TestNewsPollerDartAPIErrorHandling:
+    """Whole-branch review finding #6: a general DartAPIError (not just
+    quota exhaustion) used to propagate uncaught and block the entire
+    poll, even with a healthy Toss. Both must degrade gracefully now."""
+
+    async def test_dart_api_error_swallowed_not_propagated(self) -> None:
+        toss = FakeTossClient(responses=[[make_article("toss-1")]])
+        dart = FakeDartClient(
+            responses=[
+                DartAPIError(message="network blew up", error_code=error_codes.DART_API_ERROR)
+            ]
+        )
+        poller = NewsPoller(toss_client=toss, dart_client=dart)
+
+        # Must not raise -- Toss's articles still come back, DART's
+        # failure this cycle is skipped, not fatal to the whole poll.
+        result = await poller.poll_once()
+        assert [a.title for a in result] == ["toss-1"]
+
+    async def test_no_dart_api_key_skips_dart_call_entirely(self) -> None:
+        toss = FakeTossClient(responses=[[make_article("toss-1")]])
+        dart = FakeDartClient(responses=[[make_article("should-not-be-returned")]])
+        dart.api_key = ""  # unconfigured, same as this environment
+        poller = NewsPoller(toss_client=toss, dart_client=dart)
+
+        result = await poller.poll_once()
+
+        assert dart.calls == 0  # DART was never called at all
+        assert [a.title for a in result] == ["toss-1"]
+
+    async def test_toss_polled_before_dart(self) -> None:
+        """Toss is the key-free, always-available primary source and must
+        not be starved by DART trouble -- see NewsPoller.poll_once's
+        docstring."""
+        call_order: list[str] = []
+
+        class OrderTrackingToss(FakeTossClient):
+            async def poll_once(self) -> list[NewsArticle]:
+                call_order.append("toss")
+                return await super().poll_once()
+
+        class OrderTrackingDart(FakeDartClient):
+            async def poll_once(self) -> list[NewsArticle]:
+                call_order.append("dart")
+                return await super().poll_once()
+
+        toss = OrderTrackingToss(responses=[[]])
+        dart = OrderTrackingDart(responses=[[]])
+        poller = NewsPoller(toss_client=toss, dart_client=dart)
+
+        await poller.poll_once()
+
+        assert call_order == ["toss", "dart"]
