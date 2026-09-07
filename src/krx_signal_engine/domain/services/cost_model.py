@@ -46,6 +46,30 @@ research approach as Tasks 9/11's tick-size/disclosure-taxonomy research):
     키움투자자산운용 "2026년 달라지는 투자 정책 총정리"; 네이트뉴스
     "[2026 달라지는 것] 증권거래세율↑·배당소득 분리과세 최고세율 '30%'".
 
+    **NOT CONFIRMED AGAINST A PRIMARY SOURCE (whole-branch review finding
+    #8, added post-Task-13):** every source above is secondary (나무위키 is
+    a wiki, 머니투데이/네이트뉴스 are news coverage, 키움투자자산운용 is a
+    broker's own investor-facing summary) -- none is 기획재정부 (Ministry
+    of Economy and Finance) or the actual 조세특례제한법/증권거래세법
+    statute/시행령 text itself, despite the plan's own Phase 5 section
+    explicitly flagging exactly this risk category ("getting the current
+    KRX transaction-tax rate... right" -- see PLAN.md). A follow-up
+    session located what look like the right primary-source pointers --
+    국가법령정보센터 (law.go.kr)'s 증권거래세법 시행령 page
+    (https://www.law.go.kr/lsLinkCommonInfo.do?lspttninfSeq=64014&chrClsCd=010202)
+    and 재정경제부(기획재정부)'s 조세특례제한법 시행령 입법예고 notices at
+    mofe.go.kr -- but did not manage to pull and confirm the actual current
+    statutory rate text from either in that session, so this citation is
+    NOT upgraded to primary-source-confirmed. Treat ``DEFAULT_KOSPI_TAX_RATE``/
+    ``DEFAULT_KOSDAQ_TAX_RATE`` below with the SAME "unconfirmed placeholder"
+    caution as ``DEFAULT_COMMISSION_RATE``/the slippage constants -- do not
+    treat the tax rate as more authoritative than the commission/slippage
+    numbers next to it just because it has citations attached; the
+    citations are secondary sources, not a substitute for the primary
+    legal text. Whoever next has real web/legal-database access should
+    confirm against law.go.kr or a 기획재정부 press release directly before
+    this is used for anything beyond a backtest approximation.
+
 Brokerage commission: NO confirmed live fee schedule exists in this repo
 (``KiwoomBroker`` doesn't expose one -- Task 10's report). ``DEFAULT_COMMISSION_RATE``
 below (0.015%, i.e. 0.00015) is a representative placeholder in line with
@@ -69,6 +93,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 
 from krx_signal_engine.domain.entities.stock import Exchange
+from krx_signal_engine.domain.services.tick_size import round_to_tick
 
 #: Accepted trade-direction strings. This module deliberately does not
 #: import ``infrastructure.brokers.base.OrderSide`` -- a domain service
@@ -79,10 +104,15 @@ from krx_signal_engine.domain.entities.stock import Exchange
 #: ``OrderSide`` enum to this string at the call site.
 _SELL = "SELL"
 
-# -- Researched (see module docstring for sources / research date) --------
+# -- Researched from SECONDARY sources only, NOT primary-source-confirmed
+# -- (see module docstring's "NOT CONFIRMED AGAINST A PRIMARY SOURCE" note)
 #: 2026-01-01 amendment: KOSPI 0.05% 증권거래세 + 0.15% 농특세 = 0.20% total.
+#: Unconfirmed against 기획재정부/조세특례제한법 primary text -- treat like
+#: the commission/slippage placeholders below, not as authoritative.
 DEFAULT_KOSPI_TAX_RATE = Decimal("0.0020")
 #: 2026-01-01 amendment: KOSDAQ 0.20% 증권거래세, no 농특세 = 0.20% total.
+#: Unconfirmed against 기획재정부/조세특례제한법 primary text -- treat like
+#: the commission/slippage placeholders below, not as authoritative.
 DEFAULT_KOSDAQ_TAX_RATE = Decimal("0.0020")
 
 # -- Honestly-labeled placeholders (NOT researched/confirmed) --------------
@@ -184,11 +214,18 @@ class KoreanCostModel:
                 that don't yet have a ticker-to-exchange mapping wired
                 (see module docstring) should pass an explicit best-guess
                 rather than silently relying on the KOSPI default.
+
+        The raw slipped price is then rounded to the nearest valid KRX
+        tick (호가가격단위, ``domain/services/tick_size.py``, Task 9) before
+        being returned -- whole-branch review finding #5: an unrounded
+        slipped price (e.g. 50,123.4원) is not a price that could actually
+        occur on KRX, which trades in tick_size-quantized increments only.
+        Backtest/paper-broker fills now use a fill price that's actually
+        achievable.
         """
         slip = price * self._slippage_pct(market)
-        if side.upper() == _SELL:
-            return price - slip
-        return price + slip
+        raw_price = price - slip if side.upper() == _SELL else price + slip
+        return round_to_tick(raw_price, market)
 
     def commission(self, notional: Decimal) -> Decimal:
         """Brokerage commission (위탁수수료) on `notional`, both sides."""

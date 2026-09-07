@@ -73,6 +73,8 @@ import logging
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any
 
+from krx_signal_engine.domain.entities.stock import Exchange
+from krx_signal_engine.domain.services.tick_size import round_to_tick
 from krx_signal_engine.infrastructure.brokers.base import (
     Account,
     BrokerInterface,
@@ -316,7 +318,18 @@ class KiwoomBroker(BrokerInterface):
                     broker_name="kiwoom",
                     symbol=order.ticker,
                 )
-            kwargs["ord_uv"] = str(int(order.limit_price))
+            # Round to the correct KRX price-band tick (호가가격단위) before
+            # sending -- `int(order.limit_price)` alone truncates and
+            # ignores tick bands entirely, which can produce an
+            # invalid/rejected order price (whole-branch review finding
+            # #5; `domain/services/tick_size.py`, Task 9, previously had
+            # zero production callers). The unified table has applied
+            # identically to KOSPI/KOSDAQ/KONEX since 2023-01-25 (see that
+            # module's docstring), so any `Exchange` member yields the
+            # same tick size today; `Order` carries no per-ticker market
+            # field, so `Exchange.KOSPI` is passed as a neutral default.
+            tick_price = round_to_tick(order.limit_price, Exchange.KOSPI)
+            kwargs["ord_uv"] = str(int(tick_price))
         return kwargs
 
     # -- Response mappers --------------------------------------------------

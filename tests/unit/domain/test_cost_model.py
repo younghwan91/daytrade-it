@@ -16,6 +16,7 @@ from krx_signal_engine.domain.services.cost_model import (
     CostModelConfig,
     KoreanCostModel,
 )
+from krx_signal_engine.domain.services.tick_size import round_to_tick
 
 
 class TestTransactionTax:
@@ -76,14 +77,20 @@ class TestSlippage:
         model = KoreanCostModel()
         price = Decimal("70000")
         filled = model.apply_slippage(price, side="BUY", market=Exchange.KOSPI)
-        assert filled == price * (1 + DEFAULT_KOSPI_SLIPPAGE_PCT)
-        assert filled > price
+        # Whole-branch review finding #5: apply_slippage now rounds the
+        # slipped price to a valid KRX tick before returning -- a backtest
+        # fill must be a price that could actually occur on KRX.
+        assert filled == round_to_tick(price * (1 + DEFAULT_KOSPI_SLIPPAGE_PCT), Exchange.KOSPI)
+        # Tick rounding can legitimately erase a small slip entirely (a
+        # 0.05% bump on 70000 rounds back down to a 100-tick band) -- >=
+        # is the correct invariant post-tick-rounding, not strictly >.
+        assert filled >= price
 
     def test_sell_slips_down(self) -> None:
         model = KoreanCostModel()
         price = Decimal("70000")
         filled = model.apply_slippage(price, side="SELL", market=Exchange.KOSPI)
-        assert filled == price * (1 - DEFAULT_KOSPI_SLIPPAGE_PCT)
+        assert filled == round_to_tick(price * (1 - DEFAULT_KOSPI_SLIPPAGE_PCT), Exchange.KOSPI)
         assert filled < price
 
     def test_kosdaq_slips_more_than_kospi(self) -> None:
@@ -110,7 +117,9 @@ class TestCostOfTrade:
         cost = model.cost_of_trade(
             price=Decimal("70000"), quantity=Decimal("10"), side="BUY", market=Exchange.KOSPI
         )
-        expected_fill = Decimal("70000") * (1 + DEFAULT_KOSPI_SLIPPAGE_PCT)
+        expected_fill = round_to_tick(
+            Decimal("70000") * (1 + DEFAULT_KOSPI_SLIPPAGE_PCT), Exchange.KOSPI
+        )
         assert cost.fill_price == expected_fill
         assert cost.tax == Decimal("0")
         assert cost.commission == expected_fill * Decimal("10") * DEFAULT_COMMISSION_RATE
@@ -122,7 +131,7 @@ class TestCostOfTrade:
         quantity = Decimal("100")
         cost = model.cost_of_trade(price=price, quantity=quantity, side="SELL", market=Exchange.KOSPI)
 
-        expected_fill = price * (1 - DEFAULT_KOSPI_SLIPPAGE_PCT)
+        expected_fill = round_to_tick(price * (1 - DEFAULT_KOSPI_SLIPPAGE_PCT), Exchange.KOSPI)
         expected_notional = expected_fill * quantity
         expected_commission = expected_notional * DEFAULT_COMMISSION_RATE
         expected_tax = expected_notional * DEFAULT_KOSPI_TAX_RATE
