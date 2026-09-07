@@ -347,8 +347,10 @@ class TradingSettings(BaseSettings):
     Trading window and risk management configuration.
 
     Attributes:
-        window_start: Trading window start time (Eastern Time).
-        window_end: Trading window end time (Eastern Time).
+        window_start: Trading window start time (KST, Asia/Seoul). KRX's
+            regular session runs 09:00-15:30 KST with no separate pre/post-
+            market session in the sense US markets have.
+        window_end: Trading window end time (KST, Asia/Seoul).
         max_position_size: Maximum position size in dollars.
         min_risk_reward: Minimum risk/reward ratio for trades.
         max_daily_loss: Maximum daily loss limit in dollars.
@@ -363,12 +365,12 @@ class TradingSettings(BaseSettings):
     )
 
     window_start: time = Field(
-        default=time(9, 30),
-        description="Trading window start (Eastern Time)",
+        default=time(9, 0),
+        description="Trading window start (KST, Asia/Seoul) -- KRX regular session opens 09:00",
     )
     window_end: time = Field(
-        default=time(16, 0),
-        description="Trading window end (Eastern Time)",
+        default=time(15, 30),
+        description="Trading window end (KST, Asia/Seoul) -- KRX regular session closes 15:30",
     )
     max_position_size: float = Field(
         default=10000.0,

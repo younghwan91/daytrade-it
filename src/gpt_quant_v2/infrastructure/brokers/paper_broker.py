@@ -24,6 +24,7 @@ from gpt_quant_v2.infrastructure.brokers.base import (
     OrderType,
     Position,
     Quote,
+    now_kst,
 )
 
 if TYPE_CHECKING:
@@ -70,7 +71,7 @@ class _OrderRecord:
 
     order: Order
     result: OrderResult
-    created_at: datetime = field(default_factory=datetime.now)
+    created_at: datetime = field(default_factory=now_kst)
 
 
 class PaperBroker(BrokerInterface):
@@ -144,7 +145,7 @@ class PaperBroker(BrokerInterface):
             cash=self._cash,
             buying_power=self._cash,
             equity=equity,
-            currency="USD",
+            currency="KRW",
         )
 
     def get_positions(self) -> list[Position]:
@@ -221,7 +222,7 @@ class PaperBroker(BrokerInterface):
         self._execute_fill(order, fill_price, commission)
 
         # Create result
-        now = datetime.now()
+        now = now_kst()
         result = OrderResult(
             order_id=order_id,
             client_order_id=client_order_id,

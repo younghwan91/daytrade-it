@@ -11,6 +11,18 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
+from zoneinfo import ZoneInfo
+
+#: KRX's trading timezone. Order/quote/account timestamps below default to
+#: KST wall-clock time (rather than naive local time) so they mean the same
+#: thing regardless of the host machine's timezone -- see Task 9's
+#: currency/timezone sweep (redevelopment plan, Phase 2).
+KST = ZoneInfo("Asia/Seoul")
+
+
+def now_kst() -> datetime:
+    """Current time as a timezone-aware KST (Asia/Seoul) datetime."""
+    return datetime.now(KST)
 
 
 class OrderType(StrEnum):
@@ -48,16 +60,17 @@ class Account:
         cash: Available cash balance.
         buying_power: Total buying power available.
         equity: Total account equity (cash + positions value).
-        currency: Account currency code (e.g., "USD").
-        created_at: Account creation timestamp.
+        currency: Account currency code (defaults to "KRW" -- this system
+            trades KRX-listed KRW-denominated equities).
+        created_at: Account creation timestamp (KST by default).
     """
 
     account_id: str
     cash: Decimal
     buying_power: Decimal
     equity: Decimal
-    currency: str = "USD"
-    created_at: datetime = field(default_factory=datetime.now)
+    currency: str = "KRW"
+    created_at: datetime = field(default_factory=now_kst)
 
     def __post_init__(self) -> None:
         """Convert numeric fields to Decimal if needed."""
@@ -126,6 +139,17 @@ class Order:
         limit_price: Limit price (required for limit orders).
         client_order_id: Client-assigned order ID.
         time_in_force: Order validity period (day, gtc, ioc, fok).
+        lot_size: Minimum tradeable unit (shares). KRX board lot is 1 share
+            for regular KOSPI/KOSDAQ/KONEX orders; kept configurable since
+            some order types (e.g. odd-lot venues) differ. Purely
+            informational here -- not enforced by this dataclass.
+        tick_size: Minimum price increment (KRW) for `limit_price`, per
+            KRX's price-band 호가가격단위 table (see
+            `gpt_quant_v2.domain.services.tick_size.tick_size_for`). Purely
+            informational here -- not enforced by this dataclass; callers
+            that need KRX-valid limit prices should compute/validate this
+            via `tick_size_for`/`round_to_tick` before constructing an
+            Order.
     """
 
     ticker: str
@@ -135,6 +159,8 @@ class Order:
     limit_price: Decimal | None = None
     client_order_id: str | None = None
     time_in_force: str = "day"
+    lot_size: int = 1
+    tick_size: Decimal | None = None
 
     def __post_init__(self) -> None:
         """Validate and convert fields."""
@@ -142,10 +168,14 @@ class Order:
             self.quantity = Decimal(str(self.quantity))
         if self.limit_price is not None and not isinstance(self.limit_price, Decimal):
             self.limit_price = Decimal(str(self.limit_price))
+        if self.tick_size is not None and not isinstance(self.tick_size, Decimal):
+            self.tick_size = Decimal(str(self.tick_size))
         if self.order_type == OrderType.LIMIT and self.limit_price is None:
             raise ValueError("limit_price is required for limit orders")
         if self.quantity <= 0:
             raise ValueError("quantity must be positive")
+        if self.lot_size <= 0:
+            raise ValueError("lot_size must be positive")
 
 
 @dataclass
@@ -178,7 +208,7 @@ class OrderResult:
     status: OrderStatusEnum
     limit_price: Decimal | None = None
     filled_avg_price: Decimal | None = None
-    submitted_at: datetime = field(default_factory=datetime.now)
+    submitted_at: datetime = field(default_factory=now_kst)
     filled_at: datetime | None = None
     message: str | None = None
 
@@ -226,7 +256,7 @@ class OrderStatus:
     filled_quantity: Decimal
     remaining_quantity: Decimal
     filled_avg_price: Decimal | None = None
-    updated_at: datetime = field(default_factory=datetime.now)
+    updated_at: datetime = field(default_factory=now_kst)
 
     def __post_init__(self) -> None:
         """Convert numeric fields to Decimal if needed."""
@@ -251,7 +281,13 @@ class Quote:
         last_price: Last traded price.
         last_size: Size of last trade.
         volume: Total volume traded today.
-        timestamp: Quote timestamp.
+        timestamp: Quote timestamp (KST by default).
+        lot_size: Minimum tradeable unit (shares) for this ticker. KRX board
+            lot is 1 share for regular KOSPI/KOSDAQ/KONEX equities.
+        tick_size: Minimum price increment (KRW) at `last_price`/`bid`/`ask`,
+            per KRX's price-band 호가가격단위 table (see
+            `gpt_quant_v2.domain.services.tick_size.tick_size_for`).
+            Informational only -- not enforced by this dataclass.
     """
 
     ticker: str
@@ -262,7 +298,9 @@ class Quote:
     last_price: Decimal | None = None
     last_size: int = 0
     volume: int = 0
-    timestamp: datetime = field(default_factory=datetime.now)
+    timestamp: datetime = field(default_factory=now_kst)
+    lot_size: int = 1
+    tick_size: Decimal | None = None
 
     def __post_init__(self) -> None:
         """Convert numeric fields to Decimal if needed."""
@@ -272,6 +310,8 @@ class Quote:
             self.ask = Decimal(str(self.ask))
         if self.last_price is not None and not isinstance(self.last_price, Decimal):
             self.last_price = Decimal(str(self.last_price))
+        if self.tick_size is not None and not isinstance(self.tick_size, Decimal):
+            self.tick_size = Decimal(str(self.tick_size))
 
     @property
     def mid_price(self) -> Decimal:
