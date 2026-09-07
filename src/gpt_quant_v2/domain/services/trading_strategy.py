@@ -1,16 +1,38 @@
-"""Trading strategy domain service for evaluating and executing trading signals."""
+"""Trading strategy domain service for position sizing and exit rules.
+
+Sentiment-only signal path retired (Task 11 / Phase 4b):
+    ``NewsBasedStrategy`` previously had an ``evaluate_signal(news,
+    sentiment)`` method that produced a full BUY/SELL ``TradingSignal``
+    from sentiment alone, with no ML/technical corroboration -- exactly the
+    pattern deep-research finding #1 warns against (news sentiment alone
+    does not reliably beat a benchmark; it only helps combined with
+    technical/ML signals, see ``signal_generator.py``'s module docstring).
+
+    That method has been removed. It was dead code outside its own
+    module (grep across ``src/`` and ``docs/`` found no callers anywhere
+    in the application/infrastructure layers, and no tests), so removal
+    was a clean retirement rather than a refactor of a live call path. The
+    equivalent, disciplined replacement is
+    ``SignalGenerator.generate_from_news()`` (produces a NEWS-sourced
+    *component* signal) combined with an ML/technical signal via
+    ``SignalGenerator.combine_signals()``, which now structurally refuses
+    to produce an actionable signal from sentiment alone (see that
+    method's docstring) -- plus, for anything sentiment/disclosure should
+    be allowed to do *on its own* (block entries, force-exit on severe
+    disclosures), the new ``domain.services.risk_gate.RiskGate`` service.
+
+    ``NewsBasedStrategy`` remains as a position-sizing and exit-rule
+    helper (``calculate_position_size`` / ``should_exit``) -- those are
+    generic risk/execution mechanics that operate on an already-produced
+    signal or open position, not sentiment-only signal generation, so they
+    are out of scope for this retirement.
+"""
 
 from dataclasses import dataclass
 from decimal import Decimal
 
-from gpt_quant_v2.domain.entities import (
-    NewsArticle,
-    Position,
-    SignalDirection,
-    SignalSource,
-    TradingSignal,
-)
-from gpt_quant_v2.domain.value_objects import Confidence, Price, Sentiment
+from gpt_quant_v2.domain.entities import Position, TradingSignal
+from gpt_quant_v2.domain.value_objects import Price
 
 
 @dataclass(frozen=True)
@@ -18,25 +40,24 @@ class StrategyConfig:
     """Configuration parameters for trading strategy.
 
     Attributes:
-        min_confidence: Minimum confidence threshold for signals (0.0 to 1.0)
-        min_risk_reward: Minimum risk/reward ratio required
         take_profit_pct: Take profit percentage (e.g., 5.0 for 5%)
         stop_loss_pct: Stop loss percentage (e.g., 2.0 for 2%)
         max_position_pct: Maximum position size as percentage of account value
     """
 
-    min_confidence: float = 0.6
-    min_risk_reward: float = 2.0
     take_profit_pct: float = 5.0
     stop_loss_pct: float = 2.0
     max_position_pct: float = 5.0
 
 
 class NewsBasedStrategy:
-    """Trading strategy based on news sentiment analysis.
+    """Position sizing and exit-rule helper for news/sentiment-informed trading.
 
-    This strategy evaluates news articles and their sentiment to generate
-    trading signals with appropriate position sizing and exit conditions.
+    Historically also generated trading signals directly from sentiment
+    (``evaluate_signal``); that method was retired -- see module docstring.
+    What remains here is signal-agnostic: position sizing given an already
+    -produced signal, and take-profit/stop-loss exit checks given an open
+    position.
     """
 
     def __init__(self, config: StrategyConfig | None = None) -> None:
@@ -46,69 +67,6 @@ class NewsBasedStrategy:
             config: Strategy configuration, uses defaults if not provided.
         """
         self.config = config or StrategyConfig()
-
-    def evaluate_signal(
-        self,
-        news: NewsArticle,
-        sentiment: Sentiment,
-    ) -> TradingSignal | None:
-        """Evaluate news and sentiment to generate a trading signal.
-
-        Args:
-            news: The news article to evaluate.
-            sentiment: The sentiment analysis result.
-
-        Returns:
-            A TradingSignal if conditions are met, None otherwise.
-        """
-        # Check minimum confidence threshold
-        if sentiment.confidence < self.config.min_confidence:
-            return None
-
-        # Neutral sentiment doesn't generate signals
-        if sentiment.is_neutral:
-            return None
-
-        # News must have associated tickers
-        if not news.has_tickers:
-            return None
-
-        # Determine signal direction based on sentiment
-        direction = SignalDirection.BUY if sentiment.is_bullish else SignalDirection.SELL
-
-        # Calculate predicted return and drawdown based on sentiment strength
-        predicted_return = Decimal(str(abs(sentiment.score) * 10))  # Up to 10% return
-        predicted_drawdown = Decimal(str(-abs(sentiment.score) * 5))  # Up to 5% drawdown
-
-        # Calculate risk/reward ratio
-        risk_reward = self._calculate_risk_reward(
-            float(predicted_return),
-            float(predicted_drawdown),
-        )
-
-        # Check minimum risk/reward requirement
-        if risk_reward < self.config.min_risk_reward:
-            return None
-
-        # Use first ticker for the signal
-        ticker = news.tickers[0]
-
-        return TradingSignal(
-            ticker=ticker,
-            direction=direction,
-            confidence=Confidence(value=sentiment.confidence),
-            source=SignalSource.NEWS,
-            predicted_return=predicted_return,
-            predicted_drawdown=predicted_drawdown,
-            risk_reward_ratio=Decimal(str(risk_reward)),
-            news_article_id=news.id,
-            metadata={
-                "sentiment_score": sentiment.score,
-                "sentiment_label": sentiment.label.value,
-                "news_source": news.source,
-                "news_title": news.title[:100],
-            },
-        )
 
     def calculate_position_size(
         self,
@@ -185,24 +143,6 @@ class NewsBasedStrategy:
             return True, f"Stop loss triggered at {return_pct:.2f}%"
 
         return False, ""
-
-    def _calculate_risk_reward(
-        self,
-        predicted_return: float,
-        predicted_drawdown: float,
-    ) -> float:
-        """Calculate risk/reward ratio.
-
-        Args:
-            predicted_return: Expected return (positive).
-            predicted_drawdown: Expected drawdown (negative).
-
-        Returns:
-            Risk/reward ratio (return / abs(drawdown)).
-        """
-        if predicted_drawdown >= 0:
-            return float("inf") if predicted_return > 0 else 0.0
-        return abs(predicted_return / predicted_drawdown)
 
 
 __all__ = [

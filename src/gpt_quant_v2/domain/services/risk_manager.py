@@ -6,7 +6,8 @@ from enum import StrEnum
 from typing import Any
 
 from gpt_quant_v2.domain.entities import Position, TradingSignal
-from gpt_quant_v2.domain.value_objects import Ticker
+from gpt_quant_v2.domain.services.risk_gate import GateAction, RiskGate, RiskGateDecision
+from gpt_quant_v2.domain.value_objects import Sentiment, Ticker
 
 
 class ValidationStatus(StrEnum):
@@ -82,15 +83,48 @@ class RiskManager:
     """Domain service for managing trading risk.
 
     Validates trades against risk limits and monitors exposure.
+
+    Risk-gate integration (Task 11 / Phase 4a):
+        Wraps a :class:`~gpt_quant_v2.domain.services.risk_gate.RiskGate`
+        as an additional check, independent of the position/exposure/
+        daily-loss checks below. The gate can force a REJECT even when
+        every other check passes -- e.g. a hard-severity DART disclosure
+        (delisting, trading halt, embezzlement-class event) or bearish
+        sentiment beyond the gate's threshold blocks the trade regardless
+        of what the ML/technical/composite signal said. See
+        ``risk_gate.py``'s module docstring for the full taxonomy and the
+        entry-blocker-vs-liquidator design rationale.
+
+        Intended call site (not wired end-to-end in this task): Phase 3's
+        ``KiwoomBroker`` isn't wired into any live trading loop yet, and
+        ``application/handlers/trade_execution.py``'s
+        ``TradeExecutionHandler.execute_from_signal`` does not currently
+        call ``RiskManager`` at all (there is no risk-check step in its
+        pipeline today). When that wiring happens, ``validate_trade``
+        (with ``sentiment``/``disclosure_type`` passed through from Task
+        7's ``toss_news_client``/``dart_client`` output) should be called
+        after Step 3 (current price fetched) and before Step 6 (order
+        submitted via ``self._broker.submit_order(...)``) in
+        ``execute_from_signal`` -- and ``check_force_exit`` should be
+        polled per open position (e.g. from wherever position monitoring
+        eventually lives) to decide whether ``close_position`` should be
+        invoked for hard-severity disclosures.
     """
 
-    def __init__(self, config: RiskConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: RiskConfig | None = None,
+        risk_gate: RiskGate | None = None,
+    ) -> None:
         """Initialize risk manager with configuration.
 
         Args:
             config: Risk configuration, uses defaults if not provided.
+            risk_gate: Sentiment/disclosure risk gate, constructed with
+                defaults if not provided.
         """
         self.config = config or RiskConfig()
+        self.risk_gate = risk_gate or RiskGate()
 
     def check_position_limit(
         self,
@@ -162,10 +196,13 @@ class RiskManager:
         signal: TradingSignal,
         account: Account,
         current_positions: list[Position] | None = None,
+        sentiment: Sentiment | None = None,
+        disclosure_type: str | None = None,
     ) -> ValidationResult:
         """Validate a trading signal against risk constraints.
 
         Performs comprehensive validation including:
+        - Risk gate (sentiment/disclosure), see class docstring
         - Daily loss limit check
         - Position size limits
         - Total exposure limits
@@ -176,12 +213,41 @@ class RiskManager:
             signal: The trading signal to validate.
             account: Current account information.
             current_positions: List of current open positions.
+            sentiment: Latest sentiment for the signal's ticker, if
+                available (Task 7's toss_news_client/dart_client output).
+                Passed through to the risk gate.
+            disclosure_type: Latest DART disclosure type for the signal's
+                ticker, if available. Passed through to the risk gate.
 
         Returns:
             ValidationResult with status and reason.
         """
         current_positions = current_positions or []
         details: dict[str, Any] = {}
+
+        # Check the risk gate first: it can force a REJECT independent of
+        # every other check below, on hard-severity disclosures or
+        # sufficiently bearish sentiment for this ticker. See
+        # risk_gate.py's module docstring for the taxonomy and design
+        # rationale (entry-blocker only -- this never forces an exit of an
+        # existing position; that's check_force_exit's job).
+        has_existing_position = any(p.ticker == signal.ticker for p in current_positions)
+        gate_decision = self.risk_gate.evaluate(
+            sentiment=sentiment,
+            disclosure_type=disclosure_type,
+            has_open_position=has_existing_position,
+            is_new_entry_attempt=True,
+        )
+        if gate_decision.action != GateAction.PASS:
+            return ValidationResult(
+                status=ValidationStatus.REJECTED,
+                reason=f"Risk gate: {gate_decision.reason}",
+                details={
+                    "gate_action": gate_decision.action.value,
+                    "gate_severity": gate_decision.severity.value,
+                    **gate_decision.details,
+                },
+            )
 
         # Check daily loss limit
         if not self.check_daily_loss_limit(account.daily_pnl):
@@ -254,6 +320,46 @@ class RiskManager:
             status=ValidationStatus.APPROVED,
             reason="Trade validated successfully",
             details=details,
+        )
+
+    def check_force_exit(
+        self,
+        # Not consumed by RiskGate.evaluate() (it's ticker-agnostic), kept
+        # in the signature so callers/tests read naturally and so a future
+        # per-ticker gate extension has somewhere to plug in.
+        ticker: Ticker,  # noqa: ARG002
+        disclosure_type: str | None,
+    ) -> RiskGateDecision:
+        """Check whether an existing position should be force-exited.
+
+        Separate from ``validate_trade`` (which only ever blocks *new*
+        entries) because forced liquidation of an existing position is
+        deliberately scoped to hard-severity disclosures only -- see
+        ``risk_gate.py``'s module docstring for the design rationale
+        (informed by a sibling project's rejected "halt/exit on bad
+        sentiment" backtest). Generic bad sentiment never forces an exit
+        through this method; only ``disclosure_type`` matters here.
+
+        Intended call site: wherever open positions are periodically
+        polled/monitored (not wired end-to-end in this task, see class
+        docstring) -- if ``decision.forces_exit`` is True, that call site
+        should invoke the equivalent of
+        ``TradeExecutionHandler.close_position(ticker.value)``.
+
+        Args:
+            ticker: The ticker of the open position.
+            disclosure_type: Latest DART disclosure type for the ticker,
+                if available.
+
+        Returns:
+            RiskGateDecision. ``decision.forces_exit`` is True only for
+            hard-severity disclosures.
+        """
+        return self.risk_gate.evaluate(
+            sentiment=None,
+            disclosure_type=disclosure_type,
+            has_open_position=True,
+            is_new_entry_attempt=False,
         )
 
 

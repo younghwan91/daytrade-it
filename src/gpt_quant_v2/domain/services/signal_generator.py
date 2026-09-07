@@ -1,4 +1,28 @@
-"""Signal generation domain service for creating trading signals from various sources."""
+"""Signal generation domain service for creating trading signals from various sources.
+
+Sentiment-only signal discipline (Task 11 / Phase 4b):
+    Deep-research finding #1 (folded into the plan, see
+    ``.superpowers/sdd/PLAN/task-11-brief.md``) is explicit: news sentiment
+    alone does not reliably beat a benchmark as a standalone trading
+    signal -- it only helps when *combined* with technical/ML signals.
+
+    ``generate_from_news`` below therefore only ever produces a *component*
+    signal (``source=SignalSource.NEWS``) meant as one input to
+    ``combine_signals()``, never a directly actionable recommendation on
+    its own. ``combine_signals()`` enforces this structurally: it refuses
+    to produce a composite signal (returns ``None``) unless at least one
+    non-sentiment source (ML, TECHNICAL, or FUNDAMENTAL) corroborates the
+    NEWS-sourced signal(s). A caller cannot get an actionable signal out of
+    sentiment alone, even by accident (e.g. by passing a single NEWS signal
+    into ``combine_signals``) -- see ``combine_signals``'s docstring.
+
+    The sibling standalone-signal-from-sentiment class,
+    ``NewsBasedStrategy.evaluate_signal`` in ``trading_strategy.py``, was
+    retired for the same reason (see that module's docstring) -- it was
+    unused anywhere outside its own module/tests, and duplicated exactly
+    the sentiment-only signal-generation pattern this finding argues
+    against.
+"""
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -48,14 +72,26 @@ class SignalGenerator:
         article: NewsArticle,
         sentiment: Sentiment,
     ) -> TradingSignal | None:
-        """Generate a trading signal from news article and sentiment.
+        """Generate a NEWS-sourced *component* signal from an article and sentiment.
+
+        NOT independently actionable. This produces one input signal
+        (``source=SignalSource.NEWS``) meant to be passed into
+        ``combine_signals()`` alongside an ML/technical signal for the same
+        ticker -- per deep-research finding #1 (see module docstring),
+        sentiment alone does not reliably generate a tradeable signal.
+        ``combine_signals()`` will refuse (return ``None``) to combine a
+        list made up only of NEWS-sourced signals, so this method's output
+        cannot become an actionable ``TradingSignal`` without ML/technical
+        corroboration.
 
         Args:
             article: The news article source.
             sentiment: Analyzed sentiment of the article.
 
         Returns:
-            TradingSignal if conditions are met, None otherwise.
+            A NEWS-sourced component TradingSignal if conditions are met,
+            None otherwise. Treat the result as advisory input to
+            ``combine_signals()``, not as a standalone recommendation.
         """
         # Require minimum confidence
         if sentiment.confidence < self.config.min_confidence:
@@ -103,6 +139,7 @@ class SignalGenerator:
             news_article_id=article.id,
             metadata={
                 "source_type": "news",
+                "standalone_actionable": False,
                 "sentiment_score": sentiment.score,
                 "sentiment_label": sentiment.label.value,
                 "article_source": article.source,
@@ -187,6 +224,14 @@ class SignalGenerator:
         Uses confidence-weighted averaging to combine signals for the same ticker.
         All signals must be for the same ticker and direction.
 
+        Sentiment-only discipline (Task 11 / deep-research finding #1): a
+        signal set made up *entirely* of ``SignalSource.NEWS`` signals is
+        refused (returns ``None``) -- sentiment alone does not reliably
+        produce a tradeable signal, only sentiment combined with an
+        ML/TECHNICAL/FUNDAMENTAL signal does. This applies even to a
+        single-signal list: passing one lone NEWS signal in no longer
+        returns it unchanged as if it were actionable.
+
         Args:
             signals: List of signals to combine.
 
@@ -194,6 +239,12 @@ class SignalGenerator:
             Combined TradingSignal if valid, None otherwise.
         """
         if not signals:
+            return None
+
+        # Refuse to produce an actionable signal from sentiment alone --
+        # require at least one non-NEWS (ML/TECHNICAL/FUNDAMENTAL) source.
+        non_news_sources = {SignalSource.ML, SignalSource.TECHNICAL, SignalSource.FUNDAMENTAL}
+        if not any(s.source in non_news_sources for s in signals):
             return None
 
         if len(signals) == 1:

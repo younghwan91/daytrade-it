@@ -1,5 +1,13 @@
 """Domain Services"""
 
+from gpt_quant_v2.domain.services.risk_gate import (
+    DisclosureSeverity,
+    GateAction,
+    RiskGate,
+    RiskGateConfig,
+    RiskGateDecision,
+    classify_disclosure_severity,
+)
 from gpt_quant_v2.domain.services.risk_manager import (
     Account,
     RiskConfig,
@@ -12,6 +20,13 @@ from gpt_quant_v2.domain.services.tick_size import KRX_LOT_SIZE, round_to_tick, 
 from gpt_quant_v2.domain.services.trading_strategy import NewsBasedStrategy, StrategyConfig
 
 __all__ = [
+    # Risk Gate
+    "DisclosureSeverity",
+    "GateAction",
+    "RiskGate",
+    "RiskGateConfig",
+    "RiskGateDecision",
+    "classify_disclosure_severity",
     # Risk Manager
     "Account",
     "RiskConfig",
