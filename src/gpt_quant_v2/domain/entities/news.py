@@ -22,6 +22,13 @@ class NewsArticle(Entity):
         tickers: List of stock tickers mentioned in the article
         sentiment: Analyzed sentiment (optional)
         analysis_result: Additional analysis data (optional)
+        category: Source-provided content category, e.g. Toss's
+            market/breaking/stock feed labels (optional; additive field for
+            Task 7's KRX news poller, unset for pre-existing sources).
+        disclosure_type: DART disclosure report type, e.g. "주요사항보고서"
+            (optional; additive field for Task 7's DART client -- surfaced
+            here for Phase 4's later risk-gate work to consume, not
+            classified in this task).
     """
 
     title: str = Field(min_length=1, max_length=1000)
@@ -33,6 +40,8 @@ class NewsArticle(Entity):
     tickers: list[Ticker] = Field(default_factory=list)
     sentiment: Sentiment | None = Field(default=None)
     analysis_result: dict[str, Any] | None = Field(default=None)
+    category: str | None = Field(default=None, max_length=50)
+    disclosure_type: str | None = Field(default=None, max_length=200)
 
     def __str__(self) -> str:
         return f"NewsArticle({self.title[:50]}...)"

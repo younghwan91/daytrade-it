@@ -301,6 +301,72 @@ class TiingoSettings(BaseSettings):
         return bool(self.api_key.get_secret_value())
 
 
+class KrxNewsSettings(BaseSettings):
+    """
+    Configuration for the lightweight Toss/DART news poller (Task 7).
+
+    This is the low-latency news-to-signal path that spike 004 deliberately
+    kept separate from ``quant-airflow``'s own batch news ingestion (see
+    ``QuantAirflowDBSettings``'s docstring) -- it polls Toss's dashboard API
+    (via ``krx-news-client``'s ``TossScraper``, which returns only a current
+    snapshot with no pagination/date filter, per Task 2's spike) and falls
+    back to DART-only when Toss repeatedly fails.
+
+    Attributes:
+        dart_api_key: DART OpenAPI key (required for disclosure polling and
+            for circuit-breaker fallback -- without it, DART returns no
+            disclosures either).
+        toss_poll_interval_seconds: Seconds between Toss polls. Task 2's
+            spike found no rate-limiting at few-second intervals in a single
+            session, but this is a production default, not a spike -- kept
+            conservative (few-minutes range) and configurable.
+        dart_poll_interval_seconds: Seconds between DART disclosure polls.
+        toss_failure_threshold: Consecutive Toss poll failures before the
+            circuit breaker opens and the poller degrades to DART-only.
+        circuit_reset_seconds: How long the circuit stays open (Toss calls
+            skipped) before the poller tries Toss again.
+    """
+
+    model_config = SettingsConfigDict(
+        env_prefix="GPTQ_KRX_NEWS_",
+        extra="ignore",
+    )
+
+    dart_api_key: SecretStr = Field(
+        default=SecretStr(""),
+        description="DART OpenAPI key",
+    )
+    toss_poll_interval_seconds: float = Field(
+        default=180.0,
+        ge=10.0,
+        le=3600.0,
+        description="Seconds between Toss dashboard polls",
+    )
+    dart_poll_interval_seconds: float = Field(
+        default=300.0,
+        ge=10.0,
+        le=3600.0,
+        description="Seconds between DART disclosure polls",
+    )
+    toss_failure_threshold: int = Field(
+        default=3,
+        ge=1,
+        le=20,
+        description="Consecutive Toss failures before the circuit breaker opens",
+    )
+    circuit_reset_seconds: float = Field(
+        default=600.0,
+        ge=10.0,
+        le=86400.0,
+        description="Seconds the circuit stays open before retrying Toss",
+    )
+
+    @property
+    def is_dart_configured(self) -> bool:
+        """Check if the DART API key is configured."""
+        return bool(self.dart_api_key.get_secret_value())
+
+
 class QuantAirflowDBSettings(BaseSettings):
     """
     Connection settings for the ``quant-airflow`` TimescaleDB (read-only).
@@ -730,6 +796,7 @@ class Settings(BaseSettings):
     polygon: PolygonSettings = Field(default_factory=PolygonSettings)
     openai: OpenAISettings = Field(default_factory=OpenAISettings)
     tiingo: TiingoSettings = Field(default_factory=TiingoSettings)
+    krx_news: KrxNewsSettings = Field(default_factory=KrxNewsSettings)
     quant_airflow_db: QuantAirflowDBSettings = Field(default_factory=QuantAirflowDBSettings)
     trading: TradingSettings = Field(default_factory=TradingSettings)
     broker: BrokerSettings = Field(default_factory=BrokerSettings)

@@ -428,6 +428,54 @@ class TiingoAPIError(ExternalAPIError):
         )
 
 
+class TossNewsAPIError(ExternalAPIError):
+    """Raised when the Toss dashboard news API request fails."""
+
+    error_code = error_codes.TOSS_NEWS_API_ERROR
+
+    def __init__(
+        self,
+        message: str = "Toss news dashboard request failed",
+        error_code: str | None = None,
+        details: dict[str, Any] | None = None,
+        correlation_id: str | None = None,
+        status_code: int | None = None,
+        response_body: str | None = None,
+    ) -> None:
+        super().__init__(
+            message=message,
+            error_code=error_code or self.error_code,
+            details=details,
+            correlation_id=correlation_id,
+            status_code=status_code,
+            response_body=response_body,
+        )
+
+
+class DartAPIError(ExternalAPIError):
+    """Raised when a DART OpenAPI request fails (other than quota exhaustion)."""
+
+    error_code = error_codes.DART_API_ERROR
+
+    def __init__(
+        self,
+        message: str = "DART OpenAPI request failed",
+        error_code: str | None = None,
+        details: dict[str, Any] | None = None,
+        correlation_id: str | None = None,
+        status_code: int | None = None,
+        response_body: str | None = None,
+    ) -> None:
+        super().__init__(
+            message=message,
+            error_code=error_code or self.error_code,
+            details=details,
+            correlation_id=correlation_id,
+            status_code=status_code,
+            response_body=response_body,
+        )
+
+
 # =============================================================================
 # Broker Errors (GPTQ-6xx)
 # =============================================================================

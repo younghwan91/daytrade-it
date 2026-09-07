@@ -46,6 +46,7 @@ dependencies = [
     "httpx>=0.26.0",
     "aiohttp>=3.9.0",
     "polygon-api-client>=1.14.0",
+    "krx-news-client>=0.2.0",
 
     # Utilities
     "structlog>=24.1.0",
@@ -81,6 +82,13 @@ Repository = "https://github.com/yourusername/gpt_quant_v2"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+# krx-news-client isn't on PyPI -- it's a sibling repo
+# (~/Documents/git/krx-news-client) already validated by Task 1/2's spikes.
+# Path dependency mirrors how those spikes installed it (see
+# docs/spikes/002-toss-reliability.md's "Method" section).
+[tool.uv.sources]
+krx-news-client = { path = "../krx-news-client" }
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/gpt_quant_v2"]

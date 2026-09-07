@@ -49,6 +49,10 @@ OPENAI_CONTEXT_LENGTH_EXCEEDED = "GPTQ-513"
 TIINGO_API_ERROR = "GPTQ-520"
 TIINGO_RATE_LIMIT = "GPTQ-521"
 TIINGO_INVALID_RESPONSE = "GPTQ-522"
+TOSS_NEWS_API_ERROR = "GPTQ-530"
+TOSS_NEWS_CIRCUIT_OPEN = "GPTQ-531"
+DART_API_ERROR = "GPTQ-540"
+DART_QUOTA_EXCEEDED = "GPTQ-541"
 
 # Broker Errors (GPTQ-6xx)
 BROKER_ERROR = "GPTQ-600"
@@ -108,6 +112,10 @@ ERROR_DESCRIPTIONS: dict[str, str] = {
     TIINGO_API_ERROR: "Tiingo API error",
     TIINGO_RATE_LIMIT: "Tiingo API rate limit exceeded",
     TIINGO_INVALID_RESPONSE: "Invalid response from Tiingo API",
+    TOSS_NEWS_API_ERROR: "Toss news dashboard API error",
+    TOSS_NEWS_CIRCUIT_OPEN: "Toss news poller circuit breaker is open (degraded to DART-only)",
+    DART_API_ERROR: "DART OpenAPI error",
+    DART_QUOTA_EXCEEDED: "DART OpenAPI daily quota exhausted",
     # Broker
     BROKER_ERROR: "General broker error",
     ORDER_REJECTED: "Order was rejected by broker",
