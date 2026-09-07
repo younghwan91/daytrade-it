@@ -182,3 +182,65 @@ This is where the five research findings actually change behavior, not just data
 ---
 
 *krx-news-client 세션의 딥리서치 오케스트레이션 결과로 작성됨 (2026-09-07).*
+
+---
+
+## Global Constraints (all tasks below)
+
+- Work happens only in this worktree, on branch `feat/krx-toss-redevelopment`. Never touch `main`.
+- No live trading, no live broker credentials are used in Phase 0. All spikes run in mock/sandbox mode or against read-only public data.
+- Every numeric claim about model accuracy, API reliability, or broker behavior must come from an actual run recorded in the task's output — never asserted from memory or documentation alone.
+- Commit after each task; do not squash across tasks. Author/committer identity must remain the human git identity already configured in this repo (`chyohw97@gmail.com`) — per `.github/workflows/commit-identity.yml`, agent contribution goes in a `Co-Authored-By:` trailer only, never as author/committer email.
+- These are Phase 0 tasks from the plan above ("Discovery & Validation Spikes"). Their job is to produce a decision, backed by evidence, not to build production code. Phase 1+ tasks will be written after Phase 0's outputs are known — do not start Phase 1+ work in these tasks.
+
+## Task 1: Korean news sentiment model validation spike
+
+**Goal:** produce a real accuracy/agreement number for Korean-language financial-news sentiment classification, so Phase 4's risk-gate design has evidence instead of an assumption (deep-research finding: Korean sentiment models are unvalidated).
+
+**Steps:**
+1. Using `krx-news-client`'s `TossScraper` (installed from `~/Documents/git/krx-news-client`, or `pip install krx-news-client` if published), pull a sample of at least 50 recent Toss news articles across a mix of categories (market/stock/economy/breaking).
+2. Hand-label each article's sentiment as BULLISH/BEARISH/NEUTRAL yourself (best-effort, single-rater — note this limitation explicitly in the report) based on the article text.
+3. Score the same articles with two approaches:
+   - A Korean-language prompt against an LLM (reuse the existing `openai_client.py` structured-output pattern from this repo, but with a Korean system prompt written for this spike — do not modify the production `prompts.py` file, write a standalone script under `scripts/spikes/sentiment_spike.py`).
+   - A Korean FinBERT/RoBERTa-class open model if one can be loaded within a reasonable time/dependency budget (e.g. via `transformers` + a public Korean finance sentiment checkpoint); if none can be loaded within ~30 minutes of effort, note that as a finding rather than blocking on it.
+4. Compute agreement (accuracy against your hand labels) for each approach. Save the labeled dataset, scores, and a short written verdict (which approach to use, or whether neither clears a usable bar) to `docs/spikes/001-sentiment-validation.md`.
+5. Do not wire this into any production code path — this is a standalone spike script + report only.
+
+**Report:** status (DONE/BLOCKED/NEEDS_CONTEXT), the accuracy numbers for each approach, the recommendation, and the path to `docs/spikes/001-sentiment-validation.md`.
+
+## Task 2: Toss ingestion reliability spike
+
+**Goal:** confirm `krx-news-client`'s `TossScraper` is stable enough to build on before committing further engineering time (deep-research + plan flag: it's an unofficial/undocumented API with no SLA).
+
+**Steps:**
+1. Write a standalone script `scripts/spikes/toss_reliability_spike.py` that polls `TossScraper().scrape_news()` on an interval (e.g. every few minutes) and logs: timestamp, article count returned, any errors/exceptions, and duplicate-id rate against previously seen articles.
+2. Run it for as long as is practical in this session (at minimum, run it enough times back-to-back to see whether repeated calls succeed, return consistent shapes, and don't get rate-limited/blocked) — note in the report that a longer multi-day run is recommended before Phase 1 truly commits, since this single session can't observe multi-day stability.
+3. Record findings — article volume per poll, error rate, duplicate rate, any observed blocking/rate-limiting — in `docs/spikes/002-toss-reliability.md`.
+4. Check whether a sibling repo already documents Toss/KRX-scraper blocking risk (the plan mentions this may exist) — search `~/Documents/git/*/docs/` for anything about scraper blocking and summarize what it says if found.
+
+**Report:** status, observed reliability numbers, whether there's a known-blocking risk documented elsewhere, and the path to `docs/spikes/002-toss-reliability.md`.
+
+## Task 3: kiwoom-client mock-trading spike
+
+**Goal:** confirm `kiwoom-client`'s mock-trading (`is_mock=True`) flow actually works end-to-end and its request/response shapes are understood, before Phase 3 designs `KiwoomBroker` against assumed shapes.
+
+**Steps:**
+1. Check whether mock-mode credentials (app_key/app_secret) are already available in this machine's environment or a `.env`/config file anywhere in `~/Documents/git/kiwoom-client` or `~/Documents/git/gpt-quant-v2` (e.g. `.env.example` shows the variable names; check for a non-example `.env`). Do NOT ask the user for credentials in this task — if none are available, that is itself the finding.
+2. If credentials are available: using `kiwoom-client` (installed from `~/Documents/git/kiwoom-client` or via pip), write a standalone script `scripts/spikes/kiwoom_mock_spike.py` that connects with `is_mock=True`, fetches account info, fetches a quote for a real KRX ticker (e.g. 005930), and places+immediately cancels one mock order. Record the exact response shapes (field names) for account/quote/order.
+3. If credentials are NOT available: read `kiwoom-client`'s README and its `domestic/order.py`, `domestic/account.py`, `domestic/chart.py` source directly to document the request/response Pydantic models' actual field names (no live call needed) — this still de-risks Phase 3's `KiwoomBroker` design even without a live call.
+4. Write findings to `docs/spikes/003-kiwoom-mock-trading.md`: whether a live mock call was made, the confirmed field shapes for account/quote/order, and anything that surprised you relative to what the plan assumed.
+
+**Report:** status, whether live credentials were available, the confirmed API shapes, and the path to `docs/spikes/003-kiwoom-mock-trading.md`.
+
+## Task 4: quant-airflow / kr-quant overlap analysis
+
+**Goal:** answer the plan's open scope question — should gpt-quant-v2 (renamed) ingest Toss/DART/market data itself, or read from `quant-airflow`'s existing TimescaleDB pipeline? — with an actual comparison, not a guess, so Phase 1's data-layer design doesn't get redone.
+
+**Steps:**
+1. Read `~/Documents/git/quant-airflow`'s README and DAG definitions to determine: does it already ingest krx-news-client (Toss/DART) data? At what frequency? Into what schema/table shape? Does it ingest kiwoom-client price/quote data too?
+2. Read `~/Documents/git/kr-quant`'s README to understand what it consumes and whether it already depends on quant-airflow's output.
+3. Write a short recommendation to `docs/spikes/004-data-layer-scope.md`: (a) what quant-airflow already provides today, with evidence (file/DAG names, schedule), (b) what gpt-quant-v2 would still need to poll itself regardless (the plan's working hypothesis is that nightly/batch data can come from quant-airflow, but time-sensitive news-to-signal latency needs its own lighter poller — confirm or refute this against what quant-airflow's DAGs actually schedule), (c) a concrete recommendation for Phase 1.
+4. This is a research/analysis task — no code changes to quant-airflow or kr-quant, read-only.
+
+**Report:** status, the recommendation (self-ingest vs. consume quant-airflow vs. hybrid), and the path to `docs/spikes/004-data-layer-scope.md`.
+
