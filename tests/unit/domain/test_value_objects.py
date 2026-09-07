@@ -6,7 +6,7 @@ from decimal import Decimal
 
 import pytest
 
-from gpt_quant_v2.domain.value_objects import (
+from krx_signal_engine.domain.value_objects import (
     Confidence,
     Percentage,
     Price,

@@ -17,11 +17,11 @@ import pytest
 from krx_news_client import NewsArticle as KrxNewsArticle
 from krx_news_client import NewsCategory, NewsSource
 
-from gpt_quant_v2.infrastructure.external.toss_news_client import (
+from krx_signal_engine.infrastructure.external.toss_news_client import (
     TossNewsClient,
     map_toss_article_to_domain,
 )
-from gpt_quant_v2.shared.errors.exceptions import TossNewsAPIError
+from krx_signal_engine.shared.errors.exceptions import TossNewsAPIError
 
 
 def make_krx_article(

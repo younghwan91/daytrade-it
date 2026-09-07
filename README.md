@@ -1,8 +1,15 @@
-# GPT Quant v2
+# KRX Signal Engine
 
 **AI-Agent-Friendly News-Driven Algorithmic Trading System**
 
 A modern, clean-architecture trading system designed for AI agent integration, featuring news sentiment analysis, ML-based signal generation, and automated trade execution.
+
+> **Provenance note:** this repository was redeveloped from
+> [`gpt-quant-v2`](https://github.com/yourusername/gpt-quant-v2), re-platformed
+> from a US-equity system into a Korean-equity (KOSPI/KOSDAQ) system driven by
+> Toss news. `krx-signal-engine` is a **provisional** name pending final
+> confirmation -- the GitHub repository itself has not yet been renamed (see
+> the plan's Task 16 report for the open item).
 
 ## 🎯 Features
 
@@ -16,7 +23,7 @@ A modern, clean-architecture trading system designed for AI agent integration, f
 ## 🏗️ Architecture
 
 ```
-src/gpt_quant_v2/
+src/krx_signal_engine/
 ├── domain/           # Core business logic (no external dependencies)
 ├── application/      # Use cases and orchestration
 ├── infrastructure/   # External integrations (DB, APIs, brokers)
@@ -36,8 +43,8 @@ src/gpt_quant_v2/
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/gpt_quant_v2.git
-cd gpt_quant_v2
+git clone https://github.com/yourusername/krx-signal-engine.git
+cd krx-signal-engine
 
 # Install UV if not already installed
 curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -58,7 +65,7 @@ docker compose up -d
 alembic upgrade head
 
 # Start the API server
-uvicorn gpt_quant_v2.interfaces.api.main:app --reload
+uvicorn krx_signal_engine.interfaces.api.main:app --reload
 ```
 
 ### Using the CLI
@@ -104,7 +111,7 @@ Once running, visit:
 pytest
 
 # Run with coverage
-pytest --cov=src/gpt_quant_v2 --cov-report=html
+pytest --cov=src/krx_signal_engine --cov-report=html
 
 # Run specific test categories
 pytest tests/unit/          # Unit tests only
@@ -115,8 +122,8 @@ pytest tests/e2e/          # End-to-end tests
 ## 📁 Project Structure
 
 ```
-gpt_quant_v2/
-├── src/gpt_quant_v2/
+krx-signal-engine/
+├── src/krx_signal_engine/
 │   ├── domain/
 │   │   ├── entities/        # Stock, News, Signal, Trade
 │   │   ├── value_objects/   # Price, Volume, Ticker

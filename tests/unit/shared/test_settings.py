@@ -2,7 +2,7 @@
 
 from datetime import time
 
-from gpt_quant_v2.shared.config.settings import BrokerSettings, BrokerType, TradingSettings
+from krx_signal_engine.shared.config.settings import BrokerSettings, BrokerType, TradingSettings
 
 
 class TestTradingWindowDefaults:
@@ -57,8 +57,8 @@ class TestBrokerSettingsTypeEnvVar:
 
     def test_gptq_broker_type_selects_kiwoom_broker_via_factory(self, monkeypatch) -> None:
         """End-to-end: GPTQ_BROKER_TYPE=kiwoom actually produces a KiwoomBroker."""
-        from gpt_quant_v2.infrastructure.brokers.factory import create_broker
-        from gpt_quant_v2.infrastructure.brokers.kiwoom_broker import KiwoomBroker
+        from krx_signal_engine.infrastructure.brokers.factory import create_broker
+        from krx_signal_engine.infrastructure.brokers.kiwoom_broker import KiwoomBroker
 
         monkeypatch.setenv("GPTQ_BROKER_TYPE", "kiwoom")
         monkeypatch.setenv("GPTQ_KIWOOM_APP_KEY", "test-app-key")

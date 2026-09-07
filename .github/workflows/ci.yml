@@ -97,7 +97,7 @@ jobs:
           GPTQ_POLYGON_API_KEY: test_key
           GPTQ_OPENAI_API_KEY: test_key
           GPTQ_TIINGO_API_KEY: test_key
-        run: uv run pytest tests/unit/ -v --cov=src/gpt_quant_v2 --cov-report=xml
+        run: uv run pytest tests/unit/ -v --cov=src/krx_signal_engine --cov-report=xml
 
       - name: Upload coverage
         uses: codecov/codecov-action@v4
@@ -155,7 +155,7 @@ jobs:
           GPTQ_POLYGON_API_KEY: test_key
           GPTQ_OPENAI_API_KEY: test_key
           GPTQ_TIINGO_API_KEY: test_key
-        run: uv run pytest tests/integration/ -v --cov=src/gpt_quant_v2 --cov-report=xml --cov-append
+        run: uv run pytest tests/integration/ -v --cov=src/krx_signal_engine --cov-report=xml --cov-append
 
       - name: Upload coverage
         uses: codecov/codecov-action@v4

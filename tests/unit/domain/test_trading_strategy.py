@@ -8,9 +8,9 @@ position-sizing and exit-rule mechanics it still owns keep working.
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from gpt_quant_v2.domain.entities import Position, SignalDirection, SignalSource, TradingSignal
-from gpt_quant_v2.domain.services.trading_strategy import NewsBasedStrategy, StrategyConfig
-from gpt_quant_v2.domain.value_objects import Confidence, Price, Ticker
+from krx_signal_engine.domain.entities import Position, SignalDirection, SignalSource, TradingSignal
+from krx_signal_engine.domain.services.trading_strategy import NewsBasedStrategy, StrategyConfig
+from krx_signal_engine.domain.value_objects import Confidence, Price, Ticker
 
 TICKER = Ticker(value="005930")
 

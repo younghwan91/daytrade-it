@@ -9,10 +9,10 @@ disclosure-only path for existing positions.
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from gpt_quant_v2.domain.entities import Position, SignalDirection, SignalSource, TradingSignal
-from gpt_quant_v2.domain.services.risk_gate import GateAction, RiskGate, RiskGateConfig
-from gpt_quant_v2.domain.services.risk_manager import Account, RiskManager, ValidationStatus
-from gpt_quant_v2.domain.value_objects import Confidence, Sentiment, Ticker
+from krx_signal_engine.domain.entities import Position, SignalDirection, SignalSource, TradingSignal
+from krx_signal_engine.domain.services.risk_gate import GateAction, RiskGate, RiskGateConfig
+from krx_signal_engine.domain.services.risk_manager import Account, RiskManager, ValidationStatus
+from krx_signal_engine.domain.value_objects import Confidence, Sentiment, Ticker
 
 TICKER = Ticker(value="005930")
 

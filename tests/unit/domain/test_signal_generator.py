@@ -12,9 +12,14 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import HttpUrl
 
-from gpt_quant_v2.domain.entities import NewsArticle, SignalDirection, SignalSource, TradingSignal
-from gpt_quant_v2.domain.services.signal_generator import SignalConfig, SignalGenerator
-from gpt_quant_v2.domain.value_objects import Confidence, Sentiment, Ticker
+from krx_signal_engine.domain.entities import (
+    NewsArticle,
+    SignalDirection,
+    SignalSource,
+    TradingSignal,
+)
+from krx_signal_engine.domain.services.signal_generator import SignalConfig, SignalGenerator
+from krx_signal_engine.domain.value_objects import Confidence, Sentiment, Ticker
 
 TICKER = Ticker(value="005930")
 

@@ -3,11 +3,14 @@ version: "3.8"
 services:
   timescaledb:
     image: timescale/timescaledb:latest-pg15-alpine
-    container_name: gpt_quant_timescaledb
+    container_name: krx_signal_engine_timescaledb
     restart: unless-stopped
     ports:
       - "${POSTGRES_PORT:-5432}:5432"
     environment:
+      # NOTE: default user/db name intentionally left as "gpt_quant" here --
+      # it must match the GRANT statements in ./timescaledb/init.sql and the
+      # default in docker/.env.example, neither of which this task renames.
       POSTGRES_USER: ${POSTGRES_USER:-gpt_quant}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
       POSTGRES_DB: ${POSTGRES_DB:-gpt_quant}
@@ -21,11 +24,11 @@ services:
       retries: 5
       start_period: 30s
     networks:
-      - gpt_quant_network
+      - krx_signal_engine_network
 
   redis:
     image: redis:7-alpine
-    container_name: gpt_quant_redis
+    container_name: krx_signal_engine_redis
     restart: unless-stopped
     ports:
       - "${REDIS_PORT:-6379}:6379"
@@ -43,15 +46,15 @@ services:
       retries: 5
       start_period: 10s
     networks:
-      - gpt_quant_network
+      - krx_signal_engine_network
 
 volumes:
   timescaledb_data:
-    name: gpt_quant_timescaledb_data
+    name: krx_signal_engine_timescaledb_data
   redis_data:
-    name: gpt_quant_redis_data
+    name: krx_signal_engine_redis_data
 
 networks:
-  gpt_quant_network:
-    name: gpt_quant_network
+  krx_signal_engine_network:
+    name: krx_signal_engine_network
     driver: bridge

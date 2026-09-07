@@ -1,5 +1,5 @@
 [project]
-name = "gpt-quant-v2"
+name = "krx-signal-engine"
 version = "0.1.0"
 description = "AI-Agent-Friendly News-Driven Algorithmic Trading System"
 readme = "README.md"
@@ -73,12 +73,12 @@ dev = [
 ]
 
 [project.scripts]
-gptq = "gpt_quant_v2.interfaces.cli.main:app"
+gptq = "krx_signal_engine.interfaces.cli.main:app"
 
 [project.urls]
-Homepage = "https://github.com/yourusername/gpt_quant_v2"
-Documentation = "https://github.com/yourusername/gpt_quant_v2#readme"
-Repository = "https://github.com/yourusername/gpt_quant_v2"
+Homepage = "https://github.com/yourusername/krx_signal_engine"
+Documentation = "https://github.com/yourusername/krx_signal_engine#readme"
+Repository = "https://github.com/yourusername/krx_signal_engine"
 
 [build-system]
 requires = ["hatchling"]
@@ -92,7 +92,7 @@ build-backend = "hatchling.build"
 krx-news-client = { path = "../krx-news-client" }
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/gpt_quant_v2"]
+packages = ["src/krx_signal_engine"]
 
 # 타입 검사가 켜진 적이 없던 레포다. domain·shared 는 strict 로 통과하고,
 # 아래 세 계층은 미완성 코드가 152건의 오류를 낸다(없는 이름 import, 존재하지
@@ -100,9 +100,9 @@ packages = ["src/gpt_quant_v2"]
 # 대로 한 줄씩 지우면 된다.
 [[tool.mypy.overrides]]
 module = [
-    "gpt_quant_v2.application.*",
-    "gpt_quant_v2.infrastructure.*",
-    "gpt_quant_v2.interfaces.*",
+    "krx_signal_engine.application.*",
+    "krx_signal_engine.infrastructure.*",
+    "krx_signal_engine.interfaces.*",
 ]
 ignore_errors = true
 
@@ -131,12 +131,12 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 # FastAPI·MCP 의 인자는 프레임워크가 주입한다(Depends/Query/Body). 함수 본문에서
 # 직접 안 쓰여도 시그니처에 있어야 하므로 ARG 는 이 계층에서 오탐이다.
-"src/gpt_quant_v2/interfaces/**" = ["ARG001", "ARG002"]
-"src/gpt_quant_v2/application/handlers/**" = ["ARG001", "ARG002"]
+"src/krx_signal_engine/interfaces/**" = ["ARG001", "ARG002"]
+"src/krx_signal_engine/application/handlers/**" = ["ARG001", "ARG002"]
 "tests/**" = ["ARG001", "ARG002"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["gpt_quant_v2"]
+known-first-party = ["krx_signal_engine"]
 
 [tool.mypy]
 python_version = "3.12"
@@ -148,10 +148,10 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
-addopts = "-v --cov=src/gpt_quant_v2 --cov-report=term-missing"
+addopts = "-v --cov=src/krx_signal_engine --cov-report=term-missing"
 
 [tool.coverage.run]
-source = ["src/gpt_quant_v2"]
+source = ["src/krx_signal_engine"]
 branch = true
 
 [tool.coverage.report]

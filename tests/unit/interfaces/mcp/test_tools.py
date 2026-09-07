@@ -24,10 +24,10 @@ from decimal import Decimal
 
 import pytest
 
-from gpt_quant_v2.domain.entities.signal import SignalDirection, SignalSource, TradingSignal
-from gpt_quant_v2.domain.services.risk_manager import RiskManager
-from gpt_quant_v2.domain.value_objects import Confidence, Ticker
-from gpt_quant_v2.interfaces.mcp.tools import (
+from krx_signal_engine.domain.entities.signal import SignalDirection, SignalSource, TradingSignal
+from krx_signal_engine.domain.services.risk_manager import RiskManager
+from krx_signal_engine.domain.value_objects import Confidence, Ticker
+from krx_signal_engine.interfaces.mcp.tools import (
     MCPToolContext,
     backtest,
     get_signals,
@@ -116,10 +116,10 @@ async def test_backtest_tool_relays_real_handler_metrics_not_placeholder() -> No
     this stays a unit test (no live DB dependency) while still proving the
     tool function relays rather than re-derives the numbers.
     """
-    from gpt_quant_v2.application.handlers.backtest import (
+    from krx_signal_engine.application.handlers.backtest import (
         BacktestMetrics,
     )
-    from gpt_quant_v2.application.handlers.backtest import (
+    from krx_signal_engine.application.handlers.backtest import (
         BacktestResult as HandlerBacktestResult,
     )
 

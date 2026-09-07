@@ -8,7 +8,7 @@ financial-news vocabulary and KRX regular-session hours (09:00-15:30 KST).
 
 from datetime import UTC, datetime, time
 
-from gpt_quant_v2.application.ml.feature_engineer import (
+from krx_signal_engine.application.ml.feature_engineer import (
     DEFAULT_KEYWORDS,
     MARKET_CLOSE,
     MARKET_OPEN,

@@ -15,18 +15,18 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from gpt_quant_v2.infrastructure.brokers.base import (
+from krx_signal_engine.infrastructure.brokers.base import (
     Order,
     OrderSide,
     OrderStatusEnum,
     OrderType,
 )
-from gpt_quant_v2.infrastructure.brokers.kiwoom_broker import (
+from krx_signal_engine.infrastructure.brokers.kiwoom_broker import (
     _ORDER_TYPE_FIELD,
     _ORIG_ORDER_NO_FIELD,
     KiwoomBroker,
 )
-from gpt_quant_v2.shared.errors import BrokerError, OrderRejectedError
+from krx_signal_engine.shared.errors import BrokerError, OrderRejectedError
 
 
 class _FakeOrderModule:

@@ -21,12 +21,12 @@ import datetime as dt
 import psycopg2
 import pytest
 
-from gpt_quant_v2.domain.value_objects import Ticker
-from gpt_quant_v2.infrastructure.external.quant_airflow_db_client import (
+from krx_signal_engine.domain.value_objects import Ticker
+from krx_signal_engine.infrastructure.external.quant_airflow_db_client import (
     AdjustedDailyBar,
     QuantAirflowDBClient,
 )
-from gpt_quant_v2.shared.config.settings import QuantAirflowDBSettings
+from krx_signal_engine.shared.config.settings import QuantAirflowDBSettings
 
 # Real, well-known large-cap KRX code (Samsung Electronics), per the task
 # brief's guidance to pick one for the integration test.

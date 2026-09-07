@@ -8,7 +8,7 @@ from uuid import uuid4
 
 import pytest
 
-from gpt_quant_v2.domain.entities import (
+from krx_signal_engine.domain.entities import (
     Exchange,
     NewsArticle,
     Position,
@@ -16,7 +16,7 @@ from gpt_quant_v2.domain.entities import (
     Trade,
     TradingSignal,
 )
-from gpt_quant_v2.domain.value_objects import Confidence, Ticker
+from krx_signal_engine.domain.value_objects import Confidence, Ticker
 
 
 class TestExchange:

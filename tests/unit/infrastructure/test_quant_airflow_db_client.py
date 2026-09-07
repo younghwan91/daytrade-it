@@ -17,15 +17,15 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from gpt_quant_v2.domain.value_objects import Ticker
-from gpt_quant_v2.infrastructure.external.quant_airflow_db_client import (
+from krx_signal_engine.domain.value_objects import Ticker
+from krx_signal_engine.infrastructure.external.quant_airflow_db_client import (
     KST,
     AdjustedDailyBar,
     NewsJudgmentRow,
     QuantAirflowDBClient,
     judged_at_to_kst,
 )
-from gpt_quant_v2.shared.config.settings import QuantAirflowDBSettings
+from krx_signal_engine.shared.config.settings import QuantAirflowDBSettings
 
 # =============================================================================
 # KST/UTC conversion (fixed inputs, no DB)
@@ -223,7 +223,7 @@ class TestReadOnlyEnforcement:
         mock_conn.closed = False
         mock_connect = MagicMock(return_value=mock_conn)
         monkeypatch.setattr(
-            "gpt_quant_v2.infrastructure.external.quant_airflow_db_client.psycopg2.connect",
+            "krx_signal_engine.infrastructure.external.quant_airflow_db_client.psycopg2.connect",
             mock_connect,
         )
 
@@ -238,7 +238,7 @@ class TestReadOnlyEnforcement:
         """Static guard: this module must never contain SQL write verbs."""
         import inspect
 
-        from gpt_quant_v2.infrastructure.external import quant_airflow_db_client as mod
+        from krx_signal_engine.infrastructure.external import quant_airflow_db_client as mod
 
         source = inspect.getsource(mod)
         for verb in ("INSERT INTO", "UPDATE ", "DELETE FROM", "DROP ", "TRUNCATE", "ALTER "):

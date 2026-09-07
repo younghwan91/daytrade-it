@@ -1,6 +1,7 @@
 # Architecture Decision Records
 
-This directory contains Architecture Decision Records (ADRs) for GPT Quant v2.
+This directory contains Architecture Decision Records (ADRs) for KRX Signal
+Engine (provisional name; redeveloped from `gpt-quant-v2`).
 
 ## What is an ADR?
 

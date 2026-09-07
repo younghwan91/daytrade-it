@@ -5,7 +5,7 @@ from decimal import Decimal
 
 import pytest
 
-from gpt_quant_v2.infrastructure.brokers.base import (
+from krx_signal_engine.infrastructure.brokers.base import (
     KST,
     Account,
     Order,

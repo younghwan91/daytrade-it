@@ -13,11 +13,11 @@ import pytest
 from krx_news_client import DartQuotaExceededError, NewsSource
 from krx_news_client import Disclosure as KrxDisclosure
 
-from gpt_quant_v2.infrastructure.external.dart_client import (
+from krx_signal_engine.infrastructure.external.dart_client import (
     DartClient,
     map_dart_disclosure_to_domain,
 )
-from gpt_quant_v2.shared.errors.exceptions import DartAPIError
+from krx_signal_engine.shared.errors.exceptions import DartAPIError
 
 
 def make_krx_disclosure(

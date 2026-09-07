@@ -8,7 +8,7 @@ from uuid import uuid4
 import pytest
 from pydantic import ValidationError
 
-from gpt_quant_v2.domain.events import (
+from krx_signal_engine.domain.events import (
     DomainEvent,
     NewsAnalyzed,
     PositionUpdated,

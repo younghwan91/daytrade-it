@@ -5,14 +5,14 @@ decision, the entry-blocker-only scoping of generic bad sentiment (never
 forces an exit), and the "leave unclassified rather than guess" default.
 """
 
-from gpt_quant_v2.domain.services.risk_gate import (
+from krx_signal_engine.domain.services.risk_gate import (
     DisclosureSeverity,
     GateAction,
     RiskGate,
     RiskGateConfig,
     classify_disclosure_severity,
 )
-from gpt_quant_v2.domain.value_objects import Sentiment
+from krx_signal_engine.domain.value_objects import Sentiment
 
 
 class TestClassifyDisclosureSeverity:

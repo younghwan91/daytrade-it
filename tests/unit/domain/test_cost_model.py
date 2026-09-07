@@ -6,8 +6,8 @@ from decimal import Decimal
 
 import pytest
 
-from gpt_quant_v2.domain.entities.stock import Exchange
-from gpt_quant_v2.domain.services.cost_model import (
+from krx_signal_engine.domain.entities.stock import Exchange
+from krx_signal_engine.domain.services.cost_model import (
     DEFAULT_COMMISSION_RATE,
     DEFAULT_KOSDAQ_SLIPPAGE_PCT,
     DEFAULT_KOSDAQ_TAX_RATE,
