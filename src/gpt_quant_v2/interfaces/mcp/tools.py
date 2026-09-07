@@ -126,6 +126,17 @@ class BacktestResult(BaseModel):
     NOT trustworthy real metrics until Phase 5 replaces the stub with an
     actual backtest-engine call. Do not remove this stub without wiring a
     real engine in its place.
+
+    IMPORTANT (Task 12 fix-review finding): a class docstring is NOT visible
+    to an MCP tool caller -- ``mcp_tool()`` only registers ``name``,
+    ``description``, and the function, so an LLM/agent sees only the tool
+    description and the returned JSON, never this docstring. The
+    ``is_placeholder`` field below is the mechanism that actually reaches a
+    caller: while ``True``, every numeric field on this model is a
+    hardcoded stub, not a real backtest-engine result, and must not be
+    treated as trustworthy performance data. Phase 5 must set it to
+    ``False`` (or stop setting it, once a real engine always returns
+    ``False``) when it wires up a real backtest engine.
     """
 
     strategy: str
@@ -140,6 +151,15 @@ class BacktestResult(BaseModel):
     winning_trades: int
     losing_trades: int
     win_rate: float
+    is_placeholder: bool = Field(
+        default=False,
+        description=(
+            "True if these metrics are hardcoded stub values, not a real "
+            "backtest engine's computed output (see Phase 5). Callers "
+            "MUST check this before treating sharpe_ratio/max_drawdown_pct/"
+            "win_rate/etc. as real performance data."
+        ),
+    )
 
 
 class Portfolio(BaseModel):
@@ -217,7 +237,15 @@ class ModelInfo(BaseModel):
 
 
 class TrainingResult(BaseModel):
-    """ML model training result."""
+    """ML model training result.
+
+    Same hardcoded-placeholder shape as ``BacktestResult`` (see its
+    docstring): as of Task 12, ``train_model()`` below returns a fixed
+    ``metrics`` dict (accuracy/f1/precision/recall) rather than real
+    training output, because it is not wired up to an actual training run.
+    ``is_placeholder`` is the caller-visible signal for this -- a class
+    docstring is never seen by an MCP tool caller, only the returned JSON.
+    """
 
     model_name: str
     model_version: str
@@ -225,6 +253,14 @@ class TrainingResult(BaseModel):
     training_duration_seconds: float
     samples_used: int
     created_at: datetime
+    is_placeholder: bool = Field(
+        default=False,
+        description=(
+            "True if `metrics` are hardcoded stub values, not a real "
+            "training run's computed output. Callers MUST check this "
+            "before treating accuracy/f1/precision/recall as real."
+        ),
+    )
 
 
 # =============================================================================
@@ -936,7 +972,14 @@ async def get_trade_history(
 
 @mcp_tool(
     name="backtest",
-    description="Run a backtest on a trading strategy",
+    description=(
+        "Run a backtest on a trading strategy. WARNING: no backtest engine "
+        "is wired up yet (Phase 5, not built) -- this currently returns "
+        "HARDCODED PLACEHOLDER metrics, not a real computed backtest. "
+        "Always check the response's is_placeholder field before treating "
+        "sharpe_ratio/max_drawdown_pct/win_rate/etc. as real performance "
+        "data."
+    ),
 )
 async def backtest(
     strategy: Annotated[
@@ -951,6 +994,10 @@ async def backtest(
 
     Returns performance metrics including returns, Sharpe ratio,
     drawdown, and trade statistics.
+
+    NOT YET WIRED TO A REAL BACKTEST ENGINE (Phase 5): returns
+    ``is_placeholder=True`` with hardcoded stub metrics until a real
+    engine is integrated. See ``BacktestResult`` docstring.
     """
     # Parse dates
     if start_date:
@@ -975,6 +1022,7 @@ async def backtest(
         winning_trades=90,
         losing_trades=60,
         win_rate=0.6,
+        is_placeholder=True,
     )
 
 
@@ -1047,7 +1095,13 @@ async def get_system_status() -> SystemStatus:
 
 @mcp_tool(
     name="train_model",
-    description="Trigger ML model training with specified parameters",
+    description=(
+        "Trigger ML model training with specified parameters. WARNING: "
+        "not yet wired to the real training pipeline -- this currently "
+        "returns HARDCODED PLACEHOLDER metrics, not a real trained model's "
+        "output. Always check the response's is_placeholder field before "
+        "treating accuracy/f1/precision/recall as real."
+    ),
 )
 async def train_model(
     model_name: Annotated[str, "Name for the trained model"],
@@ -1058,6 +1112,10 @@ async def train_model(
     """Trigger ML model training.
 
     Trains an XGBoost classification model for trading signal prediction.
+
+    NOT YET WIRED TO THE REAL TRAINING PIPELINE: returns
+    ``is_placeholder=True`` with hardcoded stub metrics until a real
+    training run is integrated. See ``TrainingResult`` docstring.
     """
     ctx = _get_context()
     start_time = time.time()
@@ -1084,6 +1142,7 @@ async def train_model(
         training_duration_seconds=training_duration,
         samples_used=lookback_days * 100,  # Placeholder
         created_at=datetime.now(UTC),
+        is_placeholder=True,
     )
 
 

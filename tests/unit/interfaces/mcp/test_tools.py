@@ -7,6 +7,14 @@ computed for the same inputs -- i.e. the MCP response model is relaying an
 already-computed domain value verbatim, not exposing raw
 predicted_return/predicted_drawdown for an LLM/agent caller to "compute
 Sharpe/risk-reward itself" from.
+
+Also covers the Task 12 fix-review finding: `BacktestResult`/`TrainingResult`
+currently return hardcoded placeholder metrics (no backtest engine/training
+pipeline is wired up yet -- Phase 5), and a class docstring is invisible to
+an actual MCP tool caller (`mcp_tool()` only registers name/description/
+function). `is_placeholder` is the caller-visible field that must be `True`
+whenever these stub values are returned, so a caller reading only the
+response JSON (not source code) can tell the numbers are fabricated.
 """
 
 from datetime import UTC, datetime, timedelta
@@ -17,7 +25,12 @@ import pytest
 from gpt_quant_v2.domain.entities.signal import SignalDirection, SignalSource, TradingSignal
 from gpt_quant_v2.domain.services.risk_manager import RiskManager
 from gpt_quant_v2.domain.value_objects import Confidence, Ticker
-from gpt_quant_v2.interfaces.mcp.tools import MCPToolContext, get_signals
+from gpt_quant_v2.interfaces.mcp.tools import (
+    MCPToolContext,
+    backtest,
+    get_signals,
+    train_model,
+)
 
 
 class _FakeSignalRepository:
@@ -78,3 +91,38 @@ async def test_get_signals_risk_reward_ratio_matches_handler_computation() -> No
     assert returned.risk_reward_ratio == pytest.approx(float(signal.risk_reward_ratio))
     assert returned.predicted_return == pytest.approx(predicted_return)
     assert returned.predicted_drawdown == pytest.approx(predicted_drawdown)
+
+
+@pytest.mark.asyncio
+async def test_backtest_tool_flags_placeholder_metrics_in_response_data() -> None:
+    """`backtest()` has no real backtest engine wired up yet (Phase 5) and
+    returns hardcoded stub metrics. A class docstring is invisible to an
+    MCP caller -- `is_placeholder=True` in the returned data is the only
+    caller-visible signal that sharpe_ratio/max_drawdown_pct/win_rate/etc.
+    are fabricated, not real computed output. This must hold in the actual
+    returned JSON, not just in source-code comments.
+    """
+    result = await backtest(strategy="composite", initial_capital=100000)
+
+    assert result.is_placeholder is True
+
+
+@pytest.mark.asyncio
+async def test_train_model_tool_flags_placeholder_metrics_in_response_data() -> None:
+    """Same pattern as `backtest()`: `train_model()` is not wired to a real
+    training pipeline yet, so its `metrics` dict is a hardcoded stub.
+    `is_placeholder=True` must be visible in the returned data.
+    """
+
+    class _StubModelTrainer:
+        """Any truthy object satisfies `if not ctx.model_trainer` in
+        train_model(); the placeholder path doesn't actually call it."""
+
+    ctx = MCPToolContext(model_trainer=_StubModelTrainer())
+    MCPToolContext.set_instance(ctx)
+    try:
+        result = await train_model(model_name="test-model")
+    finally:
+        MCPToolContext.set_instance(None)  # type: ignore[arg-type]
+
+    assert result.is_placeholder is True
