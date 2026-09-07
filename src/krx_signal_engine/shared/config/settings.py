@@ -526,8 +526,20 @@ class BrokerSettings(BaseSettings):
 
     @property
     def is_paper_trading(self) -> bool:
-        """Check if paper trading is enabled."""
-        return self.type == BrokerType.PAPER or "paper" in self.alpaca_base_url.lower()
+        """Check if paper trading is enabled.
+
+        Whole-branch review finding #7: this used to also check
+        ``"paper" in self.alpaca_base_url.lower()`` -- but ``alpaca_base_url``
+        defaults to a string containing "paper" regardless of which
+        broker type is actually configured, so a live (non-mock)
+        ``KiwoomBroker`` was incorrectly reported as paper trading. The
+        correct check is: the broker type is literally ``PAPER``, or it's
+        Kiwoom running against Kiwoom's own mock-trading server
+        (``kiwoom_is_mock``).
+        """
+        return self.type == BrokerType.PAPER or (
+            self.type == BrokerType.KIWOOM and self.kiwoom_is_mock
+        )
 
 
 class ServerSettings(BaseSettings):
