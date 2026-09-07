@@ -32,6 +32,15 @@ from gpt_quant_v2.infrastructure.external.prompts import (
     SENTIMENT_USER_PROMPT_TEMPLATE,
     format_sentiment_user_prompt,
 )
+from gpt_quant_v2.infrastructure.external.quant_airflow_db_client import (
+    AdjustedDailyBar,
+    ConsensusRow,
+    EarningsRow,
+    NewsJudgmentRow,
+    QuantAirflowDBClient,
+    SectorIndexRow,
+    SupplyDemandRow,
+)
 from gpt_quant_v2.infrastructure.external.tiingo_client import (
     NewsItem,
     TiingoClient,
@@ -76,4 +85,12 @@ __all__ = [
     "TiingoClient",
     "NewsItem",
     "TiingoRateLimiter",
+    # quant-airflow TimescaleDB Client (read-only)
+    "QuantAirflowDBClient",
+    "AdjustedDailyBar",
+    "SupplyDemandRow",
+    "SectorIndexRow",
+    "EarningsRow",
+    "ConsensusRow",
+    "NewsJudgmentRow",
 ]

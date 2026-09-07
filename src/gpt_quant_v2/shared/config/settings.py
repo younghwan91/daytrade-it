@@ -301,6 +301,67 @@ class TiingoSettings(BaseSettings):
         return bool(self.api_key.get_secret_value())
 
 
+class QuantAirflowDBSettings(BaseSettings):
+    """
+    Connection settings for the ``quant-airflow`` TimescaleDB (read-only).
+
+    This points at the same Postgres/TimescaleDB instance the user's
+    ``quant-airflow`` pipeline writes to. gpt-quant-v2 only ever reads from
+    it (batch/EOD Korean market data ingested via kiwoom-client/DART/etc.) —
+    it must never write into quant-airflow's schema. See
+    ``quant-airflow/README.md`` ("데이터 읽는 법") for the reference
+    connection example this mirrors.
+
+    Attributes:
+        host: TimescaleDB host (the "spare PC" exposing it on the LAN).
+        port: TimescaleDB port.
+        dbname: Database name.
+        user: Read/query user.
+        password: Password for `user`.
+        connect_timeout: Seconds to wait for the TCP connection before
+            giving up (kept short — this is a LAN host, not a WAN API).
+    """
+
+    model_config = SettingsConfigDict(
+        env_prefix="GPTQ_QUANT_AIRFLOW_DB_",
+        extra="ignore",
+    )
+
+    host: str = Field(
+        default="localhost",
+        description="TimescaleDB host exposing quant-airflow's data on the LAN",
+    )
+    port: int = Field(
+        default=5432,
+        ge=1,
+        le=65535,
+        description="TimescaleDB port",
+    )
+    dbname: str = Field(
+        default="kr_quant",
+        description="TimescaleDB database name",
+    )
+    user: str = Field(
+        default="kr_quant",
+        description="Read-only query user",
+    )
+    password: SecretStr = Field(
+        default=SecretStr(""),
+        description="Password for `user`",
+    )
+    connect_timeout: float = Field(
+        default=5.0,
+        ge=1.0,
+        le=60.0,
+        description="Connection timeout in seconds",
+    )
+
+    @property
+    def is_configured(self) -> bool:
+        """Check if a password is configured."""
+        return bool(self.password.get_secret_value())
+
+
 class TradingSettings(BaseSettings):
     """
     Trading window and risk management configuration.
@@ -669,6 +730,7 @@ class Settings(BaseSettings):
     polygon: PolygonSettings = Field(default_factory=PolygonSettings)
     openai: OpenAISettings = Field(default_factory=OpenAISettings)
     tiingo: TiingoSettings = Field(default_factory=TiingoSettings)
+    quant_airflow_db: QuantAirflowDBSettings = Field(default_factory=QuantAirflowDBSettings)
     trading: TradingSettings = Field(default_factory=TradingSettings)
     broker: BrokerSettings = Field(default_factory=BrokerSettings)
     server: ServerSettings = Field(default_factory=ServerSettings)
