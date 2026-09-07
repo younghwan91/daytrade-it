@@ -47,6 +47,7 @@ dependencies = [
     "aiohttp>=3.9.0",
     "polygon-api-client>=1.14.0",
     "krx-news-client>=0.2.0",
+    "kiwoom-client>=0.3.0",
 
     # Utilities
     "structlog>=24.1.0",

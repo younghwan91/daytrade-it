@@ -65,6 +65,7 @@ class BrokerType(StrEnum):
     PAPER = "paper"
     ALPACA = "alpaca"
     IBKR = "ibkr"
+    KIWOOM = "kiwoom"
 
 
 # =============================================================================
@@ -434,10 +435,14 @@ class BrokerSettings(BaseSettings):
     Broker configuration settings.
 
     Attributes:
-        type: Broker type (paper, alpaca, ibkr).
+        type: Broker type (paper, alpaca, ibkr, kiwoom).
         alpaca_api_key: Alpaca API key (required for alpaca broker).
         alpaca_secret_key: Alpaca secret key (required for alpaca broker).
         alpaca_base_url: Alpaca API base URL.
+        kiwoom_app_key: Kiwoom REST API app key (required for kiwoom broker).
+        kiwoom_app_secret: Kiwoom REST API app secret (required for kiwoom broker).
+        kiwoom_account_no: Kiwoom account number (reporting only).
+        kiwoom_is_mock: Use Kiwoom's mock-trading server instead of live/prod.
     """
 
     model_config = SettingsConfigDict(
@@ -462,6 +467,26 @@ class BrokerSettings(BaseSettings):
         default="https://paper-api.alpaca.markets",
         description="Alpaca API base URL",
     )
+    kiwoom_app_key: SecretStr | None = Field(
+        default=None,
+        description="Kiwoom Securities REST API app key (required for kiwoom broker)",
+    )
+    kiwoom_app_secret: SecretStr | None = Field(
+        default=None,
+        description="Kiwoom Securities REST API app secret (required for kiwoom broker)",
+    )
+    kiwoom_account_no: str | None = Field(
+        default=None,
+        description="Kiwoom account number (used for reporting only -- not sent per-order)",
+    )
+    kiwoom_is_mock: bool = Field(
+        default=True,
+        description=(
+            "Use Kiwoom's mock-trading server (mockapi.kiwoom.com) instead of the live "
+            "production API. Defaults to True so a missing/unset env var never accidentally "
+            "targets live capital."
+        ),
+    )
 
     @field_validator("alpaca_base_url")
     @classmethod
@@ -479,6 +504,16 @@ class BrokerSettings(BaseSettings):
                 raise ValueError("Alpaca API key is required when using Alpaca broker")
             if not self.alpaca_secret_key or not self.alpaca_secret_key.get_secret_value():
                 raise ValueError("Alpaca secret key is required when using Alpaca broker")
+        return self
+
+    @model_validator(mode="after")
+    def validate_kiwoom_credentials(self) -> BrokerSettings:
+        """Ensure Kiwoom credentials are provided when using the Kiwoom broker."""
+        if self.type == BrokerType.KIWOOM:
+            if not self.kiwoom_app_key or not self.kiwoom_app_key.get_secret_value():
+                raise ValueError("Kiwoom app key is required when using Kiwoom broker")
+            if not self.kiwoom_app_secret or not self.kiwoom_app_secret.get_secret_value():
+                raise ValueError("Kiwoom app secret is required when using Kiwoom broker")
         return self
 
     @property

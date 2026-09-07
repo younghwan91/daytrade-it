@@ -15,6 +15,7 @@ An ADR is a document that captures an important architectural decision made alon
 | [ADR-003](003-event-driven.md) | Event-Driven Architecture | Accepted | 2024-01-15 |
 | [ADR-004](004-mcp-integration.md) | MCP Tool Interface for AI Agents | Accepted | 2024-01-15 |
 | [ADR-005](005-abstract-broker.md) | Abstract Broker Interface | Accepted | 2024-01-15 |
+| [ADR-006](006-kiwoom-broker.md) | KiwoomBroker as the Korean-Equity Broker Adapter | Accepted | 2026-09-07 |
 
 ## Template
 

@@ -10,6 +10,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING
 
 from gpt_quant_v2.infrastructure.brokers.base import BrokerInterface
+from gpt_quant_v2.infrastructure.brokers.kiwoom_broker import KiwoomBroker
 from gpt_quant_v2.infrastructure.brokers.paper_broker import (
     PaperBroker,
     PaperBrokerConfig,
@@ -33,7 +34,7 @@ def create_broker(
     """Create a broker instance based on the specified type.
 
     Args:
-        broker_type: Type of broker to create ("paper", "alpaca", "ibkr").
+        broker_type: Type of broker to create ("paper", "alpaca", "ibkr", "kiwoom").
         config: Application settings for broker configuration.
         **kwargs: Additional keyword arguments passed to the broker.
 
@@ -58,9 +59,11 @@ def create_broker(
         raise BrokerFactoryError("Alpaca broker not yet implemented. Use 'paper' for testing.")
     elif broker_type == "ibkr":
         raise BrokerFactoryError("IBKR broker not yet implemented. Use 'paper' for testing.")
+    elif broker_type == "kiwoom":
+        return _create_kiwoom_broker(config, **kwargs)
     else:
         raise BrokerFactoryError(
-            f"Unknown broker type: {broker_type}. Supported types: paper, alpaca, ibkr"
+            f"Unknown broker type: {broker_type}. Supported types: paper, alpaca, ibkr, kiwoom"
         )
 
 
@@ -106,3 +109,65 @@ def _create_paper_broker(
 
     paper_config = PaperBrokerConfig(**config_kwargs)
     return PaperBroker(config=paper_config, settings=settings)
+
+
+def _create_kiwoom_broker(
+    settings: Settings | None = None,
+    **kwargs,
+) -> KiwoomBroker:
+    """Create a Kiwoom Securities broker.
+
+    Credentials are sourced from `settings.broker` (env vars
+    `GPTQ_KIWOOM_APP_KEY` / `GPTQ_KIWOOM_APP_SECRET` /
+    `GPTQ_KIWOOM_ACCOUNT_NO` / `GPTQ_KIWOOM_IS_MOCK` -- `BrokerSettings`
+    uses a flat `GPTQ_` env prefix, not a nested `GPTQ_BROKER__` one, same
+    as the existing `GPTQ_ALPACA_API_KEY` etc.), never hardcoded -- see
+    `BrokerSettings.validate_kiwoom_credentials` for the required-field
+    check.
+
+    Args:
+        settings: Application settings.
+        **kwargs: Override values -- `app_key`, `app_secret`, `account_no`,
+            `is_mock`, or a pre-built `api` (a `KiwoomAPI`-shaped object,
+            mainly for tests to inject a mock without constructing a real
+            `KiwoomAPI`).
+
+    Returns:
+        Configured KiwoomBroker instance.
+
+    Raises:
+        BrokerFactoryError: If credentials are missing from both `kwargs`
+            and `settings`.
+    """
+    api = kwargs.pop("api", None)
+    account_no = kwargs.pop("account_no", None)
+
+    if api is None:
+        app_key = kwargs.pop("app_key", None)
+        app_secret = kwargs.pop("app_secret", None)
+        is_mock = kwargs.pop("is_mock", None)
+
+        if settings is not None and hasattr(settings, "broker"):
+            broker_settings = settings.broker
+            if app_key is None and broker_settings.kiwoom_app_key is not None:
+                app_key = broker_settings.kiwoom_app_key.get_secret_value()
+            if app_secret is None and broker_settings.kiwoom_app_secret is not None:
+                app_secret = broker_settings.kiwoom_app_secret.get_secret_value()
+            if account_no is None:
+                account_no = broker_settings.kiwoom_account_no
+            if is_mock is None:
+                is_mock = broker_settings.kiwoom_is_mock
+
+        if not app_key or not app_secret:
+            raise BrokerFactoryError(
+                "Kiwoom broker requires 'kiwoom_app_key'/'kiwoom_app_secret' "
+                "(via settings.broker or explicit kwargs)."
+            )
+
+        # Imported lazily so environments without kiwoom-client installed
+        # can still import this module for non-Kiwoom broker types.
+        from kiwoom_client import KiwoomAPI
+
+        api = KiwoomAPI(app_key=app_key, app_secret=app_secret, is_mock=bool(is_mock))
+
+    return KiwoomBroker(api=api, account_no=account_no)
