@@ -5,7 +5,7 @@
 A modern, clean-architecture trading system designed for AI agent integration, featuring news sentiment analysis, ML-based signal generation, and automated trade execution.
 
 > **Provenance note:** this repository was redeveloped from
-> [`gpt-quant-v2`](https://github.com/yourusername/gpt-quant-v2), re-platformed
+> [`gpt-quant-v2`](https://github.com/younghwan91/gpt-quant-v2), re-platformed
 > from a US-equity system into a Korean-equity (KOSPI/KOSDAQ) system driven by
 > Toss news. `krx-signal-engine` is a **provisional** name pending final
 > confirmation -- the GitHub repository itself has not yet been renamed (see
@@ -13,7 +13,7 @@ A modern, clean-architecture trading system designed for AI agent integration, f
 
 ## 🎯 Features
 
-- **News-Driven Trading**: Analyze financial news sentiment using OpenAI
+- **News-Driven Trading**: Analyze financial news sentiment via an OpenAI prompt (accuracy not yet independently measured; a Korean FinBERT alternative was benchmarked and scored only 60.5% accuracy / 18.2% BEARISH recall, judged not usable for a risk gate as-is -- see `PLAN.md`'s Phase 0 Results and Task 1)
 - **ML Signal Generation**: XGBoost models predict price movements
 - **AI-Agent Ready**: MCP tool interface for seamless AI integration
 - **Real-Time Processing**: WebSocket updates for live market data
@@ -43,7 +43,7 @@ src/krx_signal_engine/
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/krx-signal-engine.git
+git clone https://github.com/younghwan91/gpt-quant-v2.git  # placeholder: repo not yet renamed to krx-signal-engine on GitHub, see Task 16 report
 cd krx-signal-engine
 
 # Install UV if not already installed
@@ -173,7 +173,7 @@ Key configurations:
 The system implements a news-driven momentum strategy:
 
 1. **News Collection**: Fetch recent news from Tiingo API
-2. **Sentiment Analysis**: Analyze news sentiment using OpenAI
+2. **Sentiment Analysis**: Analyze news sentiment via an OpenAI prompt (unvalidated accuracy -- see Phase 0 Results in `PLAN.md`; do not treat as a confirmed-accurate signal)
 3. **Feature Engineering**: Combine news + price data features
 4. **ML Prediction**: XGBoost predicts max rise, drawdown, and direction
 5. **Signal Generation**: Create signals based on risk/reward ratio
