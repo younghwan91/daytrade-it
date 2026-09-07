@@ -13,6 +13,8 @@ from datetime import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
+from gpt_quant_v2.domain.entities.stock import Exchange
+from gpt_quant_v2.domain.services.cost_model import CostModelConfig, KoreanCostModel
 from gpt_quant_v2.infrastructure.brokers.base import (
     Account,
     BrokerInterface,
@@ -37,17 +39,25 @@ class PaperBrokerConfig:
 
     Attributes:
         initial_cash: Starting cash balance.
-        slippage_pct: Slippage percentage applied to fills (0.0 to 1.0).
-        commission_per_share: Commission charged per share.
-        min_commission: Minimum commission per order.
+        cost_model_config: Rates for the shared
+            :class:`~gpt_quant_v2.domain.services.cost_model.KoreanCostModel`
+            (증권거래세 + 위탁수수료 + slippage) that this broker uses for
+            every fill -- see ``domain/services/cost_model.py`` for the
+            researched/placeholder rate sources (Task 13). Defaults to
+            ``CostModelConfig()`` (the module's default rates) when not
+            given.
+        market: Exchange tier used to pick the cost model's tax/slippage
+            rate. ``PaperBroker`` has no ticker-to-exchange mapping wired
+            (see ``cost_model.py``'s module docstring), so this single
+            value applies to every ticker traded through this broker
+            instance. Defaults to KOSPI.
         simulate_partial_fills: Whether to simulate partial fills.
         fill_probability: Probability of limit order fill (0.0 to 1.0).
     """
 
     initial_cash: Decimal = field(default_factory=lambda: Decimal("100000"))
-    slippage_pct: Decimal = field(default_factory=lambda: Decimal("0.001"))
-    commission_per_share: Decimal = field(default_factory=lambda: Decimal("0"))
-    min_commission: Decimal = field(default_factory=lambda: Decimal("0"))
+    cost_model_config: CostModelConfig = field(default_factory=CostModelConfig)
+    market: Exchange = Exchange.KOSPI
     simulate_partial_fills: bool = False
     fill_probability: Decimal = field(default_factory=lambda: Decimal("0.95"))
 
@@ -55,12 +65,6 @@ class PaperBrokerConfig:
         """Convert numeric fields to Decimal if needed."""
         if not isinstance(self.initial_cash, Decimal):
             self.initial_cash = Decimal(str(self.initial_cash))
-        if not isinstance(self.slippage_pct, Decimal):
-            self.slippage_pct = Decimal(str(self.slippage_pct))
-        if not isinstance(self.commission_per_share, Decimal):
-            self.commission_per_share = Decimal(str(self.commission_per_share))
-        if not isinstance(self.min_commission, Decimal):
-            self.min_commission = Decimal(str(self.min_commission))
         if not isinstance(self.fill_probability, Decimal):
             self.fill_probability = Decimal(str(self.fill_probability))
 
@@ -109,6 +113,7 @@ class PaperBroker(BrokerInterface):
         self._config = config or PaperBrokerConfig()
         self._settings = settings
         self._connected = False
+        self._cost_model = KoreanCostModel(self._config.cost_model_config)
 
         # Account state
         self._account_id = f"PAPER-{uuid.uuid4().hex[:8].upper()}"
@@ -203,14 +208,20 @@ class PaperBroker(BrokerInterface):
                 return result
             current_price = fill_result["fill_price"]
 
-        # Calculate fill price with slippage
-        fill_price = self._apply_slippage(current_price, order.side)
+        # Calculate fill price (with slippage) + commission + tax via the
+        # shared KoreanCostModel (Task 13) -- the same model the backtest
+        # engine uses, so paper trading and backtesting never drift into
+        # two hand-maintained cost numbers.
+        trade_cost = self._cost_model.cost_of_trade(
+            price=current_price,
+            quantity=order.quantity,
+            side=order.side.value,
+            market=self._config.market,
+        )
+        fill_price = trade_cost.fill_price
 
-        # Calculate commission
-        commission = self._calculate_commission(order.quantity)
-
-        # Calculate total cost
-        total_cost = fill_price * order.quantity + commission
+        # Calculate total cost (증권거래세 is sell-only, so `tax` is 0 on buys)
+        total_cost = fill_price * order.quantity + trade_cost.commission + trade_cost.tax
 
         # Check buying power for buys
         if order.side == OrderSide.BUY and total_cost > self._cash:
@@ -219,7 +230,7 @@ class PaperBroker(BrokerInterface):
             )
 
         # Execute the order
-        self._execute_fill(order, fill_price, commission)
+        self._execute_fill(order, fill_price, trade_cost.commission, trade_cost.tax)
 
         # Create result
         now = now_kst()
@@ -356,27 +367,6 @@ class PaperBroker(BrokerInterface):
                 equity += pos.market_value
         return equity
 
-    def _apply_slippage(self, price: Decimal, side: OrderSide) -> Decimal:
-        """Apply slippage to fill price.
-
-        Buys fill slightly higher, sells fill slightly lower.
-        """
-        slippage = price * self._config.slippage_pct
-
-        # Add some randomness (0 to full slippage)
-        random_factor = Decimal(str(random.random()))
-        actual_slippage = slippage * random_factor
-
-        if side == OrderSide.BUY:
-            return price + actual_slippage
-        else:
-            return price - actual_slippage
-
-    def _calculate_commission(self, quantity: Decimal) -> Decimal:
-        """Calculate commission for an order."""
-        commission = quantity * self._config.commission_per_share
-        return max(commission, self._config.min_commission)
-
     def _check_limit_fill(self, order: Order, current_price: Decimal) -> dict[str, bool | Decimal]:
         """Check if a limit order should be filled.
 
@@ -399,14 +389,25 @@ class PaperBroker(BrokerInterface):
 
         return {"can_fill": False, "fill_price": Decimal("0")}
 
-    def _execute_fill(self, order: Order, fill_price: Decimal, commission: Decimal) -> None:
-        """Execute a fill by updating positions and cash."""
+    def _execute_fill(
+        self,
+        order: Order,
+        fill_price: Decimal,
+        commission: Decimal,
+        tax: Decimal = Decimal("0"),
+    ) -> None:
+        """Execute a fill by updating positions and cash.
+
+        `tax` is 증권거래세 (sell-side only, already 0 on buys per
+        `KoreanCostModel.transaction_tax`).
+        """
         ticker = order.ticker
         quantity = order.quantity
 
         if order.side == OrderSide.BUY:
-            # Deduct cost from cash
-            cost = fill_price * quantity + commission
+            # Deduct cost from cash (tax is always 0 here, but included for
+            # symmetry with the sell branch / the cost model's contract)
+            cost = fill_price * quantity + commission + tax
             self._cash -= cost
 
             # Update or create position
@@ -441,8 +442,8 @@ class PaperBroker(BrokerInterface):
                 )
 
         else:  # SELL
-            # Add proceeds to cash (minus commission)
-            proceeds = fill_price * quantity - commission
+            # Add proceeds to cash (minus commission and 증권거래세)
+            proceeds = fill_price * quantity - commission - tax
             self._cash += proceeds
 
             # Update or create position

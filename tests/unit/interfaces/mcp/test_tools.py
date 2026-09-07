@@ -8,13 +8,15 @@ already-computed domain value verbatim, not exposing raw
 predicted_return/predicted_drawdown for an LLM/agent caller to "compute
 Sharpe/risk-reward itself" from.
 
-Also covers the Task 12 fix-review finding: `BacktestResult`/`TrainingResult`
-currently return hardcoded placeholder metrics (no backtest engine/training
-pipeline is wired up yet -- Phase 5), and a class docstring is invisible to
-an actual MCP tool caller (`mcp_tool()` only registers name/description/
-function). `is_placeholder` is the caller-visible field that must be `True`
-whenever these stub values are returned, so a caller reading only the
-response JSON (not source code) can tell the numbers are fabricated.
+Also covers the Task 12 fix-review finding: a class docstring is invisible
+to an actual MCP tool caller (`mcp_tool()` only registers name/description/
+function), so `is_placeholder` is the only caller-visible field proving
+whether numeric metrics are real or fabricated. `TrainingResult` still has
+no real training pipeline wired up (Phase 5+), so `train_model()` must
+keep returning `is_placeholder=True`. `BacktestResult` is different as of
+Task 13: `backtest()` is now wired to a real `BacktestHandler`, so it must
+return `is_placeholder=False` and relay the handler's actually-computed
+metrics verbatim, never re-derive them inline.
 """
 
 from datetime import UTC, datetime, timedelta
@@ -94,17 +96,84 @@ async def test_get_signals_risk_reward_ratio_matches_handler_computation() -> No
 
 
 @pytest.mark.asyncio
-async def test_backtest_tool_flags_placeholder_metrics_in_response_data() -> None:
-    """`backtest()` has no real backtest engine wired up yet (Phase 5) and
-    returns hardcoded stub metrics. A class docstring is invisible to an
-    MCP caller -- `is_placeholder=True` in the returned data is the only
-    caller-visible signal that sharpe_ratio/max_drawdown_pct/win_rate/etc.
-    are fabricated, not real computed output. This must hold in the actual
-    returned JSON, not just in source-code comments.
+async def test_backtest_tool_requires_tickers() -> None:
+    """As of Task 13, `backtest()` runs a real engine against real KRX
+    data -- it can no longer fabricate a response with no tickers given, so
+    it must raise rather than silently return stub numbers.
     """
-    result = await backtest(strategy="composite", initial_capital=100000)
+    with pytest.raises(ValueError, match="requires at least one ticker"):
+        await backtest(strategy="composite", tickers=None, initial_capital=100000)
 
-    assert result.is_placeholder is True
+
+@pytest.mark.asyncio
+async def test_backtest_tool_relays_real_handler_metrics_not_placeholder() -> None:
+    """As of Task 13 (Phase 5), `backtest()` is wired to a real
+    `BacktestHandler` and must relay its computed metrics verbatim, with
+    `is_placeholder=False` -- the caller-visible signal (per the Task 12
+    fix-review finding: a class docstring is invisible to an MCP caller)
+    that these are genuine handler-computed numbers, not fabricated ones.
+    A fake handler is injected via `MCPToolContext.backtest_handler` so
+    this stays a unit test (no live DB dependency) while still proving the
+    tool function relays rather than re-derives the numbers.
+    """
+    from gpt_quant_v2.application.handlers.backtest import (
+        BacktestMetrics,
+    )
+    from gpt_quant_v2.application.handlers.backtest import (
+        BacktestResult as HandlerBacktestResult,
+    )
+
+    expected_metrics = BacktestMetrics(
+        total_return=Decimal("50000"),
+        total_return_pct=Decimal("0.05"),
+        annualized_return=Decimal("0.2"),
+        sharpe_ratio=Decimal("1.35"),
+        sortino_ratio=Decimal("1.7"),
+        max_drawdown=Decimal("10000"),
+        max_drawdown_pct=Decimal("0.02"),
+        win_rate=Decimal("0.6"),
+        profit_factor=Decimal("1.8"),
+        total_trades=10,
+        winning_trades=6,
+        losing_trades=4,
+        avg_win=Decimal("5000"),
+        avg_loss=Decimal("2000"),
+        avg_trade_duration_hours=Decimal("48"),
+        best_trade=Decimal("9000"),
+        worst_trade=Decimal("-3000"),
+    )
+
+    class _FakeBacktestHandler:
+        async def handle(self, command):  # noqa: ANN001
+            return HandlerBacktestResult(
+                start_date=command.start_date,
+                end_date=command.end_date,
+                initial_capital=command.initial_capital,
+                final_capital=command.initial_capital + expected_metrics.total_return,
+                metrics=expected_metrics,
+                trades=[],
+                equity_curve=[],
+            )
+
+    ctx = MCPToolContext(backtest_handler=_FakeBacktestHandler())
+    MCPToolContext.set_instance(ctx)
+    try:
+        result = await backtest(
+            strategy="composite", tickers=["005930"], initial_capital=100000
+        )
+    finally:
+        MCPToolContext.set_instance(None)  # type: ignore[arg-type]
+
+    assert result.is_placeholder is False
+    # Every numeric field must be relayed verbatim from the handler's
+    # BacktestMetrics, not re-derived inline in the tool function.
+    assert result.sharpe_ratio == float(expected_metrics.sharpe_ratio)
+    assert result.max_drawdown_pct == float(expected_metrics.max_drawdown_pct)
+    assert result.win_rate == float(expected_metrics.win_rate)
+    assert result.total_return_pct == float(expected_metrics.total_return_pct)
+    assert result.total_trades == expected_metrics.total_trades
+    assert result.winning_trades == expected_metrics.winning_trades
+    assert result.losing_trades == expected_metrics.losing_trades
 
 
 @pytest.mark.asyncio

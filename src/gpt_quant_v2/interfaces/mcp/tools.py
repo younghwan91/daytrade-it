@@ -117,26 +117,26 @@ class BacktestResult(BaseModel):
     sharpe_ratio/max_drawdown_pct/win_rate/total_return_pct and the trade
     counts MUST come from a real backtest engine's computed results, never
     be estimated by an agent or hand-computed inline in the ``backtest()``
-    tool function -- see the computation-discipline convention above. As of
-    Task 12 (Phase 4a/4d), the ``backtest()`` tool below is a KNOWN,
-    OUT-OF-SCOPE placeholder: no backtest engine/handler is wired up yet
-    (that's Phase 5), so it currently returns hardcoded stub numbers rather
-    than real handler-computed ones. That is a "no real answer yet" gap, not
-    a "let the agent compute it" violation -- but it means these fields are
-    NOT trustworthy real metrics until Phase 5 replaces the stub with an
-    actual backtest-engine call. Do not remove this stub without wiring a
-    real engine in its place.
+    tool function -- see the computation-discipline convention above.
 
-    IMPORTANT (Task 12 fix-review finding): a class docstring is NOT visible
-    to an MCP tool caller -- ``mcp_tool()`` only registers ``name``,
-    ``description``, and the function, so an LLM/agent sees only the tool
-    description and the returned JSON, never this docstring. The
+    As of Task 13 (Phase 5), ``backtest()`` below wires a real engine:
+    ``application.handlers.backtest.BacktestHandler`` runs a genuine
+    trade simulation against Task 6's ``QuantAirflowDBClient`` (real KRX
+    daily bars) and the shared ``domain.services.cost_model.KoreanCostModel``
+    (증권거래세 + 위탁수수료 + slippage -- see that module for researched vs.
+    placeholder rate sources), and every numeric field below is relayed
+    verbatim from that handler's computed ``BacktestMetrics``.
+    ``is_placeholder`` is ``False`` for these real runs.
+
+    IMPORTANT (Task 12 fix-review finding, still true): a class docstring is
+    NOT visible to an MCP tool caller -- ``mcp_tool()`` only registers
+    ``name``, ``description``, and the function, so an LLM/agent sees only
+    the tool description and the returned JSON, never this docstring. The
     ``is_placeholder`` field below is the mechanism that actually reaches a
-    caller: while ``True``, every numeric field on this model is a
-    hardcoded stub, not a real backtest-engine result, and must not be
-    treated as trustworthy performance data. Phase 5 must set it to
-    ``False`` (or stop setting it, once a real engine always returns
-    ``False``) when it wires up a real backtest engine.
+    caller: it must be ``False`` whenever these are real handler-computed
+    metrics, and would only be ``True`` again if some future caller path
+    reintroduces a stub (which should not happen without also reverting
+    this docstring and the tool's description).
     """
 
     strategy: str
@@ -332,6 +332,7 @@ class MCPToolContext:
         broker: Any | None = None,
         model_trainer: Any | None = None,
         settings: Any | None = None,
+        backtest_handler: Any | None = None,
     ) -> None:
         """Initialize the tool context with service dependencies."""
         self.tiingo_client = tiingo_client
@@ -343,6 +344,10 @@ class MCPToolContext:
         self.broker = broker
         self.model_trainer = model_trainer
         self.settings = settings
+        #: application.handlers.backtest.BacktestHandler, lazily created by
+        #: the backtest() tool below (Task 13) if not injected here via a
+        #: DI container -- see backtest()'s docstring.
+        self.backtest_handler = backtest_handler
         self._last_signal_at: datetime | None = None
         self._last_trade_at: datetime | None = None
 
@@ -970,24 +975,43 @@ async def get_trade_history(
     return results
 
 
+def _default_backtest_handler() -> Any:
+    """Build a default BacktestHandler (Task 6 DB client + KoreanCostModel).
+
+    Lazily imported/constructed so importing this module never requires a
+    reachable quant-airflow TimescaleDB -- only calling ``backtest()``
+    without an injected ``ctx.backtest_handler`` does.
+    """
+    from gpt_quant_v2.application.handlers.backtest import BacktestHandler  # noqa: PLC0415
+    from gpt_quant_v2.infrastructure.external.quant_airflow_db_client import (  # noqa: PLC0415
+        QuantAirflowDBClient,
+    )
+
+    return BacktestHandler(market_data_client=QuantAirflowDBClient())
+
+
 @mcp_tool(
     name="backtest",
     description=(
-        "Run a backtest on a trading strategy. WARNING: no backtest engine "
-        "is wired up yet (Phase 5, not built) -- this currently returns "
-        "HARDCODED PLACEHOLDER metrics, not a real computed backtest. "
-        "Always check the response's is_placeholder field before treating "
-        "sharpe_ratio/max_drawdown_pct/win_rate/etc. as real performance "
-        "data."
+        "Run a backtest on a trading strategy against real KRX historical "
+        "daily bars (Task 6's quant-airflow TimescaleDB client) with a "
+        "real Korean transaction-cost model (증권거래세 + 위탁수수료 + "
+        "slippage). Requires at least one KRX 6-digit ticker code. Check "
+        "the response's is_placeholder field (should be False) before "
+        "treating sharpe_ratio/max_drawdown_pct/win_rate/etc. as real "
+        "performance data."
     ),
 )
 async def backtest(
     strategy: Annotated[
         str, "Strategy name (news_momentum, technical, combined)"
     ] = "news_momentum",
+    tickers: Annotated[
+        list[str] | None, "KRX 6-digit ticker codes to backtest, e.g. ['005930']"
+    ] = None,
     start_date: Annotated[str | None, "Start date (YYYY-MM-DD)"] = None,
     end_date: Annotated[str | None, "End date (YYYY-MM-DD)"] = None,
-    initial_capital: Annotated[float, "Starting capital in USD"] = 100000,
+    initial_capital: Annotated[float, "Starting capital in KRW"] = 100000,
     parameters: Annotated[dict | None, "Strategy-specific parameters"] = None,
 ) -> BacktestResult:
     """Run a backtest on a trading strategy.
@@ -995,34 +1019,68 @@ async def backtest(
     Returns performance metrics including returns, Sharpe ratio,
     drawdown, and trade statistics.
 
-    NOT YET WIRED TO A REAL BACKTEST ENGINE (Phase 5): returns
-    ``is_placeholder=True`` with hardcoded stub metrics until a real
-    engine is integrated. See ``BacktestResult`` docstring.
+    WIRED TO A REAL BACKTEST ENGINE (Task 13, Phase 5):
+    ``application.handlers.backtest.BacktestHandler`` runs a genuine
+    simulation against real KRX daily bars and a real Korean cost model --
+    see ``BacktestResult`` docstring. Returns ``is_placeholder=False``.
+
+    Raises:
+        ValueError: If `tickers` is empty/None -- a backtest needs at
+            least one real ticker to fetch data for; it is not guessed.
     """
+    if not tickers:
+        raise ValueError(
+            "backtest() requires at least one ticker (KRX 6-digit code, "
+            "e.g. '005930') -- tickers are not inferred."
+        )
+
     # Parse dates
     if start_date:
-        start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=UTC)
     else:
         start_dt = datetime.now(UTC) - timedelta(days=365)
 
-    end_dt = datetime.strptime(end_date, "%Y-%m-%d") if end_date else datetime.now(UTC)
+    end_dt = (
+        datetime.strptime(end_date, "%Y-%m-%d").replace(tzinfo=UTC)
+        if end_date
+        else datetime.now(UTC)
+    )
 
-    # This is a placeholder implementation
-    # In production, this would connect to a backtesting engine
+    ctx = _get_context()
+    if ctx.backtest_handler is None:
+        ctx.backtest_handler = _default_backtest_handler()
+
+    from gpt_quant_v2.application.handlers.backtest import BacktestCommand  # noqa: PLC0415
+
+    command = BacktestCommand(
+        tickers=tickers,
+        start_date=start_dt,
+        end_date=end_dt,
+        initial_capital=Decimal(str(initial_capital)),
+        strategy=strategy,
+        params=parameters or {},
+    )
+    result = await ctx.backtest_handler.handle(command)
+    metrics = result.metrics
+
+    # Every numeric field below is relayed verbatim from
+    # BacktestHandler._calculate_metrics()'s output (or a single-expression
+    # Decimal->float conversion of it) -- see the computation-discipline
+    # convention above. Nothing here is re-derived.
     return BacktestResult(
         strategy=strategy,
-        start_date=start_dt.strftime("%Y-%m-%d"),
-        end_date=end_dt.strftime("%Y-%m-%d"),
-        initial_capital=Decimal(str(initial_capital)),
-        final_capital=Decimal(str(initial_capital * 1.15)),  # Placeholder
-        total_return_pct=15.0,
-        sharpe_ratio=1.2,
-        max_drawdown_pct=8.5,
-        total_trades=150,
-        winning_trades=90,
-        losing_trades=60,
-        win_rate=0.6,
-        is_placeholder=True,
+        start_date=result.start_date.strftime("%Y-%m-%d"),
+        end_date=result.end_date.strftime("%Y-%m-%d"),
+        initial_capital=result.initial_capital,
+        final_capital=result.final_capital,
+        total_return_pct=float(metrics.total_return_pct),
+        sharpe_ratio=float(metrics.sharpe_ratio),
+        max_drawdown_pct=float(metrics.max_drawdown_pct),
+        total_trades=metrics.total_trades,
+        winning_trades=metrics.winning_trades,
+        losing_trades=metrics.losing_trades,
+        win_rate=float(metrics.win_rate),
+        is_placeholder=False,
     )
 
 

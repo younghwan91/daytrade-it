@@ -2,10 +2,26 @@
 Backtest Handler.
 
 Handles backtesting of trading strategies against historical data.
+
+As of Task 13 (Phase 5), this handler:
+  - Sources historical daily bars from Task 6's read-only
+    ``QuantAirflowDBClient`` (``daily_bars_adjusted``, split-adjusted KRW
+    OHLCV) instead of the previously-wired-but-dead ``PolygonClient``
+    (flagged as never actually connected in Task 8's report).
+  - Prices every simulated fill through the shared
+    ``domain.services.cost_model.KoreanCostModel`` (증권거래세 + 위탁수수료 +
+    slippage), the same model ``PaperBroker`` uses -- see
+    ``cost_model.py`` for the researched/placeholder rate sources.
+
+``QuantAirflowDBClient``'s query methods are blocking (``psycopg2``, no
+async driver) -- each per-ticker fetch is run via ``asyncio.to_thread`` so
+this handler's ``handle()`` stays a well-behaved coroutine without
+requiring an async Postgres driver just for a LAN batch/EOD query.
 """
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -13,8 +29,15 @@ from typing import TYPE_CHECKING
 
 import structlog
 
+from gpt_quant_v2.domain.entities.stock import Exchange
+from gpt_quant_v2.domain.services.cost_model import KoreanCostModel
+from gpt_quant_v2.domain.value_objects import Ticker
+
 if TYPE_CHECKING:
-    from gpt_quant_v2.infrastructure.external.polygon_client import PolygonClient
+    from gpt_quant_v2.infrastructure.external.quant_airflow_db_client import (
+        AdjustedDailyBar,
+        QuantAirflowDBClient,
+    )
 
 logger = structlog.get_logger(__name__)
 
@@ -97,14 +120,30 @@ class BacktestHandler:
 
     def __init__(
         self,
-        polygon_client: PolygonClient,
-        transaction_cost_pct: Decimal = Decimal("0.001"),  # 0.1% per trade
-        slippage_pct: Decimal = Decimal("0.0005"),  # 0.05% slippage
+        market_data_client: QuantAirflowDBClient,
+        cost_model: KoreanCostModel | None = None,
+        market: Exchange = Exchange.KOSPI,
     ) -> None:
-        """Initialize backtest handler."""
-        self._polygon = polygon_client
-        self._transaction_cost_pct = transaction_cost_pct
-        self._slippage_pct = slippage_pct
+        """Initialize backtest handler.
+
+        Args:
+            market_data_client: Task 6's read-only client over
+                quant-airflow's TimescaleDB, used for adjusted daily bars.
+            cost_model: Shared Korean transaction-cost model (증권거래세 +
+                위탁수수료 + slippage). Defaults to
+                ``KoreanCostModel()`` (its own default rates) when not
+                given -- pass the same instance/config used elsewhere
+                (e.g. a ``PaperBroker``'s cost model) to keep backtest and
+                paper-trading costs consistent.
+            market: Exchange tier for tax/slippage rate selection. This
+                handler has no per-ticker KOSPI/KOSDAQ mapping wired (see
+                ``cost_model.py``'s module docstring), so one tier applies
+                to every ticker in a given backtest run. Defaults to
+                KOSPI.
+        """
+        self._market_data = market_data_client
+        self._cost_model = cost_model or KoreanCostModel()
+        self._market = market
 
     async def handle(self, command: BacktestCommand) -> BacktestResult:
         """
@@ -125,17 +164,22 @@ class BacktestHandler:
         )
         log.info("Starting backtest")
 
-        # Fetch historical data for all tickers
-        price_data = {}
+        # Fetch historical data for all tickers from Task 6's read-only
+        # quant-airflow TimescaleDB client (split-adjusted daily bars).
+        # QuantAirflowDBClient's query methods are blocking (psycopg2), so
+        # each fetch runs off the event loop via asyncio.to_thread.
+        price_data: dict[str, list[AdjustedDailyBar]] = {}
         for ticker in command.tickers:
-            bars = await self._polygon.get_bars(
-                ticker=ticker,
-                timespan="day",
-                start_date=command.start_date,
-                end_date=command.end_date,
+            bars = await asyncio.to_thread(
+                self._market_data.get_adjusted_daily_bars,
+                Ticker(value=ticker),
+                start=command.start_date.date(),
+                end=command.end_date.date(),
             )
-            price_data[ticker] = bars
-            log.debug(f"Loaded {len(bars)} bars for {ticker}")
+            # Rows with no close price are unusable for signal/trade
+            # simulation (e.g. halted-day placeholder rows); drop them.
+            price_data[ticker] = [b for b in bars if b.close is not None]
+            log.debug(f"Loaded {len(price_data[ticker])} bars for {ticker}")
 
         # Run backtest simulation
         trades, equity_curve = await self._simulate(
@@ -176,7 +220,7 @@ class BacktestHandler:
 
     async def _simulate(
         self,
-        price_data: dict[str, list],
+        price_data: dict[str, list[AdjustedDailyBar]],
         initial_capital: Decimal,
         strategy: str,
         params: dict,
@@ -193,14 +237,18 @@ class BacktestHandler:
         capital = float(initial_capital)
         positions: dict[str, dict] = {}  # ticker -> {quantity, entry_price, entry_date}
 
-        # Get all dates from price data
-        all_dates = set()
-        for bars in price_data.values():
-            for bar in bars:
-                if isinstance(bar.get("timestamp"), str):
-                    all_dates.add(bar["timestamp"][:10])
-                elif "date" in bar:
-                    all_dates.add(str(bar["date"])[:10])
+        # Index each ticker's bars by ISO date string for O(1) same-day
+        # lookups below (AdjustedDailyBar.date is already a real date, so
+        # this replaces the old code's brittle string-slicing of
+        # ambiguous "timestamp"/"date" dict keys).
+        bars_by_ticker_date: dict[str, dict[str, AdjustedDailyBar]] = {
+            ticker: {bar.date.isoformat(): bar for bar in bars}
+            for ticker, bars in price_data.items()
+        }
+
+        all_dates: set[str] = set()
+        for bars_by_date in bars_by_ticker_date.values():
+            all_dates.update(bars_by_date.keys())
 
         sorted_dates = sorted(all_dates)
 
@@ -209,18 +257,17 @@ class BacktestHandler:
 
             # Get prices for this date
             day_prices = {}
-            for ticker, bars in price_data.items():
-                for bar in bars:
-                    bar_date = bar.get("timestamp", bar.get("date", ""))[:10]
-                    if bar_date == date_str:
-                        day_prices[ticker] = {
-                            "open": float(bar.get("open", bar.get("o", 0))),
-                            "high": float(bar.get("high", bar.get("h", 0))),
-                            "low": float(bar.get("low", bar.get("l", 0))),
-                            "close": float(bar.get("close", bar.get("c", 0))),
-                            "volume": float(bar.get("volume", bar.get("v", 0))),
-                        }
-                        break
+            for ticker, bars_by_date in bars_by_ticker_date.items():
+                bar = bars_by_date.get(date_str)
+                if bar is None:
+                    continue
+                day_prices[ticker] = {
+                    "open": float(bar.open) if bar.open is not None else float(bar.close),
+                    "high": float(bar.high) if bar.high is not None else float(bar.close),
+                    "low": float(bar.low) if bar.low is not None else float(bar.close),
+                    "close": float(bar.close),
+                    "volume": float(bar.volume) if bar.volume is not None else 0.0,
+                }
 
             if not day_prices:
                 continue
@@ -268,29 +315,50 @@ class BacktestHandler:
                 }
             )
 
-        # Close any remaining positions
+        # Close any remaining open positions at the last available price
+        # (end-of-backtest forced liquidation), applying the same cost
+        # model as a normal SELL -- an open position that was never exited
+        # by a signal shouldn't get a cost-free exit just because the
+        # backtest window ended.
         for ticker, pos in list(positions.items()):
-            if price_data.get(ticker):
-                last_bar = price_data[ticker][-1]
-                close_price = float(last_bar.get("close", last_bar.get("c", pos["entry_price"])))
-                close_date = datetime.now(UTC)
+            bars = price_data.get(ticker)
+            if not bars:
+                continue
+            last_bar = bars[-1]
+            reference_price = Decimal(str(last_bar.close))
+            quantity = Decimal(str(pos["quantity"]))
+            trade_cost = self._cost_model.cost_of_trade(
+                price=reference_price,
+                quantity=quantity,
+                side="SELL",
+                market=self._market,
+            )
+            close_price = float(trade_cost.fill_price)
+            close_date = datetime.combine(last_bar.date, datetime.min.time()).replace(tzinfo=UTC)
 
-                pnl = (close_price - pos["entry_price"]) * pos["quantity"]
-                pnl_pct = (close_price - pos["entry_price"]) / pos["entry_price"]
+            exit_cost = float(trade_cost.commission + trade_cost.tax)
+            entry_commission = float(pos.get("entry_commission", 0.0))
+            gross_pnl = (close_price - pos["entry_price"]) * pos["quantity"]
+            pnl = gross_pnl - exit_cost - entry_commission
+            pnl_pct = (
+                (close_price - pos["entry_price"]) / pos["entry_price"]
+                if pos["entry_price"]
+                else 0.0
+            )
 
-                trades.append(
-                    BacktestTrade(
-                        ticker=ticker,
-                        direction="BUY",
-                        entry_date=pos["entry_date"],
-                        entry_price=Decimal(str(pos["entry_price"])),
-                        exit_date=close_date,
-                        exit_price=Decimal(str(close_price)),
-                        quantity=Decimal(str(pos["quantity"])),
-                        pnl=Decimal(str(round(pnl, 2))),
-                        pnl_pct=Decimal(str(round(pnl_pct, 4))),
-                    )
+            trades.append(
+                BacktestTrade(
+                    ticker=ticker,
+                    direction="BUY",
+                    entry_date=pos["entry_date"],
+                    entry_price=Decimal(str(pos["entry_price"])),
+                    exit_date=close_date,
+                    exit_price=Decimal(str(round(close_price, 2))),
+                    quantity=Decimal(str(pos["quantity"])),
+                    pnl=Decimal(str(round(pnl, 2))),
+                    pnl_pct=Decimal(str(round(pnl_pct, 4))),
                 )
+            )
 
         return trades, equity_curve
 
@@ -340,22 +408,40 @@ class BacktestHandler:
         capital: float,
         positions: dict,
     ) -> BacktestTrade | None:
-        """Execute a trade in the backtest simulation."""
+        """Execute a trade in the backtest simulation.
+
+        Fill price, 위탁수수료 (commission), and 증권거래세 (sell-side tax)
+        all come from the shared ``KoreanCostModel`` -- see Task 13's
+        ``domain/services/cost_model.py`` for the researched/placeholder
+        rate sources. This is the same model ``PaperBroker`` uses, so
+        backtest and paper-trading costs are computed identically.
+        """
         action = signal["action"]
 
         if action == "BUY" and ticker not in positions:
             # Calculate position size (10% of capital)
             position_value = capital * 0.1
-            price = prices["close"] * (1 + float(self._slippage_pct))  # Slippage
-            quantity = int(position_value / price)
+            reference_price = Decimal(str(prices["close"]))
+            fill_price = self._cost_model.apply_slippage(
+                reference_price, side="BUY", market=self._market
+            )
+            if fill_price <= 0:
+                return None
+            quantity = int(Decimal(str(position_value)) / fill_price)
 
             if quantity > 0:
-                # Apply transaction cost
-                cost = position_value * float(self._transaction_cost_pct)
+                trade_cost = self._cost_model.cost_of_trade(
+                    price=reference_price,
+                    quantity=Decimal(quantity),
+                    side="BUY",
+                    market=self._market,
+                )
+                price = float(trade_cost.fill_price)
 
                 positions[ticker] = {
                     "quantity": quantity,
                     "entry_price": price,
+                    "entry_commission": float(trade_cost.commission),
                     "entry_date": date,
                 }
 
@@ -369,13 +455,22 @@ class BacktestHandler:
 
         elif action == "SELL" and ticker in positions:
             pos = positions.pop(ticker)
-            price = prices["close"] * (1 - float(self._slippage_pct))  # Slippage
+            reference_price = Decimal(str(prices["close"]))
+            quantity = Decimal(str(pos["quantity"]))
+            trade_cost = self._cost_model.cost_of_trade(
+                price=reference_price,
+                quantity=quantity,
+                side="SELL",
+                market=self._market,
+            )
+            price = float(trade_cost.fill_price)
 
-            # Calculate P&L
+            # Net P&L = gross P&L - entry commission - exit commission - 증권거래세
+            exit_cost = float(trade_cost.commission + trade_cost.tax)
+            entry_commission = float(pos.get("entry_commission", 0.0))
             gross_pnl = (price - pos["entry_price"]) * pos["quantity"]
-            cost = abs(gross_pnl) * float(self._transaction_cost_pct)
-            net_pnl = gross_pnl - cost
-            pnl_pct = (price - pos["entry_price"]) / pos["entry_price"]
+            net_pnl = gross_pnl - exit_cost - entry_commission
+            pnl_pct = (price - pos["entry_price"]) / pos["entry_price"] if pos["entry_price"] else 0.0
 
             return BacktestTrade(
                 ticker=ticker,

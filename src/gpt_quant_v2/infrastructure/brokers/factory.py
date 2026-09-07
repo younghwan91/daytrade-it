@@ -9,6 +9,7 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
+from gpt_quant_v2.domain.services.cost_model import CostModelConfig
 from gpt_quant_v2.infrastructure.brokers.base import BrokerInterface
 from gpt_quant_v2.infrastructure.brokers.kiwoom_broker import KiwoomBroker
 from gpt_quant_v2.infrastructure.brokers.paper_broker import (
@@ -80,10 +81,20 @@ def _create_paper_broker(
     Returns:
         Configured PaperBroker instance.
     """
-    # Extract paper broker settings from app settings if available
+    # Extract paper broker settings from app settings if available.
+    #
+    # slippage_pct/commission_per_share/min_commission are accepted here as
+    # legacy override kwargs for backward compatibility, but as of Task 13
+    # they no longer map onto PaperBrokerConfig fields directly -- fills are
+    # priced by the shared `KoreanCostModel` (domain/services/cost_model.py)
+    # instead, so an override here builds a `CostModelConfig` for that
+    # model rather than the two separate hand-maintained numbers this used
+    # to set. See cost_model.py for why "commission_per_share" (a per-share
+    # US-style fee) doesn't fit the Korean percentage-of-notional model --
+    # it is treated as a percentage override, not a per-share one.
     initial_cash = kwargs.pop("initial_cash", None)
     slippage_pct = kwargs.pop("slippage_pct", None)
-    commission_per_share = kwargs.pop("commission_per_share", None)
+    commission_pct = kwargs.pop("commission_per_share", None)
     min_commission = kwargs.pop("min_commission", None)
 
     # Try to get values from settings if not explicitly provided
@@ -93,19 +104,26 @@ def _create_paper_broker(
             initial_cash = broker_settings.paper_initial_cash
         if slippage_pct is None and hasattr(broker_settings, "paper_slippage_pct"):
             slippage_pct = broker_settings.paper_slippage_pct
-        if commission_per_share is None and hasattr(broker_settings, "paper_commission"):
-            commission_per_share = broker_settings.paper_commission
+        if commission_pct is None and hasattr(broker_settings, "paper_commission"):
+            commission_pct = broker_settings.paper_commission
 
     # Build config with provided or default values
-    config_kwargs = {}
+    config_kwargs: dict[str, object] = {}
     if initial_cash is not None:
         config_kwargs["initial_cash"] = Decimal(str(initial_cash))
+
+    cost_overrides: dict[str, Decimal] = {}
     if slippage_pct is not None:
-        config_kwargs["slippage_pct"] = Decimal(str(slippage_pct))
-    if commission_per_share is not None:
-        config_kwargs["commission_per_share"] = Decimal(str(commission_per_share))
+        # No ticker-level KOSPI/KOSDAQ distinction available at this call
+        # site, so an explicit override applies to both tiers uniformly.
+        cost_overrides["kospi_slippage_pct"] = Decimal(str(slippage_pct))
+        cost_overrides["kosdaq_slippage_pct"] = Decimal(str(slippage_pct))
+    if commission_pct is not None:
+        cost_overrides["commission_rate"] = Decimal(str(commission_pct))
     if min_commission is not None:
-        config_kwargs["min_commission"] = Decimal(str(min_commission))
+        cost_overrides["min_commission"] = Decimal(str(min_commission))
+    if cost_overrides:
+        config_kwargs["cost_model_config"] = CostModelConfig(**cost_overrides)
 
     paper_config = PaperBrokerConfig(**config_kwargs)
     return PaperBroker(config=paper_config, settings=settings)

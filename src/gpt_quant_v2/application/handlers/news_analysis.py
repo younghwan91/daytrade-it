@@ -15,12 +15,25 @@ from typing import TYPE_CHECKING
 
 import structlog
 
-from gpt_quant_v2.application.cqrs.bus import CommandBus
 from gpt_quant_v2.domain.entities.news import NewsArticle, SentimentAnalysis
 from gpt_quant_v2.domain.events.trading_events import NewsAnalyzedEvent
 from gpt_quant_v2.domain.value_objects import Ticker
 
 if TYPE_CHECKING:
+    # NOTE (Task 13 side-fix): `gpt_quant_v2.application.cqrs` does not
+    # exist anywhere in this repo -- this was a dead top-level import that
+    # made `application/handlers/__init__.py` (and therefore
+    # `application.handlers.backtest`, needed by Task 13's real backtest
+    # wiring) unimportable with `ModuleNotFoundError:
+    # No module named 'gpt_quant_v2.application.cqrs'`. `CommandBus` is
+    # only ever used here as a type annotation on
+    # `register_news_handlers`, so moving it under TYPE_CHECKING (this
+    # module already has `from __future__ import annotations`, so the
+    # annotation is never evaluated at runtime) fixes the import without
+    # touching any runtime behavior. No test previously exercised this
+    # import path, which is why it went unnoticed until Task 13 needed
+    # `application.handlers.backtest` to actually import.
+    from gpt_quant_v2.application.cqrs.bus import CommandBus
     from gpt_quant_v2.infrastructure.external.openai_client import OpenAIClient
     from gpt_quant_v2.infrastructure.external.tiingo_client import TiingoClient
     from gpt_quant_v2.infrastructure.messaging.redis_pubsub import RedisPubSub
