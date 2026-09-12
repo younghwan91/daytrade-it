@@ -170,6 +170,8 @@ exact field names; `.env.example` has the full list).
 
 - **`domain/services/risk_gate.py`** — sentiment/disclosure-driven entry blocks and hard-severity force-exits, independent of the ML/technical signal
 - **`domain/services/tick_size.py`** — KRX price-band tick-size rounding, applied at Kiwoom order construction and at backtest/paper-broker fills
+  (delegates the actual table to `kiwoom_client.tick_size` as of 2026-09-12 — scalp-it had the same table duplicated independently; kiwoom-client,
+  the repo that actually places the order, is now the single source)
 - **`domain/services/cost_model.py`** — KRX transaction costs (증권거래세 rate cited, but **not confirmed against a primary source** — treat with the same caution as the commission/slippage placeholders)
 - Position sizing by account risk percentage, per-ticker position limits
 - KRX trading-window enforcement (09:00–15:30 KST)
