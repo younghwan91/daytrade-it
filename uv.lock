@@ -1551,39 +1551,22 @@ wheels = [
 [[package]]
 name = "kiwoom-client"
 version = "0.3.0"
-source = { registry = "https://pypi.org/simple" }
+source = { git = "https://github.com/younghwan91/kiwoom-client.git?rev=1debc40100d96ce808e14be1ca2e702b7c9983ac#1debc40100d96ce808e14be1ca2e702b7c9983ac" }
 dependencies = [
     { name = "httpx" },
     { name = "websockets" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/25/71/ba70a9aff36b42ea63045042427fcf7a2c3f11c98a6e782334d8b3eaabdc/kiwoom_client-0.3.0.tar.gz", hash = "sha256:72077de406413520099b9a2ff2e91caf1ceec3bb7388d2f3c3fc94004b89f224", size = 272844, upload-time = "2026-09-05T08:18:19.931Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/4e/23/e40fb125d5dcf74670eb5b67f1849f0aaf51bc7d19f11c7fc35d79b423d3/kiwoom_client-0.3.0-py3-none-any.whl", hash = "sha256:8e07697ba912223b6f539d536ee507bd288409c2e445807a063f0a51dc1804e1", size = 50748, upload-time = "2026-09-05T08:18:18.745Z" },
 ]
 
 [[package]]
 name = "krx-news-client"
 version = "0.2.0"
-source = { directory = "../krx-news-client" }
+source = { git = "https://github.com/younghwan91/krx-news-client.git#aa03d4743db3036f0865b31800fd7c5aa1f0f628" }
 dependencies = [
     { name = "beautifulsoup4" },
     { name = "httpx" },
     { name = "lxml" },
     { name = "pydantic" },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "beautifulsoup4", specifier = ">=4.12.0" },
-    { name = "httpx", specifier = ">=0.27.0" },
-    { name = "lxml", specifier = ">=5.0.0" },
-    { name = "pydantic", specifier = ">=2.0.0" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.24.0" },
-    { name = "pytest-httpx", marker = "extra == 'dev'", specifier = ">=0.34.0" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6.0" },
-]
-provides-extras = ["dev"]
 
 [[package]]
 name = "krx-signal-engine"
@@ -1642,8 +1625,8 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.26.0" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.26.0" },
     { name = "hypothesis", marker = "extra == 'dev'", specifier = ">=6.98.0" },
-    { name = "kiwoom-client", specifier = ">=0.3.0" },
-    { name = "krx-news-client", directory = "../krx-news-client" },
+    { name = "kiwoom-client", git = "https://github.com/younghwan91/kiwoom-client.git?rev=1debc40100d96ce808e14be1ca2e702b7c9983ac" },
+    { name = "krx-news-client", git = "https://github.com/younghwan91/krx-news-client.git" },
     { name = "mlflow", specifier = ">=2.10.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.8.0" },
     { name = "numpy", specifier = ">=1.26.0" },

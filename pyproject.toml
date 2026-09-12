@@ -47,7 +47,7 @@ dependencies = [
     "aiohttp>=3.9.0",
     "polygon-api-client>=1.14.0",
     "krx-news-client>=0.2.0",
-    "kiwoom-client>=0.3.0",
+    "kiwoom-client>=0.3.0",  # 실제 소스는 [tool.uv.sources] 참고 (git pin, 아직 PyPI 미배포)
 
     # Utilities
     "structlog>=24.1.0",
@@ -84,12 +84,17 @@ Repository = "https://github.com/yourusername/krx_signal_engine"
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-# krx-news-client isn't on PyPI -- it's a sibling repo
-# (~/Documents/git/krx-news-client) already validated by Task 1/2's spikes.
-# Path dependency mirrors how those spikes installed it (see
-# docs/spikes/002-toss-reliability.md's "Method" section).
+# krx-news-client isn't on PyPI -- it's a sibling repo, originally pinned as
+# a local path dependency (~/Documents/git/krx-news-client per Task 1/2's
+# spikes, docs/spikes/002-toss-reliability.md). That path stopped existing
+# after the 2026-09-11 Documents/git cleanup and broke `uv sync` entirely
+# (silently, until someone ran sync). Pinned to the git repo instead so this
+# doesn't depend on a specific local directory layout again.
 [tool.uv.sources]
-krx-news-client = { path = "../krx-news-client" }
+krx-news-client = { git = "https://github.com/younghwan91/krx-news-client.git" }
+# tick_size 유틸(kiwoom_client.tick_size)이 아직 PyPI 0.3.0에 없어 커밋 pin.
+# 다음 PyPI 릴리스에 포함되면 이 override는 지우고 위 버전 하한만 올리면 된다.
+kiwoom-client = { git = "https://github.com/younghwan91/kiwoom-client.git", rev = "1debc40100d96ce808e14be1ca2e702b7c9983ac" }
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/krx_signal_engine"]
