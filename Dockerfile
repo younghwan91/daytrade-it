@@ -9,6 +9,11 @@ WORKDIR /app
 # Install uv
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
+# git: krx-quant-core is pinned as a git tag (not on PyPI yet), so uv sync
+# must clone it. Builder stage only -- the production image stays git-free.
+RUN apt-get update && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
+
 # Copy dependency files
 COPY pyproject.toml uv.lock README.md ./
 
