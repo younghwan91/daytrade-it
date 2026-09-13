@@ -70,7 +70,13 @@ class _FakeAccountModule:
         self.unfilled_orders_response: dict[str, Any] = {
             "return_code": 0,
             "oso": [
-                {"ord_no": "001", "ord_qty": "10", "cntr_qty": "3", "cntr_pric": "70000"}
+                {
+                    "ord_no": "001",
+                    "stk_cd": "005930",
+                    "ord_qty": "10",
+                    "cntr_qty": "3",
+                    "cntr_pric": "70000",
+                }
             ],
         }
 
@@ -164,10 +170,12 @@ class TestConnect:
 
 
 class TestPlaceOrderFieldNames:
-    """Covers the field-name ambiguity resolution from the module docstring:
+    """Covers the field-name/value resolution from the module docstring:
     requests must use the README's field names (trde_tp, dmst_stex_tp,
-    org_ord_no), not examples/trading.py's (ord_dv, orig_ord_no,
-    acnt_no/acnt_prdt_cd).
+    org_ord_no) with values empirically confirmed via scalp-it's 22 live
+    order fills ("KRX", "0" for limit) -- not examples/trading.py's
+    (ord_dv, orig_ord_no, acnt_no/acnt_prdt_cd), and not the earlier
+    unverified guesses ("01", "00").
     """
 
     def test_buy_limit_order_uses_readme_field_names(
@@ -186,13 +194,13 @@ class TestPlaceOrderFieldNames:
         method, kwargs = fake_api.order.calls[0]
         assert method == "buy_order"
 
-        # README-style field names must be present.
-        assert kwargs["dmst_stex_tp"] == "01"
+        # README-style field names, live-fill-verified values.
+        assert kwargs["dmst_stex_tp"] == "KRX"
         assert kwargs["stk_cd"] == "005930"
         assert kwargs["ord_qty"] == "10"
         assert kwargs["ord_uv"] == "70000"
         assert _ORDER_TYPE_FIELD == "trde_tp"
-        assert kwargs["trde_tp"] == "00"
+        assert kwargs["trde_tp"] == "0"
 
         # examples/trading.py-style field names must NOT be sent -- sending
         # both unverified conventions risks the API rejecting the request
@@ -211,6 +219,8 @@ class TestPlaceOrderFieldNames:
 
         method, kwargs = fake_api.order.calls[0]
         assert method == "sell_order"
+        # NOTE: "03" for market orders is still UNVERIFIED -- scalp-it has
+        # only ever placed limit orders. See module docstring.
         assert kwargs["trde_tp"] == "03"
         assert "ord_uv" not in kwargs  # no limit price for market orders
 
@@ -223,6 +233,19 @@ class TestPlaceOrderFieldNames:
         assert _ORIG_ORDER_NO_FIELD == "org_ord_no"
         assert kwargs["org_ord_no"] == "001"
         assert "orig_ord_no" not in kwargs
+        # Kiwoom's cancel TR also requires stk_cd + remaining ord_qty
+        # (confirmed via scalp-it's cancel() body) -- looked up from
+        # unfilled_orders since BrokerInterface.cancel_order only takes an
+        # order_id.
+        assert kwargs["stk_cd"] == "005930"
+        assert kwargs["ord_qty"] == "10"
+        assert kwargs["dmst_stex_tp"] == "KRX"
+
+    def test_cancel_order_returns_false_when_order_not_found(
+        self, broker: KiwoomBroker, fake_api: _FakeKiwoomAPI
+    ) -> None:
+        assert broker.cancel_order("does-not-exist") is False
+        assert fake_api.order.calls == []
 
 
 class TestPlaceOrderMapping:

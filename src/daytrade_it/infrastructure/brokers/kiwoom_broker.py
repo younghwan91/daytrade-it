@@ -40,31 +40,29 @@ pass-throughs (see `Order.buy_order` etc. in kiwoom-client's
 `domestic/order.py`). The library's own integration-smoke-test parameter
 table (`tests/integration_api_smoke.py`) does not cover the order TR codes
 (`kt10000`-`kt10003`) either, so there is no third source to break the tie.
-The ambiguity is therefore **unresolved by source** -- exactly as Task 3
-found.
 
-DECISION (this task, option (b) from the brief): build requests using the
-**README's field names** (`dmst_stex_tp`, `stk_cd`, `ord_qty`, `trde_tp`,
-`ord_uv`, `org_ord_no`), because the README is the actively-edited surface
-(3 recent commits touching this exact section, vs. the example file only
-touched by an unrelated rename) and is what a fresh integrator/maintainer
-would trust today. Account identity (`acnt_no`/`acnt_prdt_cd`) is *not* sent
-per-order, matching the README's usage.
+RESOLVED (2026-09-13): the field *names* were right, but two field *values*
+were wrong guesses. The sibling repo `scalp-it` places real live limit
+orders through this exact TR family (`kt10000`/`kt10001`/`kt10003`) on a
+production Kiwoom account since 2026-08-28 -- `scalp-it`'s
+`data/pair_orders.log` has 22 live submissions, all `return_code == 0` with
+an assigned `ord_no`. Its request bodies (`adapters/kiwoom_order.py`)
+confirm:
 
-    TODO(verify-before-live-capital): this field-name choice is NOT verified
-    against a live/mock Kiwoom call or official Kiwoom TR documentation --
-    no credentials exist in this environment (see
-    docs/spikes/003-kiwoom-mock-trading.md). Before `KiwoomBroker` is used
-    against any live or mock-mode account with real capital, run an actual
-    `buy_order`/`cancel_order` call against `is_mock=True` and confirm the
-    request is accepted (`return_code == 0`) with these field names. If it
-    is rejected, `_ORDER_TYPE_FIELD`/`_ORIG_ORDER_NO_FIELD` below are the
-    two constants to flip to the `examples/trading.py` names.
+- `dmst_stex_tp`: the literal string `"KRX"`, not `"01"` -- this module's
+  own `get_positions` (line ~220, `filled_position(dmst_stex_tp="KRX")`)
+  already used the correct value; only the order-request path had the wrong
+  one.
+- `trde_tp` (order-type) for a limit order: `"0"`, not `"00"`.
+- `org_ord_no`, `stk_cd`, `ord_qty`, `ord_uv` field names all match exactly.
 
-The two "order type"/"original order number" field names are isolated into
-module-level constants below specifically so that a future fix (if the
-README turns out wrong) is a one-line change plus a test update, not a
-larger refactor.
+`_ORDER_TYPE_MARKET` ("03") remains **unverified** -- `scalp-it` places
+limit orders only and has never sent a market order through this endpoint.
+Confirm it against a live/mock call before relying on it.
+
+The order type / exchange code constants stay isolated at module level
+below so a future correction (if `_ORDER_TYPE_MARKET` turns out wrong too)
+is a one-line change plus a test update, not a larger refactor.
 """
 
 from __future__ import annotations
@@ -95,16 +93,16 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-#: KRX exchange code for `dmst_stex_tp` -- "01" means KRX per the README's
-#: own inline comment (거래소 구분, 01: KRX).
-_KRX_EXCHANGE_CODE = "01"
+#: KRX exchange code for `dmst_stex_tp`. Verified 2026-09-13 against
+#: scalp-it's 22 live order fills (see module docstring) -- the literal
+#: string "KRX", not "01".
+_KRX_EXCHANGE_CODE = "KRX"
 
-#: 지정가 (limit) / 시장가 (market) order-type codes, per the README's
-#: `trde_tp="00"` example ("00: 지정가"). "03" for market orders is the
-#: commonly documented Kiwoom TR convention; like the field name itself,
-#: this specific code value is NOT verified against a live call -- see the
-#: module docstring's TODO.
-_ORDER_TYPE_LIMIT = "00"
+#: 지정가 (limit) order-type code. Verified 2026-09-13 against scalp-it's
+#: live fills -- "0", not "00". 시장가 (market) order code "03" remains
+#: UNVERIFIED -- scalp-it has only ever placed limit orders. See the module
+#: docstring.
+_ORDER_TYPE_LIMIT = "0"
 _ORDER_TYPE_MARKET = "03"
 
 #: See module docstring: "order type" field name is ambiguous between
@@ -249,10 +247,37 @@ class KiwoomBroker(BrokerInterface):
         return self._map_order_result(order, raw)
 
     def cancel_order(self, order_id: str) -> bool:
+        """Cancel an open order.
+
+        Kiwoom's cancel TR (`kt10003`) requires `stk_cd` and the remaining
+        `ord_qty` alongside `org_ord_no` -- confirmed by scalp-it's
+        `adapters/kiwoom_order.py.cancel()`, which sends all four fields.
+        `BrokerInterface.cancel_order` only takes `order_id`, so those two
+        extra fields are looked up here via `unfilled_orders` (the same TR
+        `get_order_status` already uses) rather than widening the interface.
+        """
         self._ensure_connected()
+        try:
+            unfilled = self._api.account.unfilled_orders(
+                all_stk_tp="0", trde_tp="0", stex_tp="0"
+            )
+        except Exception as exc:
+            logger.error("kiwoom_broker: cancel_order(%s) lookup failed: %s", order_id, exc)
+            return False
+
+        row = next(
+            (r for r in self._extract_rows(unfilled) if str(r.get("ord_no", "")) == str(order_id)),
+            None,
+        )
+        if row is None:
+            logger.error("kiwoom_broker: cancel_order(%s): order not found in unfilled_orders", order_id)
+            return False
+
         kwargs = {
             _ORIG_ORDER_NO_FIELD: order_id,
             "dmst_stex_tp": _KRX_EXCHANGE_CODE,
+            "stk_cd": str(row.get("stk_cd", "")),
+            "ord_qty": str(row.get("ord_qty", "")),
         }
         try:
             raw = self._api.order.cancel_order(**kwargs)
