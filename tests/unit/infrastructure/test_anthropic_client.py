@@ -179,3 +179,4 @@ def test_production_prompt_is_the_evaluated_prompt() -> None:
 
     assert anthropic_client._SYSTEM == module.SYSTEM_V2
     assert anthropic_client._USER_TEMPLATE == module.USER_V2
+    assert anthropic_client._USER_TEMPLATE_FULL_BODY == module.USER_V4

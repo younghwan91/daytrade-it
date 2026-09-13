@@ -18,11 +18,25 @@ cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)" || exit 1
 export $(grep -E '^KIWOOM_APP_(KEY|SECRET)=' ../quant-airflow/.env | xargs)
 export $(grep -E '^ANTHROPIC_API_KEY=' ../quant-airflow/.env | xargs)
 export GPTQ_DATABASE_URL=$(grep '^GPTQ_DATABASE_URL=' .env | cut -d= -f2-)
-export GPTQ_QUANT_AIRFLOW_DB_HOST=192.168.45.9
-export GPTQ_QUANT_AIRFLOW_DB_PORT=5433
-export GPTQ_QUANT_AIRFLOW_DB_DBNAME=kr_quant
-export GPTQ_QUANT_AIRFLOW_DB_USER=kr_quant
-export GPTQ_QUANT_AIRFLOW_DB_PASSWORD=$(grep -E '^KR_QUANT_DB=' ../kr-quant/.env | sed -E 's#.*://[^:]+:([^@]+)@.*#\1#')
+# KR_QUANT_DB (postgresql://user:pass@host:port/db) lives in quant-airflow/.env
+# since 2026-09-13, when kr-quant (now swing-it) was removed from this host --
+# the old ../kr-quant/.env path left the daemon with no DB password. All five
+# fields come from that one DSN so a future move only changes one line.
+KR_QUANT_DB=$(grep -E '^KR_QUANT_DB=' ../quant-airflow/.env | head -1 | cut -d= -f2- | tr -d "\"'")
+if [ -z "$KR_QUANT_DB" ]; then
+  echo "=== [$(date '+%F %T')] KR_QUANT_DB 가 ../quant-airflow/.env 에 없다 -- 데몬 시작 안 함" >&2
+  exit 1
+fi
+_dsn=${KR_QUANT_DB#*://}
+export GPTQ_QUANT_AIRFLOW_DB_USER=${_dsn%%:*}
+_rest=${_dsn#*:}
+export GPTQ_QUANT_AIRFLOW_DB_PASSWORD=${_rest%@*}
+_hostpart=${_rest##*@}
+export GPTQ_QUANT_AIRFLOW_DB_HOST=${_hostpart%%:*}
+_portdb=${_hostpart#*:}
+export GPTQ_QUANT_AIRFLOW_DB_PORT=${_portdb%%/*}
+export GPTQ_QUANT_AIRFLOW_DB_DBNAME=${_portdb#*/}
+unset _dsn _rest _hostpart _portdb
 export GPTQ_KIWOOM_IS_MOCK=false
 
 END=$(date -d "15:20" +%s)

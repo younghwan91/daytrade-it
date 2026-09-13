@@ -242,6 +242,14 @@ scale_vs_size: {name} 규모 대비 사안의 크기. unknown / small / medium /
 {{"subject":"main","reports_price_move":false,"material_type":"수주","persistence":"multi_quarter","specificity":3,"freshness":"new","surprise":1,"sentiment_direction":1,"sentiment_strength":2,"scale_vs_size":"medium"}}"""
 
 
+#: Shadow variant v4: identical questions, full article body instead of the
+#: dashboard summary. Scored and recorded alongside v2 but never used for
+#: signals -- on the 2026-09-13 eval the dev and test splits disagreed on
+#: whether full text helps (docs/research/2026-09-13-news-prompt-eval.md), so
+#: it is being compared on forward data first.
+_USER_TEMPLATE_FULL_BODY = _USER_TEMPLATE.replace("본문(요약): {body}", "본문: {body}")
+
+
 def build_prompt(
     *,
     code: str,
@@ -251,8 +259,10 @@ def build_prompt(
     title: str,
     body: str,
     category: str | None,
+    full_body: bool = False,
 ) -> tuple[str, str]:
-    user = _USER_TEMPLATE.format(
+    template = _USER_TEMPLATE_FULL_BODY if full_body else _USER_TEMPLATE
+    user = template.format(
         code=code.strip(),
         name=name.strip(),
         market=market or "-",
@@ -325,6 +335,7 @@ class AnthropicClient:
         title: str,
         body: str,
         category: str | None,
+        full_body: bool = False,
     ) -> ArticleFeatures:
         """Score one (article, company) pair, retrying on schema violations."""
         system, user = build_prompt(
@@ -335,6 +346,7 @@ class AnthropicClient:
             title=title,
             body=body,
             category=category,
+            full_body=full_body,
         )
         last_error: SchemaError | None = None
         for attempt in range(_MAX_RETRIES + 1):

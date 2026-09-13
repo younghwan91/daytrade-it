@@ -25,6 +25,7 @@ import asyncio
 import json
 import os
 import random
+import re
 import statistics as st
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -115,7 +116,36 @@ reason: 한 문장
 출력 형식 예시:
 {{"subject":"main","reports_price_move":false,"expected_reaction":1,"conviction":2,"reason":"..."}}"""
 
-PROMPTS = {"v1": (SYSTEM_V1, USER_V1), "v2": (SYSTEM_V2, USER_V2), "v3": (SYSTEM_V3, USER_V3)}
+#: v4 = v2's exact questions and fields; only the article text changes from
+#: the ~300-char dashboard summary to the full body from Toss's detail API
+#: (scripts/eval/fetch_toss_details.py), so the comparison isolates length.
+USER_V4 = USER_V2.replace("본문(요약): {body}", "본문: {body}")
+
+PROMPTS = {
+    "v1": (SYSTEM_V1, USER_V1),
+    "v2": (SYSTEM_V2, USER_V2),
+    "v3": (SYSTEM_V3, USER_V3),
+    "v4": (SYSTEM_V2, USER_V4),
+}
+
+TOSS_DETAIL_DIR = Path("data/eval/toss_detail")
+FULL_BODY_MAX_CHARS = 3000
+
+
+def full_body(article_id: str) -> str | None:
+    """Full article text from the cached Toss detail JSON, tags stripped."""
+    path = TOSS_DETAIL_DIR / f"{article_id.replace(':', '_')}.json"
+    if not path.exists():
+        return None
+    detail = json.loads(path.read_text())
+    parts = [
+        block.get("content") or ""
+        for block in detail.get("content", [])
+        if block.get("type") in ("summary", "sub_headline", "text")
+    ]
+    text = re.sub(r"<[^>]+>", "", "\n".join(p.strip() for p in parts if p.strip()))
+    return text[:FULL_BODY_MAX_CHARS] or None
+
 
 PERSIST = {"one_off": 0.0, "multi_quarter": 1.0, "structural": 2.0}
 SCALE = {"unknown": 0.0, "small": 1.0, "medium": 2.0, "large": 3.0}
@@ -202,6 +232,18 @@ RULES: dict[str, list[tuple[str, Callable[[dict], float], float]]] = {
             0.1,
         ),
     ],
+    "v4": [
+        (
+            "v4/-mention (full body)",
+            lambda j: v2_score(j, drop_mention=True, drop_price_move=False, use_surprise=False),
+            0.15,
+        ),
+        (
+            "v4/-mention-pricemove",
+            lambda j: v2_score(j, drop_mention=True, drop_price_move=True, use_surprise=False),
+            0.15,
+        ),
+    ],
     "v3": [
         ("v3/raw", lambda j: v3_score(j, drop_mention=False, drop_price_move=False), 0.3),
         (
@@ -238,13 +280,16 @@ async def judge_all(rows: list[dict], variant: str, model: str) -> list[Scored]:
             key = key_of(r)
             if key in cache:
                 return
+            body = r["summary"] or ""
+            if variant == "v4":
+                body = full_body(r["article_id"]) or body
             user = user_tpl.format(
                 code=r["ticker"],
                 name=r["name"],
                 market=r["market"],
                 sector=r["sector"] or "-",
                 title=r["title"],
-                body=r["summary"] or "",
+                body=body,
                 category=r["category"] or "",
                 material_types=MATERIAL_TYPES,
             )

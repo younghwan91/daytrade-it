@@ -184,3 +184,30 @@ class TestTossNewsClientFailures:
         await client.close()
 
         assert scraper.closed is True
+
+
+def test_news_id_from_article_url() -> None:
+    from daytrade_it.infrastructure.external.toss_news_client import news_id_from_article_url
+
+    url = (
+        "https://tossinvest.com/news?contentType=news&contentParams="
+        "%7B%22id%22%3A%22yna_AKR20260913056700017%22%7D"
+    )
+    assert news_id_from_article_url(url) == "yna_AKR20260913056700017"
+    assert news_id_from_article_url("https://tossinvest.com/news") is None
+
+
+def test_extract_full_body_keeps_text_blocks_and_strips_tags() -> None:
+    from daytrade_it.infrastructure.external.toss_news_client import extract_full_body
+
+    detail = {
+        "content": [
+            {"type": "summary", "content": "요약 문장"},
+            {"type": "image", "content": "https://img/x.jpg", "caption": "사진"},
+            {"type": "sub_headline", "content": " 소제목 "},
+            {"type": "text", "content": "본문 <b>강조</b> 끝"},
+            {"type": "text", "content": ""},
+        ]
+    }
+    assert extract_full_body(detail) == "요약 문장\n소제목\n본문 강조 끝"
+    assert extract_full_body(detail, max_chars=4) == "요약 문장"[:4]

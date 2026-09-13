@@ -13,21 +13,23 @@ Articles published before the previous session's close are skipped (the
 eval only labeled first-session reactions), and nothing is polled before
 09:00:30 KST (the eval entered pre-market news at the opening price).
 
-This process places NO orders itself -- it only writes signal rows.
-Executing a signal is a separate, explicit `execute_trade` call (through
-the MCP server, by whoever/whatever is driving it), which carries its own
-hard safety rails (1-share cap, LIMIT-only, price band, kill switch,
-duplicate-entry guard).
+With `--execute`, persisted signals go to `AutoTrader` (1 share, flat by
+the close); orders are real only with `--confirm-real` as well.
+
+Every judged pair (not only signals) is appended to
+`data/news_judgments/YYYY-MM-DD.jsonl`, together with a shadow judgment
+from prompt v4 (full article body, fetched from Toss's detail endpoint and
+archived under `data/toss_detail/`). v4 never affects signals; it is there
+for a forward comparison with v2.
 
 Usage:
-    uv run python scripts/news_signal_poller.py                # run until 15:20 KST
-    uv run python scripts/news_signal_poller.py --once          # single poll, then exit
-    uv run python scripts/news_signal_poller.py --stop-at 23:59 # override stop time (testing)
+    uv run python scripts/news_signal_poller.py                          # signals only
+    uv run python scripts/news_signal_poller.py --execute                # + dry-run trading
+    uv run python scripts/news_signal_poller.py --execute --confirm-real # + REAL orders
+    uv run python scripts/news_signal_poller.py --once                   # single poll
 
-Honors the same kill switch `execute_trade` does (`data/live_STOP`): if
-present at startup or between polls, the poller logs and exits rather than
-generating further signals -- a human stopped live trading, this process
-should not keep feeding it new signals either.
+Kill switch `data/live_STOP`: stops new signals and entries; exits keep
+being managed until the close.
 """
 
 from __future__ import annotations
@@ -35,12 +37,15 @@ from __future__ import annotations
 import argparse
 import asyncio
 import datetime as dt
+import json
 import os
 import sys
+from dataclasses import asdict
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
+import httpx
 from kiwoom_client import KiwoomAPI
 from sqlalchemy import select
 
@@ -51,12 +56,20 @@ from daytrade_it.domain.services.signal_generator import SignalConfig, SignalGen
 from daytrade_it.domain.value_objects import Ticker
 from daytrade_it.infrastructure.brokers.base import KST, BrokerInterface
 from daytrade_it.infrastructure.brokers.kiwoom_broker import KiwoomBroker
-from daytrade_it.infrastructure.external.anthropic_client import PROMPT_VERSION, AnthropicClient
+from daytrade_it.infrastructure.external.anthropic_client import (
+    PROMPT_VERSION,
+    AnthropicClient,
+    ArticleFeatures,
+)
 from daytrade_it.infrastructure.external.quant_airflow_db_client import (
     QuantAirflowDBClient,
     StockInfo,
 )
-from daytrade_it.infrastructure.external.toss_news_client import TossNewsClient
+from daytrade_it.infrastructure.external.toss_news_client import (
+    TossNewsClient,
+    extract_full_body,
+    fetch_article_detail,
+)
 from daytrade_it.infrastructure.persistence.database import DatabaseManager
 from daytrade_it.infrastructure.persistence.models import TradingSignalModel
 from daytrade_it.infrastructure.persistence.unit_of_work import UnitOfWork
@@ -70,10 +83,40 @@ SESSION_CLOSE = dt.time(15, 20)  # signals expire here; day trades are flat by t
 FIRST_POLL = dt.time(9, 0, 30)
 MANAGE_TICK_SECONDS = 30
 LEDGER_DIR = Path("data/auto_trader")
+JUDGMENT_DIR = Path("data/news_judgments")
+DETAIL_ARCHIVE_DIR = Path("data/toss_detail")
+DETAIL_HTTP_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124 Safari/537.36"
+}
 
 
 def kill_switch_active() -> bool:
     return KILL_SWITCH_PATH.exists()
+
+
+class JudgmentLog:
+    """Every (article, ticker) judgment, one JSONL per day.
+
+    Kept for all pairs -- not just the ones that became signals -- so a
+    later forward evaluation of v2 vs shadow v4 isn't biased toward what the
+    live rule selected. Also dedups re-judging after a restart.
+    """
+
+    def __init__(self, directory: Path, day: dt.date) -> None:
+        self._path = directory / f"{day.isoformat()}.jsonl"
+        self._keys: set[str] = set()
+        if self._path.exists():
+            for line in self._path.open():
+                self._keys.add(json.loads(line)["key"])
+
+    def seen(self, key: str) -> bool:
+        return key in self._keys
+
+    def append(self, key: str, record: dict) -> None:
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        with self._path.open("a") as f:
+            f.write(json.dumps({"key": key, **record}, ensure_ascii=False, default=str) + "\n")
+        self._keys.add(key)
 
 
 def session_close_kst(day: dt.date) -> dt.datetime:
@@ -91,12 +134,18 @@ async def process_pair(
     db: DatabaseManager,
     expires_at: dt.datetime,
     trader: AutoTrader | None,
+    judgments: JudgmentLog,
+    full_body_text: str | None,
 ) -> None:
     """Judge one (article, company) pair; persist a BUY signal if one emerges.
 
     Every failure is caught and logged, never raised -- one bad pair must
     not stop the loop or the other pairs in the batch.
     """
+    pair_key = f"{article.id}|{ticker.value}"
+    if judgments.seen(pair_key):
+        return
+
     # Dedup across restarts (TossNewsClient's seen-id cache is in-memory).
     try:
         async with UnitOfWork(db) as uow:
@@ -137,6 +186,40 @@ async def process_pair(
         score=round(sentiment.score, 3),
         label=sentiment.label.value,
         title=article.title[:80],
+    )
+
+    # Shadow v4 (full body): recorded for a forward comparison, never used
+    # for signals. See anthropic_client._USER_TEMPLATE_FULL_BODY.
+    shadow: ArticleFeatures | None = None
+    if full_body_text:
+        try:
+            shadow = await claude.score_article(
+                code=ticker.value,
+                name=stock.name,
+                market=stock.market,
+                sector=stock.sector,
+                title=article.title,
+                body=full_body_text,
+                category=article.category,
+                full_body=True,
+            )
+        except Exception:
+            logger.exception("news_signal_poller: shadow v4 scoring failed", ticker=ticker.value)
+
+    judgments.append(
+        pair_key,
+        {
+            "article_id": str(article.id),
+            "ticker": ticker.value,
+            "name": stock.name,
+            "title": article.title,
+            "category": article.category,
+            "published_at": article.published_at.isoformat(),
+            "judged_at": dt.datetime.now(KST).isoformat(),
+            "full_body_chars": len(full_body_text or ""),
+            "v2": {**asdict(features), "score": features.score()},
+            "v4_shadow": {**asdict(shadow), "score": shadow.score()} if shadow else None,
+        },
     )
     # Entries are BUY-only: KRX retail can't short, and no SELL-side rule
     # was evaluated (dev had n=6 bearish main-subject pairs).
@@ -216,11 +299,28 @@ async def process_article(
         return
     if dt.datetime.now(KST) >= expires_at:
         return
-    for ticker in article.tickers:
-        stock = stocks.get(ticker.value)
-        if stock is None:
-            continue
-        await process_pair(article, ticker, stock, expires_at=expires_at, **deps)  # type: ignore[arg-type]
+    known = [(t, stocks[t.value]) for t in article.tickers if t.value in stocks]
+    if not known:
+        return
+
+    full_body_text: str | None = None
+    http = deps.pop("http")
+    detail = await fetch_article_detail(http, str(article.url))  # type: ignore[arg-type]
+    if detail is not None:
+        day_dir = DETAIL_ARCHIVE_DIR / dt.datetime.now(KST).date().isoformat()
+        day_dir.mkdir(parents=True, exist_ok=True)
+        (day_dir / f"{article.id}.json").write_text(json.dumps(detail, ensure_ascii=False))
+        full_body_text = extract_full_body(detail) or None
+
+    for ticker, stock in known:
+        await process_pair(
+            article,
+            ticker,
+            stock,
+            expires_at=expires_at,
+            full_body_text=full_body_text,
+            **deps,  # type: ignore[arg-type]
+        )
 
 
 async def run(*, once: bool, stop_at: dt.time, execute: bool, confirm_real: bool) -> None:
@@ -274,7 +374,12 @@ async def run(*, once: bool, stop_at: dt.time, execute: bool, confirm_real: bool
         )
 
     try:
-        async with AnthropicClient() as claude, TossNewsClient() as news_client:
+        judgments = JudgmentLog(JUDGMENT_DIR, today)
+        async with (
+            AnthropicClient() as claude,
+            TossNewsClient() as news_client,
+            httpx.AsyncClient(headers=DETAIL_HTTP_HEADERS, timeout=15) as http,
+        ):
             next_news_poll = dt.datetime.now(KST)
             kill_logged = False
             while True:
@@ -322,6 +427,8 @@ async def run(*, once: bool, stop_at: dt.time, execute: bool, confirm_real: bool
                             gen=gen,
                             db=db,
                             trader=trader,
+                            judgments=judgments,
+                            http=http,
                         )
 
                 if once:

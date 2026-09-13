@@ -144,6 +144,44 @@ else
     warn "자격증명 없어 5)를 건너뜀"
 fi
 
+# ─────────────────────────────────────────── 6. 데몬이 읽는 DB·키 (데몬과 같은 출처)
+sec "6) 데몬 전제 -- DB·Anthropic 키 (news_signal_daemon.sh 와 같은 출처)"
+# 2026-09-13: kr-quant 가 이 호스트에서 사라지며 데몬이 옛 ../kr-quant/.env 를 읽어
+# DB 비밀번호 없이 뜨는 상태였다. 이 점검은 그 경로를 안 봐서 못 잡았다.
+if grep -qE '^ANTHROPIC_API_KEY=.+' ../quant-airflow/.env 2>/dev/null; then
+    ok "ANTHROPIC_API_KEY 있음(../quant-airflow/.env)"
+else
+    bad "ANTHROPIC_API_KEY 가 ../quant-airflow/.env 에 없다 -- 뉴스 판정 불가"
+fi
+DB_CHECK=$(
+    KR_QUANT_DB=$(grep -E '^KR_QUANT_DB=' ../quant-airflow/.env 2>/dev/null | head -1 | cut -d= -f2- | tr -d "\"'") \
+    GPTQ_DATABASE_URL=$(grep '^GPTQ_DATABASE_URL=' .env 2>/dev/null | cut -d= -f2-) \
+    uv run python - <<'PY' 2>&1
+import os
+import psycopg2
+kr = os.environ.get("KR_QUANT_DB")
+app = os.environ.get("GPTQ_DATABASE_URL", "").replace("postgresql+asyncpg://", "postgresql://")
+if not kr:
+    raise SystemExit("KR_QUANT_DB 가 ../quant-airflow/.env 에 없다")
+if not app:
+    raise SystemExit("GPTQ_DATABASE_URL 이 .env 에 없다")
+with psycopg2.connect(kr, connect_timeout=5) as c, c.cursor() as cur:
+    cur.execute("SELECT max(date) FROM daily_bars_adjusted WHERE code = '005930'")
+    last_bar = cur.fetchone()[0]
+with psycopg2.connect(app, connect_timeout=5) as c, c.cursor() as cur:
+    cur.execute("SELECT pg_is_in_recovery(), count(*) FROM trading_signals")
+    standby, _ = cur.fetchone()
+if standby:
+    raise SystemExit("gptquant DB 가 스탠바이다 -- 신호 저장 불가")
+print(f"OK kr_quant 최근 일봉 {last_bar} · gptquant 쓰기 가능")
+PY
+)
+if echo "$DB_CHECK" | grep -q "^OK"; then
+    ok "${DB_CHECK#OK }"
+else
+    bad "DB 점검 실패: $(echo "$DB_CHECK" | tail -1)"
+fi
+
 echo
 echo "──────────────────────────────────────────"
 if [ "$FAIL" -eq 0 ]; then

@@ -31,6 +31,7 @@ import asyncio
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid5
 
+import httpx
 from krx_news_client import NewsArticle as KrxNewsArticle
 from krx_news_client import TossScraper
 
@@ -198,3 +199,56 @@ class TossNewsClient:
             iteration += 1
             if max_iterations is None or iteration < max_iterations:
                 await asyncio.sleep(self.poll_interval)
+
+
+# --- Article detail (full body) ---------------------------------------------
+
+#: Toss's article-modal endpoint. Unlike the dashboard feed (~300-char
+#: summaries), it returns the full body as typed blocks plus the
+#: publisher's original URL, Toss's own sentiment label, and all related
+#: stock codes -- the same shape for every publisher. Found 2026-09-13; `v1`
+#: returns the same article unnested, `v2` nests it under a language key.
+TOSS_NEWS_DETAIL_URL = "https://wts-info-api.tossinvest.com/api/v2/news/{news_id}"
+
+_BODY_BLOCK_TYPES = ("summary", "sub_headline", "text")
+
+
+def news_id_from_article_url(url: str) -> str | None:
+    """Toss newsId (e.g. "yna_AKR20260913056700017") from an article URL."""
+    import json  # noqa: PLC0415
+    import urllib.parse  # noqa: PLC0415
+
+    try:
+        params = urllib.parse.parse_qs(urllib.parse.urlparse(str(url)).query)
+        return str(json.loads(params["contentParams"][0])["id"])
+    except (KeyError, IndexError, ValueError, TypeError):
+        return None
+
+
+async def fetch_article_detail(client: httpx.AsyncClient, url: str) -> dict | None:
+    """Full Toss article detail for an article URL, or None if unavailable."""
+    news_id = news_id_from_article_url(url)
+    if news_id is None:
+        return None
+    try:
+        resp = await client.get(TOSS_NEWS_DETAIL_URL.format(news_id=news_id))
+    except httpx.HTTPError as exc:
+        logger.warning("Toss news detail request failed", news_id=news_id, error=str(exc))
+        return None
+    if not resp.is_success:
+        return None
+    detail = ((resp.json() or {}).get("result") or {}).get("kr")
+    return {"news_id": news_id, **detail} if detail else None
+
+
+def extract_full_body(detail: dict, max_chars: int = 3000) -> str:
+    """Article text from a detail payload: body blocks only, HTML tags stripped."""
+    import re  # noqa: PLC0415
+
+    parts = [
+        (block.get("content") or "").strip()
+        for block in detail.get("content") or []
+        if block.get("type") in _BODY_BLOCK_TYPES
+    ]
+    text = re.sub(r"<[^>]+>", "", "\n".join(p for p in parts if p))
+    return text[:max_chars]
