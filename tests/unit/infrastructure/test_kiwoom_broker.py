@@ -69,19 +69,24 @@ class _FakeAccountModule:
             "entr": "1,000,000",
             "100stk_ord_alow_amt": "950,000",
         }
-        self.filled_position_response: dict[str, Any] = {
+        # kt00018 shape as returned live (rows key and "A"-prefixed stk_cd).
+        self.balance_response: dict[str, Any] = {
             "return_code": 0,
-            "stk_acnt_evlt_prst": [
-                {"stk_cd": "005930", "rmnd_qty": "10", "avg_prc": "+70000", "cur_prc": "+71000"}
+            "tot_evlt_amt": "710000",
+            "acnt_evlt_remn_indv_tot": [
+                {"stk_cd": "A005930", "rmnd_qty": "10", "pur_pric": "70000", "cur_prc": "+71000"},
+                {"stk_cd": "A000660", "rmnd_qty": "0", "pur_pric": "1", "cur_prc": "1"},
             ],
         }
+        self.balance_kwargs: dict[str, Any] = {}
         self.unfilled_orders_response: dict[str, Any] = {
             "return_code": 0,
             "oso": [
                 {
-                    "ord_no": "001",
-                    "stk_cd": "005930",
+                    "ord_no": "0000001",
+                    "stk_cd": "A005930",
                     "ord_qty": "10",
+                    "oso_qty": "7",
                     "cntr_qty": "3",
                     "cntr_pric": "70000",
                 }
@@ -91,8 +96,9 @@ class _FakeAccountModule:
     def deposit_detail(self, **kwargs: Any) -> dict[str, Any]:
         return self.deposit_response
 
-    def filled_position(self, **kwargs: Any) -> dict[str, Any]:
-        return self.filled_position_response
+    def evaluation_balance_detail(self, **kwargs: Any) -> dict[str, Any]:
+        self.balance_kwargs = kwargs
+        return self.balance_response
 
     def unfilled_orders(self, **kwargs: Any) -> dict[str, Any]:
         return self.unfilled_orders_response
@@ -248,7 +254,7 @@ class TestPlaceOrderFieldNames:
         # unfilled_orders since BrokerInterface.cancel_order only takes an
         # order_id.
         assert kwargs["stk_cd"] == "005930"
-        assert kwargs["ord_qty"] == "10"
+        assert kwargs["ord_qty"] == "7"  # the still-open quantity (oso_qty), not ord_qty
         assert kwargs["dmst_stex_tp"] == "KRX"
 
     def test_cancel_order_returns_false_when_order_not_found(
@@ -330,14 +336,34 @@ class TestAccountMapping:
 
 
 class TestPositionMapping:
-    def test_get_positions_maps_filled_position(self, broker: KiwoomBroker) -> None:
+    def test_get_positions_uses_kt00018_and_normalizes_codes(
+        self, broker: KiwoomBroker, fake_api: _FakeKiwoomAPI
+    ) -> None:
         positions = broker.get_positions()
-        assert len(positions) == 1
+        assert fake_api.account.balance_kwargs == {"qry_tp": "1", "dmst_stex_tp": "KRX"}
+        assert len(positions) == 1  # zero-quantity row dropped
         pos = positions[0]
-        assert pos.ticker == "005930"
+        assert pos.ticker == "005930"  # "A005930" -> "005930"
         assert pos.quantity == Decimal("10")
         assert pos.average_price == Decimal("70000")
         assert pos.current_price == Decimal("71000")
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("A041830", "041830"),
+        ("005930", "005930"),
+        ("41830", "041830"),
+        ("0155E0", "0155E0"),  # letters inside real KRX codes must survive
+        (" a005930 ", "005930"),
+        (None, ""),
+    ],
+)
+def test_normalize_code(raw: object, expected: str) -> None:
+    from daytrade_it.infrastructure.brokers.kiwoom_broker import normalize_code
+
+    assert normalize_code(raw) == expected
 
 
 class TestOrderStatusMapping:
@@ -346,6 +372,22 @@ class TestOrderStatusMapping:
         assert status.status == OrderStatusEnum.PARTIAL
         assert status.filled_quantity == Decimal("3")
         assert status.remaining_quantity == Decimal("7")
+
+    def test_order_numbers_match_regardless_of_zero_padding(self, broker: KiwoomBroker) -> None:
+        assert broker.get_order_status("0000001").remaining_quantity == Decimal("7")
+        assert broker.get_order_status("1").remaining_quantity == Decimal("7")
+
+    def test_listed_unfilled_order_is_never_reported_as_done(
+        self, broker: KiwoomBroker, fake_api: _FakeKiwoomAPI
+    ) -> None:
+        """A row in the unfilled list with unrecognized quantity fields used
+        to map to remaining=0, so callers skipped cancelling a live order."""
+        fake_api.account.unfilled_orders_response = {
+            "return_code": 0,
+            "oso": [{"ord_no": "0000002", "stk_cd": "A005930"}],
+        }
+        status = broker.get_order_status("0000002")
+        assert status.remaining_quantity > 0
 
     def test_get_order_status_not_found_raises(self, broker: KiwoomBroker) -> None:
         with pytest.raises(BrokerError):

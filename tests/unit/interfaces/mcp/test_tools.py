@@ -509,3 +509,66 @@ async def test_get_news_not_wired_to_real_source() -> None:
 async def test_get_price_history_not_wired_to_real_source() -> None:
     with pytest.raises(NotImplementedError, match="KRX price source"):
         await get_price_history(ticker="005930")
+
+
+@pytest.mark.asyncio
+async def test_execute_trade_accepts_real_kiwoom_order_numbers() -> None:
+    """Kiwoom order numbers look like "0012345". Building the result used
+    to call UUID(order_id) and raise *after* the order was accepted."""
+    account = BrokerAccount(
+        account_id="acct-1",
+        cash=Decimal("10000000"),
+        buying_power=Decimal("10000000"),
+        equity=Decimal("10000000"),
+    )
+    broker = _FakeBroker(account=account)
+    original = broker.place_order
+
+    def place_with_kiwoom_id(order):  # noqa: ANN001, ANN202
+        result = original(order)
+        result.order_id = "0012345"
+        return result
+
+    broker.place_order = place_with_kiwoom_id  # type: ignore[method-assign]
+    MCPToolContext.set_instance(
+        MCPToolContext(
+            signal_repository=_make_signal_repository(), broker=broker, risk_manager=RiskManager()
+        )
+    )
+    try:
+        result = await execute_trade(
+            signal_id=str(UUID(int=0)), order_type="LIMIT", limit_price=70000.0
+        )
+    finally:
+        MCPToolContext.set_instance(None)  # type: ignore[arg-type]
+
+    assert result.broker_order_id == "0012345"
+
+
+@pytest.mark.asyncio
+async def test_close_position_sells_with_limit_for_kiwoom_positions() -> None:
+    """KiwoomBroker positions carry side="". close_position used to send
+    a BUY for them (and a MARKET order); it must SELL with a LIMIT."""
+    from daytrade_it.infrastructure.brokers.base import OrderSide, OrderType, Position
+    from daytrade_it.interfaces.mcp.tools import close_position
+
+    account = BrokerAccount(
+        account_id="acct-1",
+        cash=Decimal("10000000"),
+        buying_power=Decimal("10000000"),
+        equity=Decimal("10000000"),
+    )
+    broker = _FakeBroker(account=account)
+    broker.get_positions = lambda: [  # type: ignore[method-assign]
+        Position(ticker="005930", quantity=Decimal(2), average_price=Decimal("70000"))
+    ]
+    MCPToolContext.set_instance(MCPToolContext(broker=broker))
+    try:
+        await close_position(ticker="005930", limit_price=70000.0, quantity=1)
+    finally:
+        MCPToolContext.set_instance(None)  # type: ignore[arg-type]
+
+    order = broker.place_order_calls[0]
+    assert order.side == OrderSide.SELL
+    assert order.order_type == OrderType.LIMIT
+    assert order.quantity == Decimal(1)

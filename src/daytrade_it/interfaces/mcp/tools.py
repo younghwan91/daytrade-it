@@ -15,7 +15,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, TypeVar
-from uuid import UUID
+from uuid import UUID, uuid5
 
 from pydantic import BaseModel, Field
 
@@ -103,6 +103,9 @@ class TradeResult(BaseModel):
     """
 
     trade_id: UUID
+    #: Broker's own order number (Kiwoom `ord_no`, e.g. "0012345"). Not a
+    #: UUID -- `trade_id` is derived from it deterministically.
+    broker_order_id: str | None = None
     signal_id: UUID | None = None
     ticker: str
     direction: str
@@ -464,6 +467,19 @@ class MCPToolContext:
     def uptime_seconds(self) -> int:
         """Get uptime in seconds since context creation."""
         return int(time.time() - self._start_time)
+
+
+_BROKER_ORDER_NAMESPACE = UUID("5b0d2f5e-3c1a-4e8a-9f3e-6a2b7c1d9e40")
+
+
+def _trade_id_from_order_id(order_id: str) -> UUID:
+    """Deterministic UUID for a broker order number.
+
+    `UUID(order_id)` raised for real Kiwoom order numbers ("0012345") --
+    *after* the order had already been accepted, so a caller saw a failure
+    for a live order and could retry into a duplicate.
+    """
+    return uuid5(_BROKER_ORDER_NAMESPACE, order_id)
 
 
 def _get_context() -> MCPToolContext:
@@ -1002,7 +1018,8 @@ async def execute_trade(
     ctx.update_last_trade_time()
 
     return TradeResult(
-        trade_id=UUID(result.order_id) if result.order_id else sig_uuid,
+        trade_id=_trade_id_from_order_id(result.order_id) if result.order_id else sig_uuid,
+        broker_order_id=result.order_id or None,
         signal_id=sig_uuid,
         ticker=signal.ticker.value,
         direction=signal.direction.value,
@@ -1022,11 +1039,17 @@ async def execute_trade(
 )
 async def close_position(
     ticker: Annotated[str, "KRX 6-digit stock code (e.g., '005930')"],
+    limit_price: Annotated[float, "Limit price (required -- MARKET orders are disabled)"],
     quantity: Annotated[int | None, "Shares (주) to close (None = close all)"] = None,
 ) -> TradeResult:
-    """Close an open position.
+    """Close (sell) a held long position with a LIMIT order.
 
-    If quantity is not specified, closes the entire position.
+    If quantity is not specified, sells the entire holding -- including
+    shares the automated trader did not buy. Automated exits use
+    `AutoTrader.flatten()`, which sells only its own ledger quantity.
+
+    LIMIT-only for the same reason as `execute_trade`: Kiwoom's MARKET
+    order-type code has never been verified.
 
     Deliberately NOT routed through ``RiskManager.validate_trade()``
     (whole-branch review finding #4, considered and rejected for this
@@ -1054,19 +1077,24 @@ async def close_position(
     if not position:
         raise ValueError(f"No open position for {ticker}")
 
-    # Determine quantity to close
-    close_qty = quantity if quantity else abs(int(position.quantity))
+    held = int(position.quantity)
+    if held <= 0:
+        raise ValueError(f"No long position to close for {ticker} (quantity={held})")
+    close_qty = min(quantity, held) if quantity else held
 
-    # Determine order side (opposite of position side)
     from daytrade_it.infrastructure.brokers.base import Order, OrderSide, OrderType
 
-    side = OrderSide.SELL if position.side == "long" else OrderSide.BUY
+    # Always SELL: KRX retail positions are long-only. The previous
+    # `SELL if position.side == "long" else BUY` sent a BUY for every
+    # KiwoomBroker position, since that adapter never sets `side`.
+    side = OrderSide.SELL
 
     order = Order(
         ticker=ticker,
         quantity=Decimal(str(close_qty)),
         side=side,
-        order_type=OrderType.MARKET,
+        order_type=OrderType.LIMIT,
+        limit_price=Decimal(str(limit_price)),
     )
 
     result = ctx.broker.place_order(order)
@@ -1074,9 +1102,10 @@ async def close_position(
     ctx.update_last_trade_time()
 
     return TradeResult(
-        trade_id=UUID(result.order_id)
+        trade_id=_trade_id_from_order_id(result.order_id)
         if result.order_id
         else UUID("00000000-0000-0000-0000-000000000000"),
+        broker_order_id=result.order_id or None,
         signal_id=None,
         ticker=ticker,
         direction=side.value.upper(),

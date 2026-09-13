@@ -122,6 +122,31 @@ _ORIG_ORDER_NO_FIELD = "org_ord_no"
 #: only for the rare case a caller passes us a raw dict directly (tests).
 _SUCCESS_RETURN_CODE = 0
 
+#: Rows keys, as read on the live account by scalp-it
+#: (`adapters/kiwoom_order.py`: BALANCE_ROWS_KEY / UNFILLED_ROWS_KEY) and
+#: confirmed present in real 2026-09-13 responses.
+_BALANCE_ROWS_KEY = "acnt_evlt_remn_indv_tot"  # kt00018
+_UNFILLED_ROWS_KEY = "oso"  # ka10075
+
+
+def normalize_code(code: Any) -> str:
+    """6-character KRX code from a Kiwoom `stk_cd`.
+
+    Ported from scalp-it's `normalize_code`: kt00018 returns "A041830"
+    (drop the one-letter prefix), but real KRX codes can contain letters
+    mid-code ("0155E0"), so letters must not be stripped wholesale.
+    """
+    text = "".join(
+        ch for ch in str(code if code is not None else "").strip().upper() if ch.isalnum()
+    )
+    if not text:
+        return ""
+    if len(text) == 7 and text[0].isalpha():
+        text = text[1:]
+    if len(text) > 6:
+        text = text[-6:]
+    return text.zfill(6) if text.isdigit() else text
+
 
 def _to_decimal(value: Any, default: str = "0") -> Decimal:
     """Best-effort conversion of a raw Kiwoom response field to Decimal.
@@ -217,13 +242,20 @@ class KiwoomBroker(BrokerInterface):
         return self._map_account(deposit)
 
     def get_positions(self) -> list[Position]:
+        """Holdings via `kt00018` (계좌평가잔고내역).
+
+        Same TR, parameters, rows key and fields scalp-it reads holdings with
+        on the live account (`adapters/kiwoom_order.py::holdings`). This used
+        `kt00005` (체결잔고), which was never verified and whose rows live
+        under a different key.
+        """
         self._ensure_connected()
         try:
-            raw = self._api.account.filled_position(dmst_stex_tp="KRX")
+            raw = self._api.account.evaluation_balance_detail(qry_tp="1", dmst_stex_tp="KRX")
         except Exception as exc:
             raise BrokerError(f"Kiwoom get_positions failed: {exc}", broker_name="kiwoom") from exc
-        rows = self._extract_rows(raw)
-        return [self._map_position(row) for row in rows]
+        positions = [self._map_position(row) for row in raw.get(_BALANCE_ROWS_KEY) or []]
+        return [p for p in positions if p.ticker and p.quantity > 0]
 
     # -- BrokerInterface: orders ----------------------------------------------
 
@@ -265,10 +297,7 @@ class KiwoomBroker(BrokerInterface):
             logger.error("kiwoom_broker: cancel_order(%s) lookup failed: %s", order_id, exc)
             return False
 
-        row = next(
-            (r for r in self._extract_rows(unfilled) if str(r.get("ord_no", "")) == str(order_id)),
-            None,
-        )
+        row = self._find_unfilled(unfilled, order_id)
         if row is None:
             logger.error(
                 "kiwoom_broker: cancel_order(%s): order not found in unfilled_orders", order_id
@@ -278,8 +307,8 @@ class KiwoomBroker(BrokerInterface):
         kwargs = {
             _ORIG_ORDER_NO_FIELD: order_id,
             "dmst_stex_tp": _KRX_EXCHANGE_CODE,
-            "stk_cd": str(row.get("stk_cd", "")),
-            "ord_qty": str(row.get("ord_qty", "")),
+            "stk_cd": normalize_code(row.get("stk_cd")),
+            "ord_qty": str(int(self._map_order_status(order_id, row).remaining_quantity)),
         }
         try:
             raw = self._api.order.cancel_order(**kwargs)
@@ -298,11 +327,19 @@ class KiwoomBroker(BrokerInterface):
                 f"Kiwoom get_order_status failed: {exc}", broker_name="kiwoom"
             ) from exc
 
-        for row in self._extract_rows(raw):
-            if str(row.get("ord_no", "")) == str(order_id):
-                return self._map_order_status(order_id, row)
+        row = self._find_unfilled(raw, order_id)
+        if row is not None:
+            return self._map_order_status(order_id, row)
 
         raise BrokerError(f"Order not found: {order_id}", broker_name="kiwoom")
+
+    @staticmethod
+    def _find_unfilled(raw: dict[str, Any], order_id: str) -> dict[str, Any] | None:
+        want = str(order_id).strip().lstrip("0")
+        for row in raw.get(_UNFILLED_ROWS_KEY) or []:
+            if str(row.get("ord_no", "")).strip().lstrip("0") == want:
+                return row
+        return None
 
     def get_quote(self, ticker: str) -> Quote:
         self._ensure_connected()
@@ -383,12 +420,17 @@ class KiwoomBroker(BrokerInterface):
         )
 
     def _map_position(self, row: dict[str, Any]) -> Position:
-        """Map one row of a `filled_position` (kt00005) response to `Position`."""
-        quantity = _to_decimal(row.get("rmnd_qty", row.get("qty")))
-        avg_price = _to_decimal(row.get("avg_prc", row.get("pur_pric")))
+        """Map one `kt00018` holdings row to `Position`.
+
+        `stk_cd` comes back prefixed ("A005930"); left as-is, no holding
+        ever matched a 6-digit ticker, so duplicate-entry checks and exits
+        silently saw nothing.
+        """
+        quantity = _to_decimal(row.get("rmnd_qty"))
+        avg_price = _to_decimal(row.get("pur_pric", row.get("avg_prc")))
         current_price = _to_decimal(row.get("cur_prc")) if row.get("cur_prc") else None
         return Position(
-            ticker=str(row.get("stk_cd", "")),
+            ticker=normalize_code(row.get("stk_cd")),
             quantity=quantity,
             average_price=avg_price,
             current_price=current_price,
@@ -430,12 +472,22 @@ class KiwoomBroker(BrokerInterface):
         callers of `get_order_status` -- see `place_order`'s TODO in the
         module docstring about the unverified response schema generally.
         """
-        filled_qty = _to_decimal(row.get("cntr_qty", row.get("exec_qty")))
         total_qty = _to_decimal(row.get("ord_qty"))
-        remaining = total_qty - filled_qty
+        remaining_raw = row.get("oso_qty") or row.get("ord_remnq")
+        if remaining_raw not in (None, ""):
+            # 미체결수량 -- the field scalp-it reads on the live account.
+            remaining = _to_decimal(remaining_raw)
+            filled_qty = max(total_qty - remaining, Decimal("0"))
+        else:
+            filled_qty = _to_decimal(row.get("cntr_qty", row.get("exec_qty")))
+            remaining = total_qty - filled_qty
+        if remaining <= 0:
+            # The row is in the unfilled list, so something is still open.
+            # Reporting 0 here made callers treat a live order as done and
+            # skip cancelling it.
+            remaining = total_qty if total_qty > 0 else Decimal("1")
+            filled_qty = Decimal("0")
         status = OrderStatusEnum.PARTIAL if filled_qty > 0 else OrderStatusEnum.SUBMITTED
-        if remaining <= 0 and total_qty > 0:
-            status = OrderStatusEnum.FILLED
         return OrderStatus(
             order_id=order_id,
             status=status,
@@ -470,19 +522,6 @@ class KiwoomBroker(BrokerInterface):
             volume=volume,
             timestamp=now_kst(),
         )
-
-    @staticmethod
-    def _extract_rows(raw: dict[str, Any]) -> list[dict[str, Any]]:
-        """Kiwoom list-shaped responses nest rows under a TR-specific key
-        (e.g. `stk_acnt_evlt_prst` for filled_position). Since the exact key
-        varies per TR and isn't documented for any of the TRs this adapter
-        calls, this scans the response for the first list-of-dicts value
-        rather than hardcoding a key that might be wrong for a given TR.
-        """
-        for value in raw.values():
-            if isinstance(value, list) and (not value or isinstance(value[0], dict)):
-                return value
-        return []
 
     def _ensure_connected(self) -> None:
         if not self._connected:

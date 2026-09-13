@@ -45,6 +45,7 @@ from kiwoom_client import KiwoomAPI
 from sqlalchemy import select
 
 from daytrade_it.application.signals.entry_filter import generate_no_chase_confirmation
+from daytrade_it.application.trading.auto_trader import AutoTrader
 from daytrade_it.domain.entities.news import NewsArticle
 from daytrade_it.domain.services.signal_generator import SignalConfig, SignalGenerator
 from daytrade_it.domain.value_objects import Ticker
@@ -67,6 +68,8 @@ KILL_SWITCH_PATH = Path("data/live_STOP")
 DEFAULT_STOP_TIME = dt.time(15, 20)  # KST -- mirrors scalp-it's daemon stop time
 SESSION_CLOSE = dt.time(15, 20)  # signals expire here; day trades are flat by the close
 FIRST_POLL = dt.time(9, 0, 30)
+MANAGE_TICK_SECONDS = 30
+LEDGER_DIR = Path("data/auto_trader")
 
 
 def kill_switch_active() -> bool:
@@ -87,6 +90,7 @@ async def process_pair(
     gen: SignalGenerator,
     db: DatabaseManager,
     expires_at: dt.datetime,
+    trader: AutoTrader | None,
 ) -> None:
     """Judge one (article, company) pair; persist a BUY signal if one emerges.
 
@@ -191,6 +195,12 @@ async def process_pair(
         article_title=article.title,
     )
 
+    if trader is not None:
+        try:
+            await trader.enter(saved)
+        except Exception:
+            logger.exception("news_signal_poller: trader.enter failed", ticker=ticker.value)
+
 
 async def process_article(
     article: NewsArticle,
@@ -213,7 +223,7 @@ async def process_article(
         await process_pair(article, ticker, stock, expires_at=expires_at, **deps)  # type: ignore[arg-type]
 
 
-async def run(*, once: bool, stop_at: dt.time) -> None:
+async def run(*, once: bool, stop_at: dt.time, execute: bool, confirm_real: bool) -> None:
     db = DatabaseManager(database_url=os.environ["GPTQ_DATABASE_URL"])
     api = KiwoomAPI(
         app_key=os.environ["KIWOOM_APP_KEY"],
@@ -254,42 +264,69 @@ async def run(*, once: bool, stop_at: dt.time) -> None:
             logger.info("news_signal_poller: waiting for market open", seconds=int(wait))
             await asyncio.sleep(wait)
 
+    trader: AutoTrader | None = None
+    if execute:
+        trader = AutoTrader(broker, LEDGER_DIR, live=confirm_real)
+        logger.warning(
+            "news_signal_poller: auto-trading enabled",
+            live=confirm_real,
+            mode="LIVE ORDERS" if confirm_real else "dry run (no --confirm-real)",
+        )
+
     try:
         async with AnthropicClient() as claude, TossNewsClient() as news_client:
+            next_news_poll = dt.datetime.now(KST)
+            kill_logged = False
             while True:
-                if kill_switch_active():
-                    logger.warning("news_signal_poller: kill switch active, stopping")
-                    break
-                if not once and dt.datetime.now(KST).time() >= stop_at:
+                now = dt.datetime.now(KST)
+                if not once and now.time() >= stop_at:
                     logger.info(
                         "news_signal_poller: stop time reached, exiting", stop_at=str(stop_at)
                     )
                     break
 
-                try:
-                    new_articles = await news_client.poll_once()
-                except Exception:
-                    logger.exception(
-                        "news_signal_poller: poll_once failed, will retry next interval"
-                    )
-                    new_articles = []
+                # Exits keep running even with the kill switch on: stopping
+                # here would leave the day's positions held overnight.
+                if trader is not None:
+                    try:
+                        trader.manage()
+                    except Exception:
+                        logger.exception("news_signal_poller: trader.manage failed")
 
-                for article in new_articles:
-                    await process_article(
-                        article,
-                        stocks,
-                        stale_before,
-                        expires_at,
-                        claude=claude,
-                        broker=broker,
-                        db_client=db_client,
-                        gen=gen,
-                        db=db,
-                    )
+                if kill_switch_active():
+                    if not kill_logged:
+                        logger.warning(
+                            "news_signal_poller: kill switch active -- no new signals or "
+                            "entries; exits still managed"
+                        )
+                        kill_logged = True
+                elif now >= next_news_poll:
+                    next_news_poll = now + dt.timedelta(seconds=news_client.poll_interval)
+                    try:
+                        new_articles = await news_client.poll_once()
+                    except Exception:
+                        logger.exception(
+                            "news_signal_poller: poll_once failed, will retry next interval"
+                        )
+                        new_articles = []
+
+                    for article in new_articles:
+                        await process_article(
+                            article,
+                            stocks,
+                            stale_before,
+                            expires_at,
+                            claude=claude,
+                            broker=broker,
+                            db_client=db_client,
+                            gen=gen,
+                            db=db,
+                            trader=trader,
+                        )
 
                 if once:
                     break
-                await asyncio.sleep(news_client.poll_interval)
+                await asyncio.sleep(MANAGE_TICK_SECONDS)
     finally:
         broker.disconnect()
         await db.engine.dispose()
@@ -309,8 +346,27 @@ def main() -> None:
         default=DEFAULT_STOP_TIME,
         help="Stop polling at this local time, HH:MM (default 15:20)",
     )
+    parser.add_argument(
+        "--execute",
+        action="store_true",
+        help="Hand persisted BUY signals to AutoTrader (dry run unless --confirm-real)",
+    )
+    parser.add_argument(
+        "--confirm-real",
+        action="store_true",
+        help="With --execute: send REAL orders to the live account",
+    )
     args = parser.parse_args()
-    asyncio.run(run(once=args.once, stop_at=args.stop_at))
+    if args.confirm_real and not args.execute:
+        parser.error("--confirm-real requires --execute")
+    asyncio.run(
+        run(
+            once=args.once,
+            stop_at=args.stop_at,
+            execute=args.execute,
+            confirm_real=args.confirm_real,
+        )
+    )
 
 
 if __name__ == "__main__":
