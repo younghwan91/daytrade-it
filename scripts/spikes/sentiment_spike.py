@@ -5,7 +5,7 @@ Scores a hand-labeled sample of Toss news articles two ways:
 
 1. LLM approach -- a Korean system prompt against OpenAI, reusing the
    structured-output (tool-calling) pattern from
-   ``src/krx_signal_engine/infrastructure/external/openai_client.py``, but as a
+   ``src/daytrade_it/infrastructure/external/openai_client.py``, but as a
    standalone client (no production code imported) so this script has zero
    coupling to the app's config/DI. Needs ``OPENAI_API_KEY`` in the
    environment; if it's missing this approach is skipped and reported as a

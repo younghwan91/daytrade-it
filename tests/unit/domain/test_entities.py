@@ -8,7 +8,7 @@ from uuid import uuid4
 
 import pytest
 
-from krx_signal_engine.domain.entities import (
+from daytrade_it.domain.entities import (
     Exchange,
     NewsArticle,
     Position,
@@ -16,7 +16,7 @@ from krx_signal_engine.domain.entities import (
     Trade,
     TradingSignal,
 )
-from krx_signal_engine.domain.value_objects import Confidence, Ticker
+from daytrade_it.domain.value_objects import Confidence, Ticker
 
 
 class TestExchange:

@@ -6,8 +6,8 @@ from decimal import Decimal
 
 import pytest
 
-from krx_signal_engine.domain.entities.stock import Exchange
-from krx_signal_engine.domain.services.cost_model import (
+from daytrade_it.domain.entities.stock import Exchange
+from daytrade_it.domain.services.cost_model import (
     DEFAULT_COMMISSION_RATE,
     DEFAULT_KOSDAQ_SLIPPAGE_PCT,
     DEFAULT_KOSDAQ_TAX_RATE,
@@ -16,7 +16,7 @@ from krx_signal_engine.domain.services.cost_model import (
     CostModelConfig,
     KoreanCostModel,
 )
-from krx_signal_engine.domain.services.tick_size import round_to_tick
+from daytrade_it.domain.services.tick_size import round_to_tick
 
 
 class TestTransactionTax:

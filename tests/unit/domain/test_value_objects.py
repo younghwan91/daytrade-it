@@ -6,7 +6,7 @@ from decimal import Decimal
 
 import pytest
 
-from krx_signal_engine.domain.value_objects import (
+from daytrade_it.domain.value_objects import (
     Confidence,
     Percentage,
     Price,

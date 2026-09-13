@@ -77,13 +77,13 @@ jobs:
       #   uses: azure/setup-kubectl@v3
       # - name: Deploy to Kubernetes
       #   run: |
-      #     kubectl set image deployment/krx-signal-engine \
-      #       krx-signal-engine=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+      #     kubectl set image deployment/daytrade-it \
+      #       daytrade-it=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
 
       # Option 2: Deploy to Docker Swarm
       # - name: Deploy to Docker Swarm
       #   run: |
-      #     docker service update --image ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }} krx-signal-engine
+      #     docker service update --image ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }} daytrade-it
 
       # Option 3: Deploy via SSH
       # - name: Deploy via SSH

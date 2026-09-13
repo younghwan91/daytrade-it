@@ -12,14 +12,14 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import HttpUrl
 
-from krx_signal_engine.domain.entities import (
+from daytrade_it.domain.entities import (
     NewsArticle,
     SignalDirection,
     SignalSource,
     TradingSignal,
 )
-from krx_signal_engine.domain.services.signal_generator import SignalConfig, SignalGenerator
-from krx_signal_engine.domain.value_objects import Confidence, Sentiment, Ticker
+from daytrade_it.domain.services.signal_generator import SignalConfig, SignalGenerator
+from daytrade_it.domain.value_objects import Confidence, Sentiment, Ticker
 
 TICKER = Ticker(value="005930")
 

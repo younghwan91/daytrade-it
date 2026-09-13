@@ -21,10 +21,10 @@ from decimal import Decimal
 import psycopg2
 import pytest
 
-from krx_signal_engine.application.handlers.backtest import BacktestCommand, BacktestHandler
-from krx_signal_engine.domain.services.cost_model import KoreanCostModel
-from krx_signal_engine.infrastructure.external.quant_airflow_db_client import QuantAirflowDBClient
-from krx_signal_engine.shared.config.settings import QuantAirflowDBSettings
+from daytrade_it.application.handlers.backtest import BacktestCommand, BacktestHandler
+from daytrade_it.domain.services.cost_model import KoreanCostModel
+from daytrade_it.infrastructure.external.quant_airflow_db_client import QuantAirflowDBClient
+from daytrade_it.shared.config.settings import QuantAirflowDBSettings
 
 # Real, well-known large-cap KRX code (Samsung Electronics), same ticker
 # Task 6's integration test uses.
@@ -167,7 +167,7 @@ class TestRealBacktestRun:
         return is_placeholder=False for a real run against real data,
         with metrics relayed verbatim from the handler.
         """
-        from krx_signal_engine.interfaces.mcp.tools import MCPToolContext, backtest
+        from daytrade_it.interfaces.mcp.tools import MCPToolContext, backtest
 
         ctx = MCPToolContext(
             backtest_handler=BacktestHandler(

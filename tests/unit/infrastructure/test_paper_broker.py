@@ -2,8 +2,8 @@
 
 from decimal import Decimal
 
-from krx_signal_engine.infrastructure.brokers.base import KST, Order, OrderSide, OrderStatusEnum
-from krx_signal_engine.infrastructure.brokers.paper_broker import PaperBroker, PaperBrokerConfig
+from daytrade_it.infrastructure.brokers.base import KST, Order, OrderSide, OrderStatusEnum
+from daytrade_it.infrastructure.brokers.paper_broker import PaperBroker, PaperBrokerConfig
 
 
 def _connected_broker() -> PaperBroker:

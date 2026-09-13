@@ -1,5 +1,5 @@
 [project]
-name = "krx-signal-engine"
+name = "daytrade-it"
 version = "0.1.0"
 description = "AI-Agent-Friendly News-Driven Algorithmic Trading System"
 readme = "README.md"
@@ -73,12 +73,12 @@ dev = [
 ]
 
 [project.scripts]
-gptq = "krx_signal_engine.interfaces.cli.main:app"
+gptq = "daytrade_it.interfaces.cli.main:app"
 
 [project.urls]
-Homepage = "https://github.com/yourusername/krx_signal_engine"
-Documentation = "https://github.com/yourusername/krx_signal_engine#readme"
-Repository = "https://github.com/yourusername/krx_signal_engine"
+Homepage = "https://github.com/younghwan91/daytrade-it"
+Documentation = "https://github.com/younghwan91/daytrade-it#readme"
+Repository = "https://github.com/younghwan91/daytrade-it"
 
 [build-system]
 requires = ["hatchling"]
@@ -97,7 +97,7 @@ krx-news-client = { git = "https://github.com/younghwan91/krx-news-client.git" }
 kiwoom-client = { git = "https://github.com/younghwan91/kiwoom-client.git", rev = "1debc40100d96ce808e14be1ca2e702b7c9983ac" }
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/krx_signal_engine"]
+packages = ["src/daytrade_it"]
 
 # 타입 검사가 켜진 적이 없던 레포다. domain·shared 는 strict 로 통과하고,
 # 아래 세 계층은 미완성 코드가 152건의 오류를 낸다(없는 이름 import, 존재하지
@@ -105,9 +105,9 @@ packages = ["src/krx_signal_engine"]
 # 대로 한 줄씩 지우면 된다.
 [[tool.mypy.overrides]]
 module = [
-    "krx_signal_engine.application.*",
-    "krx_signal_engine.infrastructure.*",
-    "krx_signal_engine.interfaces.*",
+    "daytrade_it.application.*",
+    "daytrade_it.infrastructure.*",
+    "daytrade_it.interfaces.*",
 ]
 ignore_errors = true
 
@@ -136,12 +136,12 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 # FastAPI·MCP 의 인자는 프레임워크가 주입한다(Depends/Query/Body). 함수 본문에서
 # 직접 안 쓰여도 시그니처에 있어야 하므로 ARG 는 이 계층에서 오탐이다.
-"src/krx_signal_engine/interfaces/**" = ["ARG001", "ARG002"]
-"src/krx_signal_engine/application/handlers/**" = ["ARG001", "ARG002"]
+"src/daytrade_it/interfaces/**" = ["ARG001", "ARG002"]
+"src/daytrade_it/application/handlers/**" = ["ARG001", "ARG002"]
 "tests/**" = ["ARG001", "ARG002"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["krx_signal_engine"]
+known-first-party = ["daytrade_it"]
 
 [tool.mypy]
 python_version = "3.12"
@@ -153,10 +153,10 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
-addopts = "-v --cov=src/krx_signal_engine --cov-report=term-missing"
+addopts = "-v --cov=src/daytrade_it --cov-report=term-missing"
 
 [tool.coverage.run]
-source = ["src/krx_signal_engine"]
+source = ["src/daytrade_it"]
 branch = true
 
 [tool.coverage.report]

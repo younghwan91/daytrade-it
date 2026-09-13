@@ -17,8 +17,8 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from krx_signal_engine.interfaces.api.main import create_app
-from krx_signal_engine.shared.config.settings import Settings
+from daytrade_it.interfaces.api.main import create_app
+from daytrade_it.shared.config.settings import Settings
 
 
 @pytest.fixture

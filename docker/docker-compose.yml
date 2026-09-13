@@ -3,7 +3,7 @@ version: "3.8"
 services:
   timescaledb:
     image: timescale/timescaledb:latest-pg15-alpine
-    container_name: krx_signal_engine_timescaledb
+    container_name: daytrade_it_timescaledb
     restart: unless-stopped
     ports:
       - "${POSTGRES_PORT:-5432}:5432"
@@ -24,11 +24,11 @@ services:
       retries: 5
       start_period: 30s
     networks:
-      - krx_signal_engine_network
+      - daytrade_it_network
 
   redis:
     image: redis:7-alpine
-    container_name: krx_signal_engine_redis
+    container_name: daytrade_it_redis
     restart: unless-stopped
     ports:
       - "${REDIS_PORT:-6379}:6379"
@@ -46,15 +46,15 @@ services:
       retries: 5
       start_period: 10s
     networks:
-      - krx_signal_engine_network
+      - daytrade_it_network
 
 volumes:
   timescaledb_data:
-    name: krx_signal_engine_timescaledb_data
+    name: daytrade_it_timescaledb_data
   redis_data:
-    name: krx_signal_engine_redis_data
+    name: daytrade_it_redis_data
 
 networks:
-  krx_signal_engine_network:
-    name: krx_signal_engine_network
+  daytrade_it_network:
+    name: daytrade_it_network
     driver: bridge

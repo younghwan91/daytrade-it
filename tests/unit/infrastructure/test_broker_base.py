@@ -5,7 +5,7 @@ from decimal import Decimal
 
 import pytest
 
-from krx_signal_engine.infrastructure.brokers.base import (
+from daytrade_it.infrastructure.brokers.base import (
     KST,
     Account,
     Order,

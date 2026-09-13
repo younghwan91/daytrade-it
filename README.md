@@ -1,4 +1,4 @@
-# KRX Signal Engine
+# daytrade-it
 
 **Korean-equity (KOSPI/KOSDAQ) trading system with a news/disclosure risk gate**
 
@@ -36,7 +36,7 @@ fully wired yet. Read this before trusting any number it returns.
 ## Architecture
 
 ```
-src/krx_signal_engine/
+src/daytrade_it/
 ├── domain/           # Core business logic (no external dependencies)
 │   ├── entities/          # Stock, News, Signal, Trade
 │   ├── value_objects/     # Price, Volume, Ticker (6-digit KRX codes)
@@ -80,8 +80,8 @@ quant-airflow DB ──▶ Feature engineering ──▶ SignalGenerator ──�
 ### Installation
 
 ```bash
-git clone https://github.com/younghwan91/krx-signal-engine.git
-cd krx-signal-engine
+git clone https://github.com/younghwan91/daytrade-it.git
+cd daytrade-it
 
 uv venv
 source .venv/bin/activate
@@ -93,7 +93,7 @@ cp .env.example .env
 docker compose up -d
 alembic upgrade head
 
-uvicorn krx_signal_engine.interfaces.api.main:app --reload
+uvicorn daytrade_it.interfaces.api.main:app --reload
 ```
 
 ### CLI
@@ -135,7 +135,7 @@ Once running: **Swagger UI** at `/docs`, **ReDoc** at `/redoc`.
 
 ```bash
 pytest                                              # everything
-pytest --cov=src/krx_signal_engine --cov-report=html
+pytest --cov=src/daytrade_it --cov-report=html
 pytest tests/unit/ tests/integration/ tests/e2e/    # by tier
 ```
 

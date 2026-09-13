@@ -9,10 +9,10 @@ disclosure-only path for existing positions.
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from krx_signal_engine.domain.entities import Position, SignalDirection, SignalSource, TradingSignal
-from krx_signal_engine.domain.services.risk_gate import GateAction, RiskGate, RiskGateConfig
-from krx_signal_engine.domain.services.risk_manager import Account, RiskManager, ValidationStatus
-from krx_signal_engine.domain.value_objects import Confidence, Sentiment, Ticker
+from daytrade_it.domain.entities import Position, SignalDirection, SignalSource, TradingSignal
+from daytrade_it.domain.services.risk_gate import GateAction, RiskGate, RiskGateConfig
+from daytrade_it.domain.services.risk_manager import Account, RiskManager, ValidationStatus
+from daytrade_it.domain.value_objects import Confidence, Sentiment, Ticker
 
 TICKER = Ticker(value="005930")
 

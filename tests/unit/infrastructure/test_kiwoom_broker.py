@@ -15,18 +15,18 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from krx_signal_engine.infrastructure.brokers.base import (
+from daytrade_it.infrastructure.brokers.base import (
     Order,
     OrderSide,
     OrderStatusEnum,
     OrderType,
 )
-from krx_signal_engine.infrastructure.brokers.kiwoom_broker import (
+from daytrade_it.infrastructure.brokers.kiwoom_broker import (
     _ORDER_TYPE_FIELD,
     _ORIG_ORDER_NO_FIELD,
     KiwoomBroker,
 )
-from krx_signal_engine.shared.errors import BrokerError, OrderRejectedError
+from daytrade_it.shared.errors import BrokerError, OrderRejectedError
 
 
 class _FakeOrderModule:

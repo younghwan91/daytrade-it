@@ -11,11 +11,11 @@ import datetime as dt
 
 from krx_news_client import DartQuotaExceededError
 
-from krx_signal_engine.domain.entities.news import NewsArticle
-from krx_signal_engine.domain.value_objects import Ticker
-from krx_signal_engine.infrastructure.external.news_poller import CircuitState, NewsPoller
-from krx_signal_engine.shared.errors import error_codes
-from krx_signal_engine.shared.errors.exceptions import DartAPIError, TossNewsAPIError
+from daytrade_it.domain.entities.news import NewsArticle
+from daytrade_it.domain.value_objects import Ticker
+from daytrade_it.infrastructure.external.news_poller import CircuitState, NewsPoller
+from daytrade_it.shared.errors import error_codes
+from daytrade_it.shared.errors.exceptions import DartAPIError, TossNewsAPIError
 
 
 def make_article(title: str = "Test") -> NewsArticle:

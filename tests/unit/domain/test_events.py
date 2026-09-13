@@ -8,7 +8,7 @@ from uuid import uuid4
 import pytest
 from pydantic import ValidationError
 
-from krx_signal_engine.domain.events import (
+from daytrade_it.domain.events import (
     DomainEvent,
     NewsAnalyzed,
     PositionUpdated,

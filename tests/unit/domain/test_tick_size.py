@@ -4,8 +4,8 @@ from decimal import Decimal
 
 import pytest
 
-from krx_signal_engine.domain.entities import Exchange
-from krx_signal_engine.domain.services.tick_size import KRX_LOT_SIZE, round_to_tick, tick_size_for
+from daytrade_it.domain.entities import Exchange
+from daytrade_it.domain.services.tick_size import KRX_LOT_SIZE, round_to_tick, tick_size_for
 
 
 class TestTickSizeFor:

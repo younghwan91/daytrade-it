@@ -13,11 +13,11 @@ import pytest
 from krx_news_client import DartQuotaExceededError, NewsSource
 from krx_news_client import Disclosure as KrxDisclosure
 
-from krx_signal_engine.infrastructure.external.dart_client import (
+from daytrade_it.infrastructure.external.dart_client import (
     DartClient,
     map_dart_disclosure_to_domain,
 )
-from krx_signal_engine.shared.errors.exceptions import DartAPIError
+from daytrade_it.shared.errors.exceptions import DartAPIError
 
 
 def make_krx_disclosure(

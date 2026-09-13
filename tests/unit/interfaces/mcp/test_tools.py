@@ -25,15 +25,15 @@ from uuid import UUID
 
 import pytest
 
-from krx_signal_engine.domain.entities.signal import SignalDirection, SignalSource, TradingSignal
-from krx_signal_engine.domain.services.risk_manager import RiskManager
-from krx_signal_engine.domain.value_objects import Confidence, Ticker
-from krx_signal_engine.infrastructure.brokers.base import Account as BrokerAccount
-from krx_signal_engine.infrastructure.brokers.base import (
+from daytrade_it.domain.entities.signal import SignalDirection, SignalSource, TradingSignal
+from daytrade_it.domain.services.risk_manager import RiskManager
+from daytrade_it.domain.value_objects import Confidence, Ticker
+from daytrade_it.infrastructure.brokers.base import Account as BrokerAccount
+from daytrade_it.infrastructure.brokers.base import (
     OrderResult,
     OrderStatusEnum,
 )
-from krx_signal_engine.interfaces.mcp.tools import (
+from daytrade_it.interfaces.mcp.tools import (
     MCPToolContext,
     backtest,
     execute_trade,
@@ -125,10 +125,10 @@ async def test_backtest_tool_relays_real_handler_metrics_not_placeholder() -> No
     this stays a unit test (no live DB dependency) while still proving the
     tool function relays rather than re-derives the numbers.
     """
-    from krx_signal_engine.application.handlers.backtest import (
+    from daytrade_it.application.handlers.backtest import (
         BacktestMetrics,
     )
-    from krx_signal_engine.application.handlers.backtest import (
+    from daytrade_it.application.handlers.backtest import (
         BacktestResult as HandlerBacktestResult,
     )
 
