@@ -78,7 +78,10 @@ from daytrade_it.shared.logging import get_logger
 logger = get_logger(__name__)
 
 KILL_SWITCH_PATH = Path("data/live_STOP")
-DEFAULT_STOP_TIME = dt.time(15, 20)  # KST -- mirrors scalp-it's daemon stop time
+DEFAULT_STOP_TIME = dt.time(15, 20)  # KST -- news polling stops here
+#: With --execute, the process keeps managing exits until the closing auction
+#: ends (KRX continuous trading ends 15:20; the auction runs to 15:30).
+EXITS_UNTIL = dt.time(15, 30)
 SESSION_CLOSE = dt.time(15, 20)  # signals expire here; day trades are flat by the close
 FIRST_POLL = dt.time(9, 0, 30)
 MANAGE_TICK_SECONDS = 30
@@ -323,7 +326,14 @@ async def process_article(
         )
 
 
-async def run(*, once: bool, stop_at: dt.time, execute: bool, confirm_real: bool) -> None:
+async def run(
+    *,
+    once: bool,
+    stop_at: dt.time,
+    execute: bool,
+    confirm_real: bool,
+    exits_until: dt.time = EXITS_UNTIL,
+) -> None:
     db = DatabaseManager(database_url=os.environ["GPTQ_DATABASE_URL"])
     api = KiwoomAPI(
         app_key=os.environ["KIWOOM_APP_KEY"],
@@ -384,11 +394,14 @@ async def run(*, once: bool, stop_at: dt.time, execute: bool, confirm_real: bool
             kill_logged = False
             while True:
                 now = dt.datetime.now(KST)
-                if not once and now.time() >= stop_at:
-                    logger.info(
-                        "news_signal_poller: stop time reached, exiting", stop_at=str(stop_at)
-                    )
+                # No trader: nothing to manage after news stops. With a
+                # trader, keep managing exits through the closing auction --
+                # stopping at 15:20 left an unfilled last sell held overnight.
+                exit_at = stop_at if trader is None else max(stop_at, exits_until)
+                if not once and now.time() >= exit_at:
+                    logger.info("news_signal_poller: exiting", at=str(exit_at))
                     break
+                news_open = once or now.time() < stop_at
 
                 # Exits keep running even with the kill switch on: stopping
                 # here would leave the day's positions held overnight.
@@ -405,7 +418,7 @@ async def run(*, once: bool, stop_at: dt.time, execute: bool, confirm_real: bool
                             "entries; exits still managed"
                         )
                         kill_logged = True
-                elif now >= next_news_poll:
+                elif news_open and now >= next_news_poll:
                     next_news_poll = now + dt.timedelta(seconds=news_client.poll_interval)
                     try:
                         new_articles = await news_client.poll_once()
@@ -435,6 +448,11 @@ async def run(*, once: bool, stop_at: dt.time, execute: bool, confirm_real: bool
                     break
                 await asyncio.sleep(MANAGE_TICK_SECONDS)
     finally:
+        if trader is not None and not once and dt.datetime.now(KST).time() >= exits_until:
+            try:
+                trader.report_leftovers()
+            except Exception:
+                logger.exception("news_signal_poller: leftover position report failed")
         broker.disconnect()
         await db.engine.dispose()
 
@@ -451,7 +469,13 @@ def main() -> None:
         "--stop-at",
         type=_parse_time,
         default=DEFAULT_STOP_TIME,
-        help="Stop polling at this local time, HH:MM (default 15:20)",
+        help="Stop news polling at this local time, HH:MM (default 15:20)",
+    )
+    parser.add_argument(
+        "--exits-until",
+        type=_parse_time,
+        default=EXITS_UNTIL,
+        help="With --execute, keep managing exits until HH:MM (default 15:30)",
     )
     parser.add_argument(
         "--execute",
@@ -472,6 +496,7 @@ def main() -> None:
             stop_at=args.stop_at,
             execute=args.execute,
             confirm_real=args.confirm_real,
+            exits_until=args.exits_until,
         )
     )
 

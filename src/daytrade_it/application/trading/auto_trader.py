@@ -69,8 +69,18 @@ class TradingLimits:
     #: Leave time for the move the eval measured (entry -> close).
     entry_end: dt.time = dt.time(14, 30)
     entry_order_ttl: dt.timedelta = dt.timedelta(minutes=5)
-    flatten_at: dt.time = dt.time(15, 10)
-    exit_retry_after: dt.timedelta = dt.timedelta(minutes=3)
+    #: 15:00, with 1-minute retries that get more aggressive, so there are
+    #: ~20 attempts before continuous trading ends at 15:20 and the closing
+    #: auction (15:20-15:30) is a last chance. It was 15:10 with 3-minute
+    #: retries while the daemon stopped at 15:20: a 15:19 attempt that didn't
+    #: fill left the share held overnight.
+    flatten_at: dt.time = dt.time(15, 0)
+    exit_retry_after: dt.timedelta = dt.timedelta(minutes=1)
+    #: Each retry prices further below the bid, capped. A sell limit below the
+    #: bid still fills at the best bid in continuous trading; the cap bounds
+    #: how far a thin book or the closing auction can take it.
+    exit_discount_step: Decimal = Decimal("0.005")
+    exit_discount_cap: Decimal = Decimal("0.02")
 
 
 @dataclass
@@ -82,6 +92,7 @@ class _DayState:
     #: Entry cancelled with zero fill: any later holding of that ticker is
     #: the user's (e.g. bought by hand), not the trader's.
     never_filled: set[str] = field(default_factory=set)
+    exit_attempts: dict[str, int] = field(default_factory=dict)
 
 
 class _SignalLookup:
@@ -144,6 +155,7 @@ class AutoTrader:
             # exit_failed is tracked too so flatten() waits exit_retry_after
             # instead of re-sending a rejected sell on every tick.
             s.exits[row["ticker"]] = row
+            s.exit_attempts[row["ticker"]] = s.exit_attempts.get(row["ticker"], 0) + 1
 
     def _today(self) -> dt.date:
         return self._clock().date()
@@ -330,6 +342,34 @@ class AutoTrader:
         else:
             logger.error("auto_trader: cancel refused by broker", order_id=order_id, ticker=ticker)
 
+    def _own_holdings(self) -> dict[str, int] | None:
+        """Shares the trader bought today and still holds; None if unreadable."""
+        try:
+            held = {p.ticker: int(p.quantity) for p in self._broker.get_positions()}
+        except Exception:
+            logger.exception("auto_trader: positions lookup failed")
+            return None
+        baseline = self._state.baseline or {}
+        own = {}
+        for ticker in self._state.entries:
+            if ticker in self._state.never_filled:
+                continue
+            qty = min(held.get(ticker, 0) - baseline.get(ticker, 0), 1)
+            if qty > 0:
+                own[ticker] = qty
+        return own
+
+    def report_leftovers(self) -> dict[str, int] | None:
+        """Call at shutdown: record and loudly log any share still held."""
+        self._ensure_day()
+        if not self._state.entries:
+            return {}
+        own = self._own_holdings()
+        if own:
+            logger.error("auto_trader: POSITIONS LEFT OPEN AT SHUTDOWN", positions=own)
+            self._record("overnight_positions", positions=own)
+        return own
+
     def flatten(self) -> None:
         """Sell what the trader bought today (never the user's baseline shares)."""
         self._ensure_day()
@@ -338,20 +378,12 @@ class AutoTrader:
         for order_id, row in list(self._state.open_entry_orders.items()):
             self._cancel_entry(order_id, row["ticker"], reason="flatten")
 
-        try:
-            held = {p.ticker: int(p.quantity) for p in self._broker.get_positions()}
-        except Exception:
-            logger.exception("auto_trader: positions lookup failed during flatten")
+        own_holdings = self._own_holdings()
+        if own_holdings is None:
             return
 
-        baseline = self._state.baseline or {}
         now = self._clock()
-        for ticker in self._state.entries:
-            if ticker in self._state.never_filled:
-                continue
-            own = min(held.get(ticker, 0) - baseline.get(ticker, 0), 1)
-            if own <= 0:
-                continue
+        for ticker, own in own_holdings.items():
             prior = self._state.exits.get(ticker)
             if prior is not None:
                 if now - dt.datetime.fromisoformat(prior["ts"]) < self._limits.exit_retry_after:
@@ -372,8 +404,13 @@ class AutoTrader:
         if quote.bid <= 0:
             logger.error("auto_trader: NO BID -- cannot exit (lower limit?)", ticker=ticker)
             return
+        attempt = self._state.exit_attempts.get(ticker, 0)
+        discount = min(self._limits.exit_discount_step * attempt, self._limits.exit_discount_cap)
+        limit = quote.bid * (1 - discount)
         if not self._live:
-            self._record("exit_dry_run", ticker=ticker, quantity=quantity, limit=str(quote.bid))
+            self._record(
+                "exit_dry_run", ticker=ticker, quantity=quantity, limit=str(limit), attempt=attempt
+            )
             return
         try:
             result = self._broker.place_order(
@@ -382,18 +419,19 @@ class AutoTrader:
                     quantity=Decimal(quantity),
                     side=OrderSide.SELL,
                     order_type=OrderType.LIMIT,
-                    limit_price=quote.bid,
+                    limit_price=limit,
                 )
             )
         except Exception as exc:
             logger.exception("auto_trader: EXIT ORDER FAILED", ticker=ticker)
-            self._record("exit_failed", ticker=ticker, error=str(exc))
+            self._record("exit_failed", ticker=ticker, error=str(exc), attempt=attempt)
             return
         self._record(
             "exit_submitted",
             ticker=ticker,
             order_id=result.order_id,
             quantity=quantity,
-            limit=str(quote.bid),
+            limit=str(limit),
+            attempt=attempt,
         )
-        logger.info("auto_trader: EXIT SUBMITTED", ticker=ticker, limit=str(quote.bid))
+        logger.info("auto_trader: EXIT SUBMITTED", ticker=ticker, limit=str(limit), attempt=attempt)

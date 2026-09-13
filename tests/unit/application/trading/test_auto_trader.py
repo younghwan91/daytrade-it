@@ -328,3 +328,51 @@ async def test_cash_check_counts_todays_open_entries(tmp_path: Path) -> None:
     await trader.enter(_signal("005930"))  # 70,100 committed
     await trader.enter(_signal("000660"))  # 120,000 - 70,100 < 70,801 -> refused
     assert [o.ticker for o in broker.orders] == ["005930"]
+
+
+async def test_flatten_starts_at_1500_and_retries_every_minute_with_deeper_limits(
+    tmp_path: Path,
+) -> None:
+    broker, clock = FakeBroker(), Clock("10:00")
+    trader = _trader(tmp_path, broker, clock)
+    await trader.enter(_signal())
+    broker.fill("0000001", "005930")
+
+    clock.now = clock.now.replace(hour=14, minute=59)
+    trader.manage()
+    assert [o for o in broker.orders if o.side == OrderSide.SELL] == []
+
+    clock.now = clock.now.replace(hour=15, minute=0)
+    for _ in range(6):  # still held every time: each minute resends lower
+        trader.manage()
+        clock.advance(minutes=1)
+    limits = [o.limit_price for o in broker.orders if o.side == OrderSide.SELL]
+    assert limits == [
+        Decimal("70000"),
+        Decimal("70000") * Decimal("0.995"),
+        Decimal("70000") * Decimal("0.990"),
+        Decimal("70000") * Decimal("0.985"),
+        Decimal("70000") * Decimal("0.980"),
+        Decimal("70000") * Decimal("0.980"),  # capped at 2% below bid
+    ]
+
+
+async def test_leftover_position_at_shutdown_is_recorded(tmp_path: Path) -> None:
+    broker, clock = FakeBroker(), Clock("10:00")
+    trader = _trader(tmp_path, broker, clock)
+    await trader.enter(_signal())
+    broker.fill("0000001", "005930")
+    clock.now = clock.now.replace(hour=15, minute=30)
+    assert trader.report_leftovers() == {"005930": 1}
+    assert _events(tmp_path)[-1] == "overnight_positions"
+
+
+async def test_no_leftover_report_when_flat(tmp_path: Path) -> None:
+    broker, clock = FakeBroker(), Clock("10:00")
+    trader = _trader(tmp_path, broker, clock)
+    await trader.enter(_signal())
+    clock.advance(minutes=5)
+    trader.manage()  # entry cancelled unfilled
+    clock.now = clock.now.replace(hour=15, minute=30)
+    assert trader.report_leftovers() == {}
+    assert "overnight_positions" not in _events(tmp_path)
