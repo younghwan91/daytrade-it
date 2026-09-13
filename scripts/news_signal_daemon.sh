@@ -20,7 +20,7 @@ cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)" || exit 1
 export $(grep -E '^KIWOOM_APP_(KEY|SECRET)=' ../quant-airflow/.env | xargs)
 export $(grep -E '^ANTHROPIC_API_KEY=' ../quant-airflow/.env | xargs)
 export GPTQ_DATABASE_URL=$(grep '^GPTQ_DATABASE_URL=' .env | cut -d= -f2-)
-# KR_QUANT_DB (postgresql://user:pass@host:port/db) lives in quant-airflow/.env
+# KR_QUANT_DB (postgresql://user:pass@host:port/db) lives in quant-airflow/.env  # pragma: allowlist secret
 # since 2026-09-13, when kr-quant (now swing-it) was removed from this host --
 # the old ../kr-quant/.env path left the daemon with no DB password. All five
 # fields come from that one DSN so a future move only changes one line.
