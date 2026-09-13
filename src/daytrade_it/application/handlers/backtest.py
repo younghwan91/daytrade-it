@@ -23,11 +23,13 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from dataclasses import fields as dataclass_fields
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
 import structlog
+from krx_quant_core.backtest.ledger import performance_metrics
 
 from daytrade_it.domain.entities.stock import Exchange
 from daytrade_it.domain.services.cost_model import KoreanCostModel
@@ -541,126 +543,19 @@ class BacktestHandler:
         start_date: datetime,
         end_date: datetime,
     ) -> BacktestMetrics:
-        """Calculate backtest performance metrics."""
-        if not trades:
-            return BacktestMetrics(
-                total_return=Decimal("0"),
-                total_return_pct=Decimal("0"),
-                annualized_return=Decimal("0"),
-                sharpe_ratio=Decimal("0"),
-                sortino_ratio=Decimal("0"),
-                max_drawdown=Decimal("0"),
-                max_drawdown_pct=Decimal("0"),
-                win_rate=Decimal("0"),
-                profit_factor=Decimal("0"),
-                total_trades=0,
-                winning_trades=0,
-                losing_trades=0,
-                avg_win=Decimal("0"),
-                avg_loss=Decimal("0"),
-                avg_trade_duration_hours=Decimal("0"),
-                best_trade=Decimal("0"),
-                worst_trade=Decimal("0"),
-            )
+        """Calculate backtest performance metrics.
 
-        # Basic metrics
-        closed_trades = [t for t in trades if t.exit_date is not None]
-        winning = [t for t in closed_trades if t.pnl > 0]
-        losing = [t for t in closed_trades if t.pnl < 0]
-
-        total_pnl = sum(t.pnl for t in closed_trades)
-        total_return_pct = total_pnl / initial_capital
-
-        # Calculate duration
-        days = (end_date - start_date).days
-        years = days / 365.25
-
-        # Annualized return
-        if years > 0 and total_return_pct > -1:
-            annualized = (1 + float(total_return_pct)) ** (1 / years) - 1
-        else:
-            annualized = 0
-
-        # Win rate
-        win_rate = len(winning) / len(closed_trades) if closed_trades else 0
-
-        # Profit factor
-        gross_profit = sum(t.pnl for t in winning)
-        gross_loss = abs(sum(t.pnl for t in losing))
-        profit_factor = gross_profit / gross_loss if gross_loss > 0 else Decimal("inf")
-
-        # Average win/loss
-        avg_win = gross_profit / len(winning) if winning else Decimal("0")
-        avg_loss = gross_loss / len(losing) if losing else Decimal("0")
-
-        # Max drawdown
-        max_dd = max(e["drawdown"] for e in equity_curve) if equity_curve else 0
-        max_dd_value = max_dd * float(initial_capital)
-
-        # Trade duration
-        durations = []
-        for t in closed_trades:
-            if t.entry_date and t.exit_date:
-                hours = (t.exit_date - t.entry_date).total_seconds() / 3600
-                durations.append(hours)
-        avg_duration = sum(durations) / len(durations) if durations else 0
-
-        # Best/worst trades
-        pnls = [float(t.pnl) for t in closed_trades]
-        best = max(pnls) if pnls else 0
-        worst = min(pnls) if pnls else 0
-
-        # Sharpe ratio (simplified - using daily returns)
-        if len(equity_curve) > 1:
-            daily_returns = []
-            for i in range(1, len(equity_curve)):
-                prev = equity_curve[i - 1]["equity"]
-                curr = equity_curve[i]["equity"]
-                if prev > 0:
-                    daily_returns.append((curr - prev) / prev)
-
-            if daily_returns:
-                import statistics
-
-                avg_return = statistics.mean(daily_returns)
-                std_return = statistics.stdev(daily_returns) if len(daily_returns) > 1 else 1
-                sharpe = (avg_return * 252) / (std_return * (252**0.5)) if std_return > 0 else 0
-
-                # Sortino (downside deviation)
-                negative_returns = [r for r in daily_returns if r < 0]
-                downside_std = (
-                    statistics.stdev(negative_returns) if len(negative_returns) > 1 else std_return
-                )
-                sortino = (
-                    (avg_return * 252) / (downside_std * (252**0.5)) if downside_std > 0 else 0
-                )
-            else:
-                sharpe = 0
-                sortino = 0
-        else:
-            sharpe = 0
-            sortino = 0
-
+        The math lives in ``krx_quant_core.backtest.ledger.performance_metrics``
+        (moved there verbatim, same fields/rounding); this maps its result onto
+        ``BacktestMetrics`` so consumers keep the type they already read.
+        """
+        m = performance_metrics(
+            trades,
+            equity_curve,
+            initial_capital,
+            start_date=start_date,
+            end_date=end_date,
+        )
         return BacktestMetrics(
-            total_return=total_pnl,
-            total_return_pct=Decimal(str(round(float(total_return_pct), 4))),
-            annualized_return=Decimal(str(round(annualized, 4))),
-            sharpe_ratio=Decimal(str(round(sharpe, 2))),
-            sortino_ratio=Decimal(str(round(sortino, 2))),
-            max_drawdown=Decimal(str(round(max_dd_value, 2))),
-            max_drawdown_pct=Decimal(str(round(max_dd, 4))),
-            win_rate=Decimal(str(round(win_rate, 4))),
-            profit_factor=(
-                Decimal(str(round(float(profit_factor), 2)))
-                if profit_factor != Decimal("inf")
-                else Decimal("999")
-            ),
-            total_trades=len(closed_trades),
-            winning_trades=len(winning),
-            losing_trades=len(losing),
-            avg_win=Decimal(str(round(float(avg_win), 2))),
-            avg_loss=Decimal(str(round(float(avg_loss), 2))),
-            avg_trade_duration_hours=Decimal(str(round(avg_duration, 1))),
-            best_trade=Decimal(str(round(best, 2))),
-            worst_trade=Decimal(str(round(worst, 2))),
+            **{f.name: getattr(m, f.name) for f in dataclass_fields(BacktestMetrics)}
         )

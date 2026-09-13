@@ -166,7 +166,7 @@ async def test_backtest_tool_relays_real_handler_metrics_not_placeholder(
                 equity_curve=[],
             )
 
-    monkeypatch.setattr("daytrade_it.shared.runtime_host.socket.gethostname", lambda: "simnode")
+    monkeypatch.setattr("krx_quant_core.runtime.host.socket.gethostname", lambda: "simnode")
     ctx = MCPToolContext(backtest_handler=_FakeBacktestHandler())
     MCPToolContext.set_instance(ctx)
     try:

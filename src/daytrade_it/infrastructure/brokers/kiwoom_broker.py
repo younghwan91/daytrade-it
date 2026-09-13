@@ -71,6 +71,15 @@ import logging
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any
 
+from krx_quant_core.execution.kiwoom_spec import (
+    BALANCE_ROWS_KEY,
+    DEFAULT_EXCHANGE,
+    TRDE_TP_LIMIT,
+    TRDE_TP_MARKET,
+    UNFILLED_ROWS_KEY,
+)
+from krx_quant_core.market.codes import normalize_code
+
 from daytrade_it.domain.entities.stock import Exchange
 from daytrade_it.domain.services.tick_size import round_to_tick
 from daytrade_it.infrastructure.brokers.base import (
@@ -93,17 +102,16 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-#: KRX exchange code for `dmst_stex_tp`. Verified 2026-09-13 against
-#: scalp-it's 22 live order fills (see module docstring) -- the literal
-#: string "KRX", not "01".
-_KRX_EXCHANGE_CODE = "KRX"
-
-#: 지정가 (limit) order-type code. Verified 2026-09-13 against scalp-it's
-#: live fills -- "0", not "00". 시장가 (market) order code "03" remains
-#: UNVERIFIED -- scalp-it has only ever placed limit orders. See the module
-#: docstring.
-_ORDER_TYPE_LIMIT = "0"
-_ORDER_TYPE_MARKET = "03"
+#: Kiwoom REST protocol values shared with scalp-it live in
+#: `krx_quant_core.execution.kiwoom_spec`, which records how each was
+#: confirmed. `dmst_stex_tp="KRX"` (not "01") and limit `trde_tp="0"` (not
+#: "00") were verified 2026-09-13 against scalp-it's 22 live order fills
+#: (see module docstring). The market order code "03" remains UNVERIFIED
+#: (`TRDE_TP_MARKET_VERIFIED is False`) -- `execute_trade` refuses MARKET
+#: orders for that reason.
+_KRX_EXCHANGE_CODE = DEFAULT_EXCHANGE
+_ORDER_TYPE_LIMIT = TRDE_TP_LIMIT
+_ORDER_TYPE_MARKET = TRDE_TP_MARKET
 
 #: See module docstring: "order type" field name is ambiguous between
 #: kiwoom-client's README (`trde_tp`) and its examples (`ord_dv`). README
@@ -122,30 +130,14 @@ _ORIG_ORDER_NO_FIELD = "org_ord_no"
 #: only for the rare case a caller passes us a raw dict directly (tests).
 _SUCCESS_RETURN_CODE = 0
 
-#: Rows keys, as read on the live account by scalp-it
-#: (`adapters/kiwoom_order.py`: BALANCE_ROWS_KEY / UNFILLED_ROWS_KEY) and
-#: confirmed present in real 2026-09-13 responses.
-_BALANCE_ROWS_KEY = "acnt_evlt_remn_indv_tot"  # kt00018
-_UNFILLED_ROWS_KEY = "oso"  # ka10075
+#: Rows keys (kt00018 / ka10075), as read on the live account by scalp-it
+#: and confirmed present in real 2026-09-13 responses.
+_BALANCE_ROWS_KEY = BALANCE_ROWS_KEY
+_UNFILLED_ROWS_KEY = UNFILLED_ROWS_KEY
 
-
-def normalize_code(code: Any) -> str:
-    """6-character KRX code from a Kiwoom `stk_cd`.
-
-    Ported from scalp-it's `normalize_code`: kt00018 returns "A041830"
-    (drop the one-letter prefix), but real KRX codes can contain letters
-    mid-code ("0155E0"), so letters must not be stripped wholesale.
-    """
-    text = "".join(
-        ch for ch in str(code if code is not None else "").strip().upper() if ch.isalnum()
-    )
-    if not text:
-        return ""
-    if len(text) == 7 and text[0].isalpha():
-        text = text[1:]
-    if len(text) > 6:
-        text = text[-6:]
-    return text.zfill(6) if text.isdigit() else text
+#: `normalize_code` ("A041830" -> "041830", keeps mid-code letters like
+#: "0155E0") is `krx_quant_core.market.codes.normalize_code`, imported above
+#: and re-exported from this module.
 
 
 def _to_decimal(value: Any, default: str = "0") -> Decimal:

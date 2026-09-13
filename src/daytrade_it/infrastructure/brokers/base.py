@@ -11,18 +11,29 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
-from zoneinfo import ZoneInfo
 
-#: KRX's trading timezone. Order/quote/account timestamps below default to
-#: KST wall-clock time (rather than naive local time) so they mean the same
+#: KRX's trading timezone and clock, from krx-quant-core (shared with
+#: scalp-it). Order/quote/account timestamps below default to KST
+#: wall-clock time (rather than naive local time) so they mean the same
 #: thing regardless of the host machine's timezone -- see Task 9's
-#: currency/timezone sweep (redevelopment plan, Phase 2).
-KST = ZoneInfo("Asia/Seoul")
+#: currency/timezone sweep (redevelopment plan, Phase 2). Re-exported here
+#: because much of this package imports them from this module.
+from krx_quant_core.market.session import KST, now_kst
 
-
-def now_kst() -> datetime:
-    """Current time as a timezone-aware KST (Asia/Seoul) datetime."""
-    return datetime.now(KST)
+__all__ = [
+    "KST",
+    "Account",
+    "BrokerInterface",
+    "Order",
+    "OrderResult",
+    "OrderSide",
+    "OrderStatus",
+    "OrderStatusEnum",
+    "OrderType",
+    "Position",
+    "Quote",
+    "now_kst",
+]
 
 
 class OrderType(StrEnum):

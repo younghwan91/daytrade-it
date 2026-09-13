@@ -1,27 +1,25 @@
 """KRX tick-size (호가가격단위) rules.
 
-The actual table now lives in :mod:`kiwoom_client.tick_size` -- this repo,
-scalp-it, and kiwoom-client itself all needed the same KRX price-band table
-independently, which is exactly the kind of duplication where one boundary
-value drifting out of sync between repos silently corrupts an order price
-or a limit-up判定. kiwoom-client is the repo that actually places orders,
-so it is the canonical source; this module is a thin adapter that keeps
-this package's existing `Exchange`-aware, `Decimal`-typed public API for
-callers here, without re-deriving the table.
+The table lives in :mod:`kiwoom_client.tick_size` and the market-generic
+helpers on top of it (including ``KRX_LOT_SIZE``) in
+:mod:`krx_quant_core.market.ticks`, shared with scalp-it -- one boundary
+value drifting between repos silently corrupts an order price or a limit-up
+check. This module is a thin adapter that keeps this package's existing
+`Exchange`-aware, `Decimal`-typed public API for callers here, without
+re-deriving the table.
 """
 
 from __future__ import annotations
 
 from decimal import Decimal
 
-from kiwoom_client.tick_size import round_to_tick as _round_to_tick
-from kiwoom_client.tick_size import tick_size as _tick_size
+from krx_quant_core.market.ticks import KRX_LOT_SIZE
+from krx_quant_core.market.ticks import round_to_tick as _round_to_tick
+from krx_quant_core.market.ticks import tick_size as _tick_size
 
 from daytrade_it.domain.entities.stock import Exchange
 
-# KRX board lot size for common stock: 1 share. Odd-lot-only trading was
-# abolished; regular KOSPI/KOSDAQ/KONEX orders trade in single-share units.
-KRX_LOT_SIZE = 1
+__all__ = ["KRX_LOT_SIZE", "round_to_tick", "tick_size_for"]
 
 
 def tick_size_for(price: Decimal, market: Exchange) -> Decimal:
@@ -45,7 +43,9 @@ def tick_size_for(price: Decimal, market: Exchange) -> Decimal:
     """
     if not isinstance(market, Exchange):
         raise ValueError(f"Unrecognized market: {market!r}")
-    return _tick_size(price)
+    # krx-quant-core ships no py.typed marker, so mypy sees its API as Any.
+    result: Decimal = _tick_size(price)
+    return result
 
 
 def round_to_tick(price: Decimal, market: Exchange) -> Decimal:
@@ -60,4 +60,5 @@ def round_to_tick(price: Decimal, market: Exchange) -> Decimal:
     """
     if not isinstance(market, Exchange):
         raise ValueError(f"Unrecognized market: {market!r}")
-    return _round_to_tick(price)
+    result: Decimal = _round_to_tick(price)
+    return result

@@ -32,9 +32,9 @@ from __future__ import annotations
 
 import datetime as dt
 from typing import TYPE_CHECKING, Any
-from zoneinfo import ZoneInfo
 
 import psycopg2
+from krx_quant_core.market.session import KST
 from pydantic import BaseModel, Field
 
 from daytrade_it.domain.value_objects import Ticker
@@ -49,11 +49,11 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-#: quant-airflow's news_judgments.judged_at is stored TIMESTAMPTZ in UTC
-#: (docs/schema.md:36 in quant-airflow — a documented real gotcha they hit).
-#: Any date-boundary comparison against it (e.g. "today's KST trading day")
-#: must convert to KST first, or rows land on the wrong calendar day.
-KST = ZoneInfo("Asia/Seoul")
+# quant-airflow's news_judgments.judged_at is stored TIMESTAMPTZ in UTC
+# (docs/schema.md:36 in quant-airflow — a documented real gotcha they hit).
+# Any date-boundary comparison against it (e.g. "today's KST trading day")
+# must convert to KST first, or rows land on the wrong calendar day. `KST`
+# is krx-quant-core's (imported above) and stays re-exported from here.
 UTC = dt.UTC
 
 

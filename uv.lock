@@ -851,6 +851,7 @@ dependencies = [
     { name = "httpx" },
     { name = "kiwoom-client" },
     { name = "krx-news-client" },
+    { name = "krx-quant-core" },
     { name = "mlflow" },
     { name = "numpy" },
     { name = "optuna" },
@@ -898,6 +899,7 @@ requires-dist = [
     { name = "hypothesis", marker = "extra == 'dev'", specifier = ">=6.98.0" },
     { name = "kiwoom-client", specifier = ">=0.4.0" },
     { name = "krx-news-client", specifier = ">=0.3.0" },
+    { name = "krx-quant-core", git = "https://github.com/younghwan91/krx-quant-core?rev=v0.1.0" },
     { name = "mlflow", specifier = ">=2.10.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.8.0" },
     { name = "numpy", specifier = ">=1.26.0" },
@@ -1662,6 +1664,16 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/10/12/855630e06e2f1ab83e9b877343ba3987eda9e82997504e7a3eafd440a7a4/krx_news_client-0.3.1.tar.gz", hash = "sha256:4679abbce5e41a0351d7889694c06812eaeab31e4a74e1fa5fbf7e248863e7d9", size = 49186, upload-time = "2026-09-13T06:49:11.353Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/da/83/99b027e9a145c4782280dbdb011a11c261819205a151eb3266be97e51700/krx_news_client-0.3.1-py3-none-any.whl", hash = "sha256:a9fe0ff3ec9b1f05434297d021df1ca3eb9ce81430cdf90437c4884b09316b28", size = 18521, upload-time = "2026-09-13T06:49:10.149Z" },
+]
+
+[[package]]
+name = "krx-quant-core"
+version = "0.1.0"
+source = { git = "https://github.com/younghwan91/krx-quant-core?rev=v0.1.0#69a9287166006f3e6e7ce88bba63ba6fdd8f6ec3" }
+dependencies = [
+    { name = "kiwoom-client" },
+    { name = "numpy" },
+    { name = "pandas" },
 ]
 
 [[package]]

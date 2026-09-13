@@ -9,7 +9,7 @@ from daytrade_it.shared.runtime_host import require_backtest_host
 
 
 def _host(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
-    monkeypatch.setattr("daytrade_it.shared.runtime_host.socket.gethostname", lambda: name)
+    monkeypatch.setattr("krx_quant_core.runtime.host.socket.gethostname", lambda: name)
 
 
 def test_simnode_is_allowed(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -172,7 +172,7 @@ class TestRealBacktestRun:
         from daytrade_it.interfaces.mcp.tools import MCPToolContext, backtest
 
         # The tool refuses non-simnode hosts; this test exercises relaying.
-        monkeypatch.setattr("daytrade_it.shared.runtime_host.socket.gethostname", lambda: "simnode")
+        monkeypatch.setattr("krx_quant_core.runtime.host.socket.gethostname", lambda: "simnode")
         ctx = MCPToolContext(
             backtest_handler=BacktestHandler(
                 market_data_client=QuantAirflowDBClient(settings=_SETTINGS)
