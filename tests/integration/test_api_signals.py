@@ -62,7 +62,7 @@ async def test_create_signal_success(
 async def test_create_signal_minimal_payload(async_client: AsyncClient) -> None:
     """Test creating a signal with minimal required fields."""
     payload = {
-        "ticker": "TSLA",
+        "ticker": "000660",
         "direction": "SELL",
         "confidence": 0.70,
     }
@@ -72,7 +72,7 @@ async def test_create_signal_minimal_payload(async_client: AsyncClient) -> None:
     assert response.status_code == 201
     data = response.json()
 
-    assert data["ticker"] == "TSLA"
+    assert data["ticker"] == "000660"
     assert data["direction"] == "SELL"
     assert data["confidence"] == 0.70
 
@@ -109,7 +109,7 @@ async def test_create_signal_invalid_ticker_empty(async_client: AsyncClient) -> 
 async def test_create_signal_invalid_confidence_too_high(async_client: AsyncClient) -> None:
     """Test creating a signal with confidence > 1.0 returns 422."""
     payload = {
-        "ticker": "AAPL",
+        "ticker": "005930",
         "direction": "BUY",
         "confidence": 1.5,
     }
@@ -123,7 +123,7 @@ async def test_create_signal_invalid_confidence_too_high(async_client: AsyncClie
 async def test_create_signal_invalid_confidence_negative(async_client: AsyncClient) -> None:
     """Test creating a signal with negative confidence returns 422."""
     payload = {
-        "ticker": "AAPL",
+        "ticker": "005930",
         "direction": "BUY",
         "confidence": -0.5,
     }
@@ -137,7 +137,7 @@ async def test_create_signal_invalid_confidence_negative(async_client: AsyncClie
 async def test_create_signal_invalid_direction(async_client: AsyncClient) -> None:
     """Test creating a signal with invalid direction returns 422."""
     payload = {
-        "ticker": "AAPL",
+        "ticker": "005930",
         "direction": "INVALID",
         "confidence": 0.50,
     }
@@ -151,7 +151,7 @@ async def test_create_signal_invalid_direction(async_client: AsyncClient) -> Non
 async def test_create_signal_missing_required_field(async_client: AsyncClient) -> None:
     """Test creating a signal without required fields returns 422."""
     payload = {
-        "ticker": "AAPL",
+        "ticker": "005930",
         # missing direction and confidence
     }
 
@@ -221,7 +221,7 @@ async def test_list_signals_with_filters(async_client: AsyncClient) -> None:
     response = await async_client.get(
         "/api/v1/signals",
         params={
-            "ticker": "AAPL",
+            "ticker": "005930",
             "min_confidence": 0.8,
             "direction": "BUY",
         },

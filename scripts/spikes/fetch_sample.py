@@ -49,9 +49,7 @@ async def fetch(out_path: Path, limit: int) -> None:
     records = records[:limit] if limit else records
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(
-        json.dumps(records, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    out_path.write_text(json.dumps(records, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"Wrote {len(records)} articles to {out_path}")
 
 

@@ -515,7 +515,9 @@ class BacktestHandler:
             entry_commission = float(pos.get("entry_commission", 0.0))
             gross_pnl = (price - pos["entry_price"]) * pos["quantity"]
             net_pnl = gross_pnl - exit_cost - entry_commission
-            pnl_pct = (price - pos["entry_price"]) / pos["entry_price"] if pos["entry_price"] else 0.0
+            pnl_pct = (
+                (price - pos["entry_price"]) / pos["entry_price"] if pos["entry_price"] else 0.0
+            )
 
             return BacktestTrade(
                 ticker=ticker,

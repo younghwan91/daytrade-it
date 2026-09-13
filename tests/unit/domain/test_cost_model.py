@@ -129,7 +129,9 @@ class TestCostOfTrade:
         model = KoreanCostModel()
         price = Decimal("50000")
         quantity = Decimal("100")
-        cost = model.cost_of_trade(price=price, quantity=quantity, side="SELL", market=Exchange.KOSPI)
+        cost = model.cost_of_trade(
+            price=price, quantity=quantity, side="SELL", market=Exchange.KOSPI
+        )
 
         expected_fill = round_to_tick(price * (1 - DEFAULT_KOSPI_SLIPPAGE_PCT), Exchange.KOSPI)
         expected_notional = expected_fill * quantity
@@ -150,7 +152,9 @@ class TestCostOfTrade:
         quantity = Decimal("10")
 
         buy = model.cost_of_trade(price=price, quantity=quantity, side="BUY", market=Exchange.KOSPI)
-        sell = model.cost_of_trade(price=price, quantity=quantity, side="SELL", market=Exchange.KOSPI)
+        sell = model.cost_of_trade(
+            price=price, quantity=quantity, side="SELL", market=Exchange.KOSPI
+        )
 
         buy_outlay = buy.fill_price * quantity + buy.commission + buy.tax
         sell_proceeds = sell.fill_price * quantity - sell.commission - sell.tax

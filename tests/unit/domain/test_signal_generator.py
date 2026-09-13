@@ -37,7 +37,9 @@ def _article(**overrides: object) -> NewsArticle:
     return NewsArticle(**defaults)
 
 
-def _ml_signal(direction: SignalDirection = SignalDirection.BUY, confidence: float = 0.8) -> TradingSignal:
+def _ml_signal(
+    direction: SignalDirection = SignalDirection.BUY, confidence: float = 0.8
+) -> TradingSignal:
     return TradingSignal(
         ticker=TICKER,
         direction=direction,
@@ -94,7 +96,9 @@ class TestCombineSignalsRefusesSentimentOnly:
         generator = SignalGenerator()
         sentiment = Sentiment.bullish(score=0.9, confidence=0.9)
         news_signal_1 = generator.generate_from_news(_article(), sentiment)
-        news_signal_2 = generator.generate_from_news(_article(title="Another bullish article"), sentiment)
+        news_signal_2 = generator.generate_from_news(
+            _article(title="Another bullish article"), sentiment
+        )
         assert news_signal_1 is not None
         assert news_signal_2 is not None
 

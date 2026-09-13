@@ -34,8 +34,16 @@ class _FakeOrderModule:
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, Any]]] = []
-        self.buy_response: dict[str, Any] = {"return_code": 0, "return_msg": "정상", "ord_no": "001"}
-        self.sell_response: dict[str, Any] = {"return_code": 0, "return_msg": "정상", "ord_no": "002"}
+        self.buy_response: dict[str, Any] = {
+            "return_code": 0,
+            "return_msg": "정상",
+            "ord_no": "001",
+        }
+        self.sell_response: dict[str, Any] = {
+            "return_code": 0,
+            "return_msg": "정상",
+            "ord_no": "002",
+        }
         self.cancel_response: dict[str, Any] = {"return_code": 0, "return_msg": "정상"}
         self.raise_on_buy: Exception | None = None
 
@@ -157,7 +165,9 @@ class TestConnect:
         assert broker.connect() is False
         assert broker.is_connected is False
 
-    def test_disconnect_logs_out_and_closes(self, broker: KiwoomBroker, fake_api: _FakeKiwoomAPI) -> None:
+    def test_disconnect_logs_out_and_closes(
+        self, broker: KiwoomBroker, fake_api: _FakeKiwoomAPI
+    ) -> None:
         broker.disconnect()
         assert fake_api.logout_called is True
         assert fake_api.close_called is True

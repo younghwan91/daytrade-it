@@ -270,7 +270,9 @@ async def main() -> None:
             scoring = compute_accuracy(openai_preds, hand_labels)
             scoring["elapsed_seconds"] = time.time() - t0
             report["openai"] = scoring
-            print(f"  -> accuracy: {scoring['accuracy']:.1%} ({scoring['correct']}/{scoring['total']})")
+            print(
+                f"  -> accuracy: {scoring['accuracy']:.1%} ({scoring['correct']}/{scoring['total']})"
+            )
 
     if not args.skip_finbert:
         print("Scoring with snunlp/KR-FinBert-SC...", file=sys.stderr)
@@ -283,7 +285,9 @@ async def main() -> None:
             scoring = compute_accuracy(finbert_preds, hand_labels)
             scoring["elapsed_seconds"] = time.time() - t0
             report["finbert"] = scoring
-            print(f"  -> accuracy: {scoring['accuracy']:.1%} ({scoring['correct']}/{scoring['total']})")
+            print(
+                f"  -> accuracy: {scoring['accuracy']:.1%} ({scoring['correct']}/{scoring['total']})"
+            )
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")

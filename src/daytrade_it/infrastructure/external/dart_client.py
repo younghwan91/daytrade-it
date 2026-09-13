@@ -41,7 +41,12 @@ _EMPTY_CONTENT_FALLBACK = "(no content provided by DART)"
 
 # Re-exported so callers of this module don't need to import from
 # krx_news_client directly to catch quota exhaustion.
-__all__ = ["DART_DISCLOSURE_NAMESPACE", "DartClient", "DartQuotaExceededError", "map_dart_disclosure_to_domain"]
+__all__ = [
+    "DART_DISCLOSURE_NAMESPACE",
+    "DartClient",
+    "DartQuotaExceededError",
+    "map_dart_disclosure_to_domain",
+]
 
 
 def map_dart_disclosure_to_domain(disclosure: KrxDisclosure) -> NewsArticle:
@@ -55,7 +60,9 @@ def map_dart_disclosure_to_domain(disclosure: KrxDisclosure) -> NewsArticle:
     """
     disclosure_id = uuid5(DART_DISCLOSURE_NAMESPACE, disclosure.id)
 
-    content_parts = [p for p in (disclosure.company, disclosure.disclosure_type or disclosure.title) if p]
+    content_parts = [
+        p for p in (disclosure.company, disclosure.disclosure_type or disclosure.title) if p
+    ]
     content = ": ".join(content_parts) if content_parts else _EMPTY_CONTENT_FALLBACK
 
     tickers: list[Ticker] = []

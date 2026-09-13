@@ -49,7 +49,9 @@ class TestClassifyDisclosureSeverity:
         assert classify_disclosure_severity("매매거래정지") is DisclosureSeverity.HARD
 
     def test_audit_opinion_disclaimer_is_hard(self) -> None:
-        assert classify_disclosure_severity("감사보고서제출(감사의견거절)") is DisclosureSeverity.HARD
+        assert (
+            classify_disclosure_severity("감사보고서제출(감사의견거절)") is DisclosureSeverity.HARD
+        )
 
     def test_audit_opinion_adverse_is_hard(self) -> None:
         assert classify_disclosure_severity("감사보고서제출(부적정)") is DisclosureSeverity.HARD
@@ -151,7 +153,9 @@ class TestRiskGateSentimentDriven:
     def test_strongly_bearish_high_confidence_sentiment_rejects_new_entry(self) -> None:
         gate = RiskGate()
         sentiment = Sentiment.bearish(score=-0.8, confidence=0.9)
-        decision = gate.evaluate(sentiment=sentiment, has_open_position=False, is_new_entry_attempt=True)
+        decision = gate.evaluate(
+            sentiment=sentiment, has_open_position=False, is_new_entry_attempt=True
+        )
         assert decision.action == GateAction.REJECT
         assert decision.blocks_entry
         assert not decision.forces_exit
@@ -159,7 +163,9 @@ class TestRiskGateSentimentDriven:
     def test_strongly_bearish_sentiment_never_forces_exit_even_with_open_position(self) -> None:
         gate = RiskGate()
         sentiment = Sentiment.bearish(score=-0.95, confidence=0.99)
-        decision = gate.evaluate(sentiment=sentiment, has_open_position=True, is_new_entry_attempt=True)
+        decision = gate.evaluate(
+            sentiment=sentiment, has_open_position=True, is_new_entry_attempt=True
+        )
         # Entry-blocker only: a bad sentiment score, however extreme, must
         # never force-exit an existing position -- only hard-severity
         # disclosures do that.

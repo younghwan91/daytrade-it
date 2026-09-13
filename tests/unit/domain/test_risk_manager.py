@@ -97,7 +97,9 @@ class TestValidateTradeRiskGateIntegration:
         assert result.status == ValidationStatus.APPROVED
 
     def test_custom_risk_gate_is_used(self) -> None:
-        strict_gate = RiskGate(RiskGateConfig(bearish_score_threshold=-0.1, bearish_confidence_threshold=0.1))
+        strict_gate = RiskGate(
+            RiskGateConfig(bearish_score_threshold=-0.1, bearish_confidence_threshold=0.1)
+        )
         manager = RiskManager(risk_gate=strict_gate)
         mild_sentiment = Sentiment.bearish(score=-0.2, confidence=0.5)
 

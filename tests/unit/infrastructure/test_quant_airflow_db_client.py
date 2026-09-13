@@ -91,9 +91,7 @@ def _client_with_mock_cursor(rows: list[tuple]) -> tuple[QuantAirflowDBClient, M
     """Build a client whose `.connect()` returns a mock connection wired to
     return `rows` from `fetchall()`, without ever calling psycopg2.connect.
     """
-    client = QuantAirflowDBClient(
-        settings=QuantAirflowDBSettings(host="unused", password="unused")
-    )
+    client = QuantAirflowDBClient(settings=QuantAirflowDBSettings(host="unused", password="unused"))
     mock_cursor = MagicMock()
     mock_cursor.fetchall.return_value = rows
     mock_cursor.__enter__.return_value = mock_cursor
@@ -110,8 +108,28 @@ def _client_with_mock_cursor(rows: list[tuple]) -> tuple[QuantAirflowDBClient, M
 class TestAdjustedDailyBarsMapping:
     def test_maps_rows_to_dtos_in_order(self) -> None:
         rows = [
-            ("005930", dt.date(2026, 1, 2), 70000.0, 71000.0, 69500.0, 70500.0, 1_000_000, 70_000_000_000, "kiwoom"),
-            ("005930", dt.date(2026, 1, 5), 70500.0, 72000.0, 70000.0, 71800.0, 1_200_000, 85_000_000_000, "kiwoom"),
+            (
+                "005930",
+                dt.date(2026, 1, 2),
+                70000.0,
+                71000.0,
+                69500.0,
+                70500.0,
+                1_000_000,
+                70_000_000_000,
+                "kiwoom",
+            ),
+            (
+                "005930",
+                dt.date(2026, 1, 5),
+                70500.0,
+                72000.0,
+                70000.0,
+                71800.0,
+                1_200_000,
+                85_000_000_000,
+                "kiwoom",
+            ),
         ]
         client, mock_cursor = _client_with_mock_cursor(rows)
 

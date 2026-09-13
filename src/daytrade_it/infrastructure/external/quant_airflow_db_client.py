@@ -141,9 +141,7 @@ class EarningsRow(BaseModel):
 
     code: str
     period: str
-    avail_date: dt.date | None = Field(
-        default=None, description="Lookahead-safe availability date"
-    )
+    avail_date: dt.date | None = Field(default=None, description="Lookahead-safe availability date")
     netinc: float | None = None
     netinc_prior: float | None = None
     revenue: float | None = None
@@ -296,7 +294,11 @@ class QuantAirflowDBClient:
                 message="Failed to connect to quant-airflow TimescaleDB",
                 error_code=error_codes.DATABASE_CONNECTION_ERROR,
                 cause=exc,
-                details={"host": kwargs["host"], "port": kwargs["port"], "dbname": kwargs["dbname"]},
+                details={
+                    "host": kwargs["host"],
+                    "port": kwargs["port"],
+                    "dbname": kwargs["dbname"],
+                },
             ) from exc
 
         # Server-enforced read-only: any INSERT/UPDATE/DELETE/DDL on this

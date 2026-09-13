@@ -56,9 +56,10 @@ def _password_from_sibling_quant_airflow_env() -> str:
 def _test_settings() -> QuantAirflowDBSettings:
     import os
 
-    password = os.environ.get(
-        "GPTQ_QUANT_AIRFLOW_DB_PASSWORD"
-    ) or _password_from_sibling_quant_airflow_env()
+    password = (
+        os.environ.get("GPTQ_QUANT_AIRFLOW_DB_PASSWORD")
+        or _password_from_sibling_quant_airflow_env()
+    )
 
     return QuantAirflowDBSettings(
         host=os.environ.get("GPTQ_QUANT_AIRFLOW_DB_HOST", "localhost"),
@@ -190,9 +191,7 @@ class TestConsensus:
 
 
 class TestNewsJudgments:
-    def test_news_judgments_kst_conversion_on_real_rows(
-        self, client: QuantAirflowDBClient
-    ) -> None:
+    def test_news_judgments_kst_conversion_on_real_rows(self, client: QuantAirflowDBClient) -> None:
         rows = client.get_news_judgments(Ticker(value=SAMSUNG_CODE), limit=5)
         if not rows:
             pytest.skip("no news_judgments rows for 005930 in this DB snapshot")

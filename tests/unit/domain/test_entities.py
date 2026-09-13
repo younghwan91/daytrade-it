@@ -87,7 +87,7 @@ class TestNewsArticle:
             source="Reuters",
             url="https://example.com/article",
             published_at=datetime.now(UTC),
-            tickers=[Ticker(value="AAPL")],
+            tickers=[Ticker(value="005930")],
         )
         assert article.title == "Apple Reports Record Revenue"
         assert len(article.tickers) == 1
@@ -98,7 +98,7 @@ class TestTradingSignal:
 
     def test_create_buy_signal(self):
         signal = TradingSignal(
-            ticker=Ticker(value="AAPL"),
+            ticker=Ticker(value="005930"),
             direction="BUY",
             confidence=Confidence(value=0.85),
             source="NEWS",
@@ -112,7 +112,7 @@ class TestTradingSignal:
 
     def test_signal_is_expired(self):
         signal = TradingSignal(
-            ticker=Ticker(value="AAPL"),
+            ticker=Ticker(value="005930"),
             direction="BUY",
             confidence=Confidence(value=0.8),
             source="NEWS",
@@ -135,7 +135,7 @@ class TestTrade:
     def test_create_trade(self):
         trade = Trade(
             signal_id=uuid4(),
-            ticker=Ticker(value="AAPL"),
+            ticker=Ticker(value="005930"),
             direction="BUY",
             quantity=100,
             entry_price=Decimal("185.50"),
@@ -146,7 +146,7 @@ class TestTrade:
     def test_trade_fill(self):
         trade = Trade(
             signal_id=uuid4(),
-            ticker=Ticker(value="AAPL"),
+            ticker=Ticker(value="005930"),
             direction="BUY",
             quantity=100,
             entry_price=Decimal("185.50"),
@@ -160,7 +160,7 @@ class TestPosition:
 
     def test_create_position(self):
         position = Position(
-            ticker=Ticker(value="AAPL"),
+            ticker=Ticker(value="005930"),
             quantity=Decimal("100"),
             average_price=Decimal("185.50"),
             current_price=Decimal("190.00"),
@@ -171,7 +171,7 @@ class TestPosition:
 
     def test_position_pnl_calculation(self):
         position = Position(
-            ticker=Ticker(value="AAPL"),
+            ticker=Ticker(value="005930"),
             quantity=Decimal("100"),
             average_price=Decimal("100.00"),
             current_price=Decimal("110.00"),

@@ -65,7 +65,9 @@ class TradeCreateRequest(BaseModel):
 class TradeManualCreateRequest(BaseModel):
     """Request to create a manual trade (without signal)."""
 
-    ticker: str = Field(min_length=1, max_length=5, description="Stock ticker symbol")
+    ticker: str = Field(
+        min_length=6, max_length=6, description="Stock ticker (6-digit KRX code, e.g. '005930')"
+    )
     direction: SignalDirection = Field(description="BUY or SELL direction")
     quantity: Decimal = Field(gt=0, description="Number of shares to trade")
     limit_price: Decimal | None = Field(
@@ -126,8 +128,8 @@ async def list_trades(
     ticker: str | None = Query(
         default=None,
         description="Filter by stock ticker",
-        min_length=1,
-        max_length=5,
+        min_length=6,
+        max_length=6,
     ),
     status: TradeStatus | None = Query(
         default=None,
@@ -180,8 +182,8 @@ async def get_trade_summary(
     ticker: str | None = Query(
         default=None,
         description="Filter summary by ticker",
-        min_length=1,
-        max_length=5,
+        min_length=6,
+        max_length=6,
     ),
 ) -> TradeSummary:
     """Get P&L summary and trading statistics.

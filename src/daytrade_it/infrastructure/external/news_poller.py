@@ -198,7 +198,9 @@ class NewsPoller:
         try:
             return await self._dart.poll_once()
         except DartQuotaExceededError as exc:
-            logger.warning("DART quota exhausted, skipping this cycle's disclosures", error=str(exc))
+            logger.warning(
+                "DART quota exhausted, skipping this cycle's disclosures", error=str(exc)
+            )
             return []
         except DartAPIError as exc:
             logger.warning(

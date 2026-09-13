@@ -62,7 +62,7 @@ async def test_get_trade_summary_with_date_filters(async_client: AsyncClient) ->
         params={
             "date_from": "2024-01-01T00:00:00Z",
             "date_to": "2024-12-31T23:59:59Z",
-            "ticker": "AAPL",
+            "ticker": "005930",
         },
     )
 
@@ -114,7 +114,7 @@ async def test_list_trades_with_ticker_filter(async_client: AsyncClient) -> None
     """Test listing trades filtered by ticker."""
     response = await async_client.get(
         "/api/v1/trades",
-        params={"ticker": "TSLA"},
+        params={"ticker": "000660"},
     )
 
     assert response.status_code == 200

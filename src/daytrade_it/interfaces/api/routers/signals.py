@@ -51,7 +51,9 @@ class SignalResponse(BaseModel):
 class SignalCreateRequest(BaseModel):
     """Request to create a manual trading signal."""
 
-    ticker: str = Field(min_length=1, max_length=5, description="Stock ticker symbol")
+    ticker: str = Field(
+        min_length=6, max_length=6, description="Stock ticker (6-digit KRX code, e.g. '005930')"
+    )
     direction: SignalDirection = Field(description="BUY or SELL direction")
     confidence: float = Field(ge=0.0, le=1.0, description="Confidence level 0.0-1.0")
     source: SignalSource = Field(
@@ -111,8 +113,8 @@ async def list_signals(
     ticker: str | None = Query(
         default=None,
         description="Filter by stock ticker",
-        min_length=1,
-        max_length=5,
+        min_length=6,
+        max_length=6,
     ),
     min_confidence: float | None = Query(
         default=None,

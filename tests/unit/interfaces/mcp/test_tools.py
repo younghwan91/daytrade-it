@@ -167,9 +167,7 @@ async def test_backtest_tool_relays_real_handler_metrics_not_placeholder() -> No
     ctx = MCPToolContext(backtest_handler=_FakeBacktestHandler())
     MCPToolContext.set_instance(ctx)
     try:
-        result = await backtest(
-            strategy="composite", tickers=["005930"], initial_capital=100000
-        )
+        result = await backtest(strategy="composite", tickers=["005930"], initial_capital=100000)
     finally:
         MCPToolContext.set_instance(None)  # type: ignore[arg-type]
 
@@ -288,7 +286,11 @@ async def test_execute_trade_rejects_when_risk_manager_disapproves() -> None:
     MCPToolContext.set_instance(ctx)
     try:
         with pytest.raises(ValueError, match="rejected by risk gate"):
-            await execute_trade(signal_id=str(UUID(int=0)), quantity=10)
+            await execute_trade(
+                signal_id=str(UUID(int=0)),
+                order_type="LIMIT",
+                limit_price=70000.0,
+            )
     finally:
         MCPToolContext.set_instance(None)  # type: ignore[arg-type]
 
@@ -314,12 +316,148 @@ async def test_execute_trade_places_order_when_risk_manager_approves() -> None:
     )
     MCPToolContext.set_instance(ctx)
     try:
-        result = await execute_trade(signal_id=str(UUID(int=0)), quantity=10)
+        result = await execute_trade(
+            signal_id=str(UUID(int=0)),
+            order_type="LIMIT",
+            limit_price=70000.0,
+        )
     finally:
         MCPToolContext.set_instance(None)  # type: ignore[arg-type]
 
     assert len(broker.place_order_calls) == 1
     assert result.status == OrderStatusEnum.FILLED.value
+    assert broker.place_order_calls[0].quantity == Decimal("1")
+
+
+@pytest.mark.asyncio
+async def test_execute_trade_rejects_market_orders() -> None:
+    """kiwoom_broker's MARKET order-type code has never been verified
+    against Kiwoom (live or mock) -- execute_trade must refuse it outright
+    rather than let an untested code path reach the exchange."""
+    account = BrokerAccount(
+        account_id="acct-1",
+        cash=Decimal("10000000"),
+        buying_power=Decimal("10000000"),
+        equity=Decimal("10000000"),
+    )
+    broker = _FakeBroker(account=account)
+    ctx = MCPToolContext(
+        signal_repository=_make_signal_repository(),
+        broker=broker,
+        risk_manager=RiskManager(),
+    )
+    MCPToolContext.set_instance(ctx)
+    try:
+        with pytest.raises(ValueError, match="MARKET orders are disabled"):
+            await execute_trade(signal_id=str(UUID(int=0)), order_type="MARKET")
+    finally:
+        MCPToolContext.set_instance(None)  # type: ignore[arg-type]
+
+    assert broker.place_order_calls == []
+
+
+@pytest.mark.asyncio
+async def test_execute_trade_rejects_limit_price_outside_band() -> None:
+    """`_FakeBroker.get_quote` returns a reference price of 70000; a limit
+    price more than 3% away must be refused before place_order()."""
+    account = BrokerAccount(
+        account_id="acct-1",
+        cash=Decimal("10000000"),
+        buying_power=Decimal("10000000"),
+        equity=Decimal("10000000"),
+    )
+    broker = _FakeBroker(account=account)
+    ctx = MCPToolContext(
+        signal_repository=_make_signal_repository(),
+        broker=broker,
+        risk_manager=RiskManager(),
+    )
+    MCPToolContext.set_instance(ctx)
+    try:
+        with pytest.raises(ValueError, match="deviates"):
+            await execute_trade(
+                signal_id=str(UUID(int=0)),
+                order_type="LIMIT",
+                limit_price=100000.0,  # ~43% above the 70000 reference
+            )
+    finally:
+        MCPToolContext.set_instance(None)  # type: ignore[arg-type]
+
+    assert broker.place_order_calls == []
+
+
+@pytest.mark.asyncio
+async def test_execute_trade_rejects_duplicate_entry() -> None:
+    """Already holding the signal's ticker must refuse a second BUY entry
+    (scalp-it C-2/C-3 pattern) -- close_position is the exit path, not a
+    second execute_trade call."""
+    account = BrokerAccount(
+        account_id="acct-1",
+        cash=Decimal("10000000"),
+        buying_power=Decimal("10000000"),
+        equity=Decimal("10000000"),
+    )
+    broker = _FakeBroker(account=account)
+
+    class _ExistingPosition:
+        ticker = "005930"
+        quantity = Decimal("1")
+
+    broker.get_positions = lambda: [_ExistingPosition()]  # type: ignore[method-assign]
+
+    ctx = MCPToolContext(
+        signal_repository=_make_signal_repository(),
+        broker=broker,
+        risk_manager=RiskManager(),
+    )
+    MCPToolContext.set_instance(ctx)
+    try:
+        with pytest.raises(ValueError, match="Already holding"):
+            await execute_trade(
+                signal_id=str(UUID(int=0)),
+                order_type="LIMIT",
+                limit_price=70000.0,
+            )
+    finally:
+        MCPToolContext.set_instance(None)  # type: ignore[arg-type]
+
+    assert broker.place_order_calls == []
+
+
+@pytest.mark.asyncio
+async def test_execute_trade_refuses_when_kill_switch_active(tmp_path, monkeypatch) -> None:  # noqa: ANN001
+    """`_KILL_SWITCH_PATH` existing must refuse every order, before any
+    other check runs."""
+    from daytrade_it.interfaces.mcp import tools as tools_module
+
+    kill_switch = tmp_path / "live_STOP"
+    kill_switch.write_text("stop")
+    monkeypatch.setattr(tools_module, "_KILL_SWITCH_PATH", kill_switch)
+
+    account = BrokerAccount(
+        account_id="acct-1",
+        cash=Decimal("10000000"),
+        buying_power=Decimal("10000000"),
+        equity=Decimal("10000000"),
+    )
+    broker = _FakeBroker(account=account)
+    ctx = MCPToolContext(
+        signal_repository=_make_signal_repository(),
+        broker=broker,
+        risk_manager=RiskManager(),
+    )
+    MCPToolContext.set_instance(ctx)
+    try:
+        with pytest.raises(ValueError, match="Kill switch active"):
+            await execute_trade(
+                signal_id=str(UUID(int=0)),
+                order_type="LIMIT",
+                limit_price=70000.0,
+            )
+    finally:
+        MCPToolContext.set_instance(None)  # type: ignore[arg-type]
+
+    assert broker.place_order_calls == []
 
 
 @pytest.mark.asyncio

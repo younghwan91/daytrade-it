@@ -32,7 +32,7 @@ import json
 import logging
 import time
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from krx_news_client import TossScraper
@@ -59,7 +59,7 @@ async def poll_once(scraper: TossScraper, seen_ids: set[str]) -> dict:
     lib_logger.addHandler(capture)
 
     started = time.monotonic()
-    ts = datetime.now(timezone.utc).isoformat()
+    ts = datetime.now(UTC).isoformat()
     result: dict = {"timestamp": ts}
 
     try:

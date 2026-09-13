@@ -819,25 +819,81 @@ def _risk_manager_positions_from_broker(positions: list[Any]) -> list[Any]:
     return mapped
 
 
+#: Hard operational cap for the first live-order rollout (user directive
+#: 2026-09-13: "종목마다 1주 매매씩만"). The caller's requested `quantity`
+#: is never used to size the order -- mirrors scalp-it's C-3 audit finding
+#: (`docs/research/manju/41-order-safety-audit.md`: "수량은 상수 1로 고정,
+#: 외부 입력에서 절대 유도하지 말 것"). The old "2% of equity" auto-sizer
+#: this replaced could have produced a many-share order on a low-priced
+#: ticker with no cap at all. Raise this only via a reviewed code change,
+#: never a runtime parameter.
+_LIVE_TRADE_QUANTITY = 1
+
+#: Reject a LIMIT order whose price differs from the current quote's
+#: reference price by more than this fraction -- scalp-it's C-4 finding
+#: (stale/zero/wrong-direction reference price reaching the exchange as a
+#: garbage limit price). Kiwoom's own sign convention on quote fields
+#: (`+`/`-` = direction vs. previous close, not the price's own sign) was
+#: found live-broken in `kiwoom_broker._to_decimal` while wiring this check
+#: (2026-09-13, fixed) -- this band would otherwise have compared against
+#: a negative reference price.
+_LIVE_TRADE_PRICE_BAND_PCT = Decimal("0.03")
+
+#: Read-only kill switch: if this file exists, execute_trade refuses every
+#: order regardless of signal/risk-gate result. Mirrors scalp-it's
+#: `data/pair_STOP`. Created/removed by a human, never by this code.
+_KILL_SWITCH_PATH = Path("data/live_STOP")
+
+
+def _kill_switch_active() -> bool:
+    return _KILL_SWITCH_PATH.exists()
+
+
 @mcp_tool(
     name="execute_trade",
     description="Execute a trade based on a trading signal",
 )
 async def execute_trade(
     signal_id: Annotated[str, "UUID of the trading signal to execute"],
-    quantity: Annotated[int | None, "Number of shares (주, None = auto-size)"] = None,
-    order_type: Annotated[str, "Order type (MARKET/LIMIT)"] = "MARKET",
-    limit_price: Annotated[float | None, "Limit price (required for LIMIT orders)"] = None,
+    quantity: Annotated[
+        int | None,
+        "IGNORED as of 2026-09-13 -- every live order is hard-capped to "
+        f"{_LIVE_TRADE_QUANTITY} share regardless of this value.",
+    ] = None,
+    order_type: Annotated[str, "Order type -- LIMIT only (see docstring)"] = "LIMIT",
+    limit_price: Annotated[float | None, "Limit price (required -- MARKET is disabled)"] = None,
 ) -> TradeResult:
-    """Execute a trade based on a signal.
+    """Execute a trade based on a signal, hard-capped to one share.
 
-    If quantity is not specified, position sizing will be calculated
-    based on risk management rules.
+    Deliberately NOT "auto-sized": every order this tool places uses
+    `_LIVE_TRADE_QUANTITY` (1), never a caller-supplied or account-equity
+    derived quantity -- see that constant's docstring.
+
+    MARKET orders are refused. `kiwoom_broker._ORDER_TYPE_MARKET` ("03")
+    is explicitly flagged unverified in that module's docstring -- nothing
+    has ever exercised it against Kiwoom, live or mock. LIMIT is the only
+    order type scalp-it has ever placed for the same reason.
+
+    A LIMIT order is further rejected if `limit_price` is more than
+    `_LIVE_TRADE_PRICE_BAND_PCT` away from the ticker's current quote, and
+    every order is refused outright if `_KILL_SWITCH_PATH` exists.
     """
     ctx = _get_context()
 
     if not ctx.signal_repository or not ctx.broker:
         raise ValueError("Signal repository and broker must be configured")
+
+    if _kill_switch_active():
+        raise ValueError(f"Kill switch active ({_KILL_SWITCH_PATH}) -- no orders will be placed")
+
+    if order_type.upper() != "LIMIT":
+        raise ValueError(
+            "MARKET orders are disabled: kiwoom_broker's market order-type code "
+            "('03') has never been verified against Kiwoom, live or mock. "
+            "Use LIMIT with an explicit limit_price."
+        )
+    if limit_price is None:
+        raise ValueError("limit_price is required (MARKET orders are disabled)")
 
     # Parse signal ID
     sig_uuid = UUID(signal_id)
@@ -854,19 +910,48 @@ async def execute_trade(
     from daytrade_it.infrastructure.brokers.base import Order, OrderSide, OrderType
 
     side = OrderSide.BUY if signal.direction.value == "BUY" else OrderSide.SELL
-    otype = OrderType.LIMIT if order_type.upper() == "LIMIT" else OrderType.MARKET
+    otype = OrderType.LIMIT
 
-    # Auto-size if quantity not provided
-    if quantity is None:
-        # Use 2% of portfolio value as default position size
-        account = ctx.broker.get_account()
-        quote = ctx.broker.get_quote(signal.ticker.value)
-        price = quote.last_price or quote.mid_price
-        if price > 0:
-            position_value = account.equity * Decimal("0.02")
-            quantity = int(position_value / price)
-        else:
-            quantity = 1
+    quantity = _LIVE_TRADE_QUANTITY
+
+    # Price-sanity band (scalp-it C-4): compare the requested limit price
+    # against the ticker's current quote before it ever reaches the
+    # exchange. Fail-closed if no reference price is available at all --
+    # a limit order with no sanity check behind it is exactly what this
+    # gate exists to prevent, not a case to silently let through.
+    quote = ctx.broker.get_quote(signal.ticker.value)
+    reference_price = quote.last_price or quote.mid_price
+    if not reference_price or reference_price <= 0:
+        raise ValueError(
+            f"No usable reference price for {signal.ticker.value} "
+            f"(quote={quote!r}) -- refusing to place an unchecked limit order"
+        )
+    price_decimal = Decimal(str(limit_price))
+    deviation = abs(price_decimal / reference_price - 1)
+    if deviation > _LIVE_TRADE_PRICE_BAND_PCT:
+        raise ValueError(
+            f"limit_price {price_decimal} deviates {deviation:.1%} from reference "
+            f"{reference_price} (band: {_LIVE_TRADE_PRICE_BAND_PCT:.0%})"
+        )
+
+    # Duplicate-entry guard (scalp-it C-2/C-3 pattern, applied here since
+    # this tool has no separate blocklist layer): refuse to open a second
+    # position in a ticker we already hold. Fail-closed -- if the
+    # positions lookup itself fails, that's treated the same as "already
+    # holding" rather than silently proceeding, since we cannot prove the
+    # opposite.
+    if side == OrderSide.BUY:
+        try:
+            current_positions_raw = ctx.broker.get_positions()
+        except Exception as exc:
+            raise ValueError(
+                f"Could not verify current positions before entry (fail-closed): {exc}"
+            ) from exc
+        if any(p.ticker == signal.ticker.value and p.quantity > 0 for p in current_positions_raw):
+            raise ValueError(
+                f"Already holding {signal.ticker.value} -- refusing duplicate entry "
+                "(use close_position to exit first)"
+            )
 
     # Risk-gate check (whole-branch review finding #4): RiskManager/RiskGate
     # (Task 11's flagship deliverable) had zero production call sites --

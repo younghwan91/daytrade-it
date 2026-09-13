@@ -162,7 +162,7 @@ def mock_db_session() -> AsyncMock:
 def sample_signal_payload() -> dict[str, Any]:
     """Sample valid signal creation payload."""
     return {
-        "ticker": "AAPL",
+        "ticker": "005930",
         "direction": "BUY",
         "confidence": 0.85,
         "source": "COMPOSITE",

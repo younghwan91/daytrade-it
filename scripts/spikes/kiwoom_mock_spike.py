@@ -90,9 +90,7 @@ def run_live_spike(app_key: str, app_secret: str, account_no: str | None) -> dic
     api = KiwoomAPI(app_key=app_key, app_secret=app_secret, is_mock=True)
     try:
         login_resp = api.login()
-        findings["steps"].append(
-            {"step": "login", "response_keys": sorted(login_resp.keys())}
-        )
+        findings["steps"].append({"step": "login", "response_keys": sorted(login_resp.keys())})
 
         # Account: 예수금상세현황요청 (kt00001)
         deposit_resp = api.account.deposit_detail(qry_tp="3")
@@ -121,9 +119,7 @@ def run_live_spike(app_key: str, app_secret: str, account_no: str | None) -> dic
             trde_tp="00",
             ord_uv="1000",
         )
-        findings["steps"].append(
-            {"step": "order.buy_order (kt10000)", "response": buy_resp}
-        )
+        findings["steps"].append({"step": "order.buy_order (kt10000)", "response": buy_resp})
 
         ord_no = buy_resp.get("ord_no")
         if ord_no:

@@ -89,9 +89,7 @@ class TestNewsPollerHappyPath:
 
 class TestNewsPollerCircuitBreaker:
     async def test_circuit_stays_closed_below_failure_threshold(self) -> None:
-        toss = FakeTossClient(
-            responses=[RuntimeError("fail-1"), RuntimeError("fail-2")]
-        )
+        toss = FakeTossClient(responses=[RuntimeError("fail-1"), RuntimeError("fail-2")])
         dart = FakeDartClient()
         poller = NewsPoller(toss_client=toss, dart_client=dart, failure_threshold=3)
 

@@ -127,18 +127,24 @@ def _to_decimal(value: Any, default: str = "0") -> Decimal:
     """Best-effort conversion of a raw Kiwoom response field to Decimal.
 
     Kiwoom's REST responses represent numeric fields as strings, sometimes
-    with a leading sign (`"+70000"`) or thousands separators (`"1,234,567"`)
-    per the README's explicit note. Never raises -- falls back to `default`
-    for missing/unparseable values, since kiwoom-client does no validation
-    and a missing field should not crash the whole account/quote mapping.
+    with a leading `+`/`-` sign or thousands separators (`"1,234,567"`) per
+    the README's explicit note. **The sign encodes direction vs. the
+    reference/previous-close price (등락 방향), not an actual negative
+    price or quantity** -- verified live 2026-09-13 against a real
+    `get_quote("005930")` call, which returned `buy_fpr_bid`/`sel_fpr_bid`
+    both negative-prefixed for a price below the reference point (a real
+    KRX price/quantity is never negative). `scalp-it`'s
+    `adapters/kiwoom.py.strip_sign()` handles this the same way
+    (`.lstrip("+-")`) across every signed field it reads. Never raises --
+    falls back to `default` for missing/unparseable values, since
+    kiwoom-client does no validation and a missing field should not crash
+    the whole account/quote mapping.
     """
     if value is None or value == "":
         return Decimal(default)
     if isinstance(value, Decimal):
         return value
-    text = str(value).strip().replace(",", "")
-    if text.startswith("+"):
-        text = text[1:]
+    text = str(value).strip().replace(",", "").lstrip("+-")
     try:
         return Decimal(text)
     except InvalidOperation:
@@ -207,9 +213,7 @@ class KiwoomBroker(BrokerInterface):
         try:
             deposit = self._api.account.deposit_detail(qry_tp="3")
         except Exception as exc:
-            raise BrokerError(
-                f"Kiwoom get_account failed: {exc}", broker_name="kiwoom"
-            ) from exc
+            raise BrokerError(f"Kiwoom get_account failed: {exc}", broker_name="kiwoom") from exc
         return self._map_account(deposit)
 
     def get_positions(self) -> list[Position]:
@@ -217,9 +221,7 @@ class KiwoomBroker(BrokerInterface):
         try:
             raw = self._api.account.filled_position(dmst_stex_tp="KRX")
         except Exception as exc:
-            raise BrokerError(
-                f"Kiwoom get_positions failed: {exc}", broker_name="kiwoom"
-            ) from exc
+            raise BrokerError(f"Kiwoom get_positions failed: {exc}", broker_name="kiwoom") from exc
         rows = self._extract_rows(raw)
         return [self._map_position(row) for row in rows]
 
@@ -258,9 +260,7 @@ class KiwoomBroker(BrokerInterface):
         """
         self._ensure_connected()
         try:
-            unfilled = self._api.account.unfilled_orders(
-                all_stk_tp="0", trde_tp="0", stex_tp="0"
-            )
+            unfilled = self._api.account.unfilled_orders(all_stk_tp="0", trde_tp="0", stex_tp="0")
         except Exception as exc:
             logger.error("kiwoom_broker: cancel_order(%s) lookup failed: %s", order_id, exc)
             return False
@@ -270,7 +270,9 @@ class KiwoomBroker(BrokerInterface):
             None,
         )
         if row is None:
-            logger.error("kiwoom_broker: cancel_order(%s): order not found in unfilled_orders", order_id)
+            logger.error(
+                "kiwoom_broker: cancel_order(%s): order not found in unfilled_orders", order_id
+            )
             return False
 
         kwargs = {
@@ -290,9 +292,7 @@ class KiwoomBroker(BrokerInterface):
     def get_order_status(self, order_id: str) -> OrderStatus:
         self._ensure_connected()
         try:
-            raw = self._api.account.unfilled_orders(
-                all_stk_tp="0", trde_tp="0", stex_tp="0"
-            )
+            raw = self._api.account.unfilled_orders(all_stk_tp="0", trde_tp="0", stex_tp="0")
         except Exception as exc:
             raise BrokerError(
                 f"Kiwoom get_order_status failed: {exc}", broker_name="kiwoom"
@@ -302,18 +302,14 @@ class KiwoomBroker(BrokerInterface):
             if str(row.get("ord_no", "")) == str(order_id):
                 return self._map_order_status(order_id, row)
 
-        raise BrokerError(
-            f"Order not found: {order_id}", broker_name="kiwoom"
-        )
+        raise BrokerError(f"Order not found: {order_id}", broker_name="kiwoom")
 
     def get_quote(self, ticker: str) -> Quote:
         self._ensure_connected()
         try:
             raw = self._api.market.stock_quote(stk_cd=ticker)
         except Exception as exc:
-            raise BrokerError(
-                f"Kiwoom get_quote failed: {exc}", broker_name="kiwoom"
-            ) from exc
+            raise BrokerError(f"Kiwoom get_quote failed: {exc}", broker_name="kiwoom") from exc
         return self._map_quote(ticker, raw)
 
     # -- Request builders ------------------------------------------------------

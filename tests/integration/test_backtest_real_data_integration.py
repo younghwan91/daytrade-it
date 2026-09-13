@@ -50,9 +50,10 @@ def _password_from_sibling_quant_airflow_env() -> str:
 def _test_settings() -> QuantAirflowDBSettings:
     import os
 
-    password = os.environ.get(
-        "GPTQ_QUANT_AIRFLOW_DB_PASSWORD"
-    ) or _password_from_sibling_quant_airflow_env()
+    password = (
+        os.environ.get("GPTQ_QUANT_AIRFLOW_DB_PASSWORD")
+        or _password_from_sibling_quant_airflow_env()
+    )
 
     return QuantAirflowDBSettings(
         host=os.environ.get("GPTQ_QUANT_AIRFLOW_DB_HOST", "localhost"),
@@ -158,8 +159,7 @@ class TestRealBacktestRun:
                 continue
             gross_pnl = (trade.exit_price - trade.entry_price) * trade.quantity
             assert trade.pnl != gross_pnl, (
-                "trade.pnl should differ from cost-free gross P&L once "
-                "commission/tax are deducted"
+                "trade.pnl should differ from cost-free gross P&L once commission/tax are deducted"
             )
 
     async def test_backtest_result_is_not_placeholder_via_mcp_tool(self) -> None:
