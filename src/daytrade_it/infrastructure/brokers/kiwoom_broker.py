@@ -215,17 +215,22 @@ class KiwoomBroker(BrokerInterface):
         return True
 
     def disconnect(self) -> None:
-        """Log out and close the underlying HTTP client."""
+        """Close the HTTP client. Deliberately does NOT log out (revoke the token).
+
+        Kiwoom hands every process the *same* access token for an appkey
+        while it is valid (verified 2026-09-13: issuing twice returned an
+        identical token, and the first kept working). scalp-it trades live
+        on the same appkey, and it only refreshes on HTTP 401 while Kiwoom
+        reports a bad token as HTTP 200 + 8005, with no retry at all on
+        orders. Revoking here -- at preopen check exit, every crash-restart,
+        and the 15:20 stop -- would kill scalp-it's live session. The token
+        simply expires on its own.
+        """
         try:
-            self._api.logout()
-        except Exception as exc:  # noqa: BLE001 - logout is best-effort on disconnect
-            logger.warning("kiwoom_broker: logout failed during disconnect: %s", exc)
-        finally:
-            try:
-                self._api.close()
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("kiwoom_broker: close() failed during disconnect: %s", exc)
-            self._connected = False
+            self._api.close()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("kiwoom_broker: close() failed during disconnect: %s", exc)
+        self._connected = False
 
     @property
     def is_connected(self) -> bool:

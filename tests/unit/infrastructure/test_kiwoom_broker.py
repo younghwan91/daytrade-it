@@ -171,11 +171,13 @@ class TestConnect:
         assert broker.connect() is False
         assert broker.is_connected is False
 
-    def test_disconnect_logs_out_and_closes(
+    def test_disconnect_closes_without_revoking_shared_token(
         self, broker: KiwoomBroker, fake_api: _FakeKiwoomAPI
     ) -> None:
+        """The token is shared with scalp-it's live process on the same
+        appkey; revoking it on disconnect would break their orders."""
         broker.disconnect()
-        assert fake_api.logout_called is True
+        assert fake_api.logout_called is False
         assert fake_api.close_called is True
         assert broker.is_connected is False
 
