@@ -6,6 +6,8 @@ Command-line interface for the trading system.
 
 import typer
 
+from daytrade_it.shared.runtime_host import require_backtest_host
+
 app = typer.Typer(
     name="gptq",
     help="GPT Quant v2 - AI-Agent-Friendly Trading System CLI",
@@ -59,6 +61,11 @@ def backtest(
     """
     Run a backtest on a strategy.
     """
+    try:
+        require_backtest_host()
+    except RuntimeError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
     typer.echo("📈 Running backtest...")
     typer.echo(f"   Strategy: {strategy}")
     typer.echo(f"   Period: {start} to {end}")

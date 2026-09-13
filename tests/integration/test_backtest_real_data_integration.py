@@ -162,13 +162,17 @@ class TestRealBacktestRun:
                 "trade.pnl should differ from cost-free gross P&L once commission/tax are deducted"
             )
 
-    async def test_backtest_result_is_not_placeholder_via_mcp_tool(self) -> None:
+    async def test_backtest_result_is_not_placeholder_via_mcp_tool(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Regression guard: interfaces/mcp/tools.py's backtest() must
         return is_placeholder=False for a real run against real data,
         with metrics relayed verbatim from the handler.
         """
         from daytrade_it.interfaces.mcp.tools import MCPToolContext, backtest
 
+        # The tool refuses non-simnode hosts; this test exercises relaying.
+        monkeypatch.setattr("daytrade_it.shared.runtime_host.socket.gethostname", lambda: "simnode")
         ctx = MCPToolContext(
             backtest_handler=BacktestHandler(
                 market_data_client=QuantAirflowDBClient(settings=_SETTINGS)

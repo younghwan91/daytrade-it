@@ -115,7 +115,9 @@ async def test_backtest_tool_requires_tickers() -> None:
 
 
 @pytest.mark.asyncio
-async def test_backtest_tool_relays_real_handler_metrics_not_placeholder() -> None:
+async def test_backtest_tool_relays_real_handler_metrics_not_placeholder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """As of Task 13 (Phase 5), `backtest()` is wired to a real
     `BacktestHandler` and must relay its computed metrics verbatim, with
     `is_placeholder=False` -- the caller-visible signal (per the Task 12
@@ -164,6 +166,7 @@ async def test_backtest_tool_relays_real_handler_metrics_not_placeholder() -> No
                 equity_curve=[],
             )
 
+    monkeypatch.setattr("daytrade_it.shared.runtime_host.socket.gethostname", lambda: "simnode")
     ctx = MCPToolContext(backtest_handler=_FakeBacktestHandler())
     MCPToolContext.set_instance(ctx)
     try:

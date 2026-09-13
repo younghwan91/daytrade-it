@@ -19,6 +19,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
+from daytrade_it.shared.runtime_host import require_backtest_host
+
 if TYPE_CHECKING:
     from daytrade_it.application.container import Container
 
@@ -1269,6 +1271,8 @@ async def backtest(
         if end_date
         else datetime.now(UTC)
     )
+
+    require_backtest_host()
 
     ctx = _get_context()
     if ctx.backtest_handler is None:
