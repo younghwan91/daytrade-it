@@ -15,6 +15,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -53,7 +54,12 @@ class NewsArticleModel(Base):
     published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     # Stored as JSON array of ticker strings
-    tickers: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    # JSONB, not plain JSON: this column carries a GIN index below, and
+    # Postgres GIN has no default operator class for plain `json` (only
+    # `jsonb`) -- found while running the first-ever migration against a
+    # real Postgres instance, 2026-09-13 (CREATE INDEX ... USING gin
+    # failed with "data type json has no default operator class").
+    tickers: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
 
     # Sentiment stored as JSON object
     sentiment_score: Mapped[float | None] = mapped_column(Numeric(4, 3), nullable=True)

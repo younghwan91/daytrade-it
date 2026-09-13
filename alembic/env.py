@@ -5,24 +5,34 @@ This module configures how Alembic runs migrations.
 """
 
 import asyncio
+import os
+import sys
 from logging.config import fileConfig
+from pathlib import Path
 
 from alembic import context
 from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
-# Import your models' MetaData object for 'autogenerate' support
-# from gpt_quant_v2.infrastructure.persistence.models import Base
-# target_metadata = Base.metadata
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-# For now, use None until models are ready
-target_metadata = None
+from daytrade_it.infrastructure.persistence.models import Base  # noqa: E402
+
+target_metadata = Base.metadata
 
 config = context.config
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
+
+# Prefer GPTQ_DATABASE_URL (same env var the app itself reads via
+# `shared.config.settings.DatabaseSettings`) over alembic.ini's hardcoded
+# placeholder, so `alembic upgrade head` targets whatever database the app
+# is actually configured against rather than a stale default.
+_env_db_url = os.environ.get("GPTQ_DATABASE_URL")
+if _env_db_url:
+    config.set_main_option("sqlalchemy.url", _env_db_url)
 
 
 def run_migrations_offline() -> None:
