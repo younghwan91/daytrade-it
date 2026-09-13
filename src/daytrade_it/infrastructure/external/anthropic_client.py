@@ -1,31 +1,27 @@
 """Anthropic (Claude) news-material scorer.
 
-Ports the fixed-schema extraction design from the sibling repo `scalp-it`
-(`src/scalp_it/score/{schema,prompt,provider}.py`) rather than reusing
-`openai_client.py`'s "ask the LLM to output BULLISH/BEARISH directly"
-design. scalp-it's approach is deliberately more disciplined: the LLM only
-*extracts facts* about the article (material type, how persistent/specific/
-fresh/large it is, and its direction+strength) under a prompt that
-explicitly forbids trading-judgment language ("수익률", "매수", "목표주가",
-etc. -- see scalp-it's `FORBIDDEN_PROMPT_TERMS`); a separate, deterministic
-formula turns those facts into a score. That keeps the LLM call auditable
-and re-scoreable without re-prompting, and avoids asking it to reason
-about tradeability directly (a harder, less reliable ask than "what does
-this specific fact mean").
+Fixed-schema fact extraction, ported from scalp-it's `score/` package: the
+LLM only fills fields about the article, under a prompt with no trading-
+judgment language; a deterministic formula turns the fields into a score.
 
-Deliberate deviation from scalp-it: scalp-it feeds only the article's first
-200 chars (`body200`) into the prompt, matching the 200-char BigKinds
-snippets it originally trained scoring consistency against. daytrade-it has
-no such legacy-training constraint, so this module accepts whatever text is
-available (Toss currently gives ~300-char summaries only -- see
-`toss_news_client.py` and 2026-09-13's session notes; full original-article
-fetching was investigated and deferred, see that session's summary) under
-the same field name (`body200`) the prompt template expects.
+Prompt `v2` (2026-09-13) is the version that was measured against real
+outcomes -- see `docs/research/2026-09-13-news-prompt-eval.md` and
+`scripts/eval/eval_news_prompts.py`, which holds the identical prompt text.
+Changes from the scalp-it port (`v1`), each backed by that eval:
 
-No Anthropic SDK dependency, mirroring scalp-it's `score/provider.py`: the
-only thing used is "system + user -> JSON text", which is a ~20-line raw
-httpx call, and pulling in a whole SDK for that isn't worth the install
-weight for a public-facing repo.
+- The prompt names the company (name, market, sector), not just the
+  6-digit code. The model cannot reliably tell that 088350 is 한화생명.
+- `subject` (main/partial/mention): Toss tags every company an article
+  touches. On the dev split, `mention` pairs had ~0 excess return vs +2.2%
+  for `main`; they score 0.
+- `reports_price_move` and `surprise` are recorded but NOT used in the
+  score -- dropping price-move reports hurt on dev, and surprise changed
+  nothing. Kept for later analysis.
+- A direct "how will it trade" prompt (v3) scored worse than the
+  all-articles baseline, so judgment stays in code, not in the prompt.
+
+Toss gives only ~300-char summaries; full article text isn't fetched.
+No SDK dependency: a raw httpx call, same as scalp-it's provider.
 """
 
 from __future__ import annotations
@@ -37,14 +33,15 @@ from typing import Any
 
 import httpx
 
-from daytrade_it.domain.entities.news import NewsArticle
 from daytrade_it.domain.value_objects import Sentiment, SentimentLabel
 from daytrade_it.shared.errors.exceptions import ExternalAPIError
 from daytrade_it.shared.logging import get_logger
 
 logger = get_logger(__name__)
 
-# --- Fixed schema (ported from scalp-it's score/schema.py) -----------------
+PROMPT_VERSION = "v2"
+
+# --- Fixed schema -----------------------------------------------------------
 
 MATERIAL_TYPES: tuple[str, ...] = (
     "수주",
@@ -57,11 +54,13 @@ MATERIAL_TYPES: tuple[str, ...] = (
     "지분",
     "기타",
 )
+SUBJECT_LEVELS: tuple[str, ...] = ("main", "partial", "mention")
 PERSISTENCE_LEVELS: tuple[str, ...] = ("one_off", "multi_quarter", "structural")
 FRESHNESS_LEVELS: tuple[str, ...] = ("repeat", "follow_up", "new")
 SCALE_LEVELS: tuple[str, ...] = ("unknown", "small", "medium", "large")
 
 _CATEGORICAL = {
+    "subject": SUBJECT_LEVELS,
     "material_type": MATERIAL_TYPES,
     "persistence": PERSISTENCE_LEVELS,
     "freshness": FRESHNESS_LEVELS,
@@ -69,16 +68,12 @@ _CATEGORICAL = {
 }
 _NUMERIC = {
     "specificity": (0, 1, 2, 3),
+    "surprise": (0, 1, 2),
     "sentiment_direction": (-1, 0, 1),
     "sentiment_strength": (0, 1, 2, 3),
 }
+_BOOLEAN = ("reports_price_move",)
 
-#: Normalization divisors -- ported from scalp-it's `llm_material_score`
-#: weights (persistence 0.5, scale 0.3, specificity 0.2) but re-derived
-#: here as a [0, 1] magnitude (scalp-it feeds its weighted sum straight
-#: into an ML model as a raw feature and never needs it bounded; this
-#: module needs a bounded magnitude to build a domain `Sentiment.score`
-#: in [-1, 1]). Divisor is each level's max encoded value.
 _PERSISTENCE_SCORE = {"one_off": 0.0, "multi_quarter": 1.0, "structural": 2.0}
 _FRESHNESS_SCORE = {"repeat": 0.0, "follow_up": 1.0, "new": 2.0}
 _SCALE_SCORE = {"unknown": 0.0, "small": 1.0, "medium": 2.0, "large": 3.0}
@@ -89,6 +84,11 @@ _MAGNITUDE_MAX = (
     + _MAGNITUDE_WEIGHTS["specificity"] * max(_NUMERIC["specificity"])
 )
 
+#: |score| above this is BULLISH/BEARISH. It is also the BUY threshold the
+#: eval used, which works because `SignalGenerator.generate_from_news()`
+#: returns nothing for a NEUTRAL sentiment.
+SIGNAL_THRESHOLD = 0.15
+
 
 class SchemaError(ValueError):
     """LLM output didn't match the fixed schema -- caller's cue to retry."""
@@ -96,23 +96,21 @@ class SchemaError(ValueError):
 
 @dataclass(frozen=True)
 class ArticleFeatures:
-    """The 7 fixed fields extracted from one article (scalp-it's schema)."""
+    """Fields extracted from one (article, company) pair."""
 
+    subject: str
+    reports_price_move: bool
     material_type: str
     persistence: str
     specificity: int
     freshness: str
+    surprise: int
     sentiment_direction: int
     sentiment_strength: int
     scale_vs_size: str
 
     def magnitude(self) -> float:
-        """How large/durable/specific this material is, in [0, 1].
-
-        Deliberately excludes direction -- this is "how much does it
-        matter", combined with `sentiment_direction` separately in
-        `to_sentiment()` to get a signed score.
-        """
+        """How large/durable/specific the material is, in [0, 1]."""
         raw = (
             _MAGNITUDE_WEIGHTS["persistence"] * _PERSISTENCE_SCORE[self.persistence]
             + _MAGNITUDE_WEIGHTS["scale"] * _SCALE_SCORE[self.scale_vs_size]
@@ -120,35 +118,32 @@ class ArticleFeatures:
         )
         return raw / _MAGNITUDE_MAX
 
+    def score(self) -> float:
+        """Signed material score in [-1, 1] -- the evaluated v2 rule."""
+        if self.subject == "mention":
+            return 0.0
+        s = self.sentiment_direction * (self.sentiment_strength / 3.0)
+        s *= 0.5 + 0.5 * self.magnitude()
+        if self.freshness == "repeat":
+            s *= 0.5
+        return max(-1.0, min(1.0, s))
+
     def to_sentiment(self) -> Sentiment:
-        """Map the fixed schema onto the domain `Sentiment` value object.
+        """Map onto the domain `Sentiment`.
 
-        - score: direction * magnitude, in [-1, 1] (direction from the
-          article's own stated sentiment_direction/strength; magnitude
-          from persistence/scale/specificity -- "how big and durable",
-          not "how positive-sounding").
-        - confidence: how concretely sourced the claim is (specificity)
-          and how new it is (freshness) -- NOT how strong the sentiment
-          is. A large but vague rumor should score low confidence even if
-          `sentiment_strength` is high.
+        `confidence` is informational only (specificity + freshness). The
+        poller runs `SignalGenerator` with `min_confidence=0` so that the
+        BUY set is exactly `score() > SIGNAL_THRESHOLD`, which is what was
+        measured -- a second confidence gate was never evaluated.
         """
-        direction_score = self.sentiment_direction * (self.sentiment_strength / 3.0)
-        score = max(-1.0, min(1.0, direction_score * (0.5 + 0.5 * self.magnitude())))
-
-        confidence = max(
-            0.0,
-            min(
-                1.0, 0.5 * (self.specificity / 3.0) + 0.5 * (_FRESHNESS_SCORE[self.freshness] / 2.0)
-            ),
-        )
-
-        if score > 0.15:
+        score = self.score()
+        confidence = 0.5 * (self.specificity / 3.0) + 0.5 * (_FRESHNESS_SCORE[self.freshness] / 2.0)
+        if score > SIGNAL_THRESHOLD:
             label = SentimentLabel.BULLISH
-        elif score < -0.15:
+        elif score < -SIGNAL_THRESHOLD:
             label = SentimentLabel.BEARISH
         else:
             label = SentimentLabel.NEUTRAL
-
         return Sentiment(score=score, label=label, confidence=confidence)
 
 
@@ -179,6 +174,15 @@ def _as_int(name: str, value: object) -> int:
         raise SchemaError(f"{name} is not an int: {value!r}") from exc
 
 
+def _as_bool(name: str, value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in ("true", "false"):
+        return text == "true"
+    raise SchemaError(f"{name} is not a bool: {value!r}")
+
+
 def parse_features(raw: str | dict[str, Any]) -> ArticleFeatures:
     payload = raw if isinstance(raw, dict) else _extract_json_object(raw)
 
@@ -197,11 +201,13 @@ def parse_features(raw: str | dict[str, Any]) -> ArticleFeatures:
         if number not in allowed_numbers:
             raise SchemaError(f"{name} outside allowed range: {number}")
         values[name] = number
+    for name in _BOOLEAN:
+        values[name] = _as_bool(name, payload[name])
 
     return ArticleFeatures(**values)
 
 
-# --- Prompt (ported from scalp-it's score/prompt.py) ------------------------
+# --- Prompt (identical to USER_V2 in scripts/eval/eval_news_prompts.py) -----
 
 _SYSTEM = """너는 한국 상장사 기사에서 고정 스키마 필드를 채우는 추출기다.
 
@@ -211,32 +217,49 @@ _SYSTEM = """너는 한국 상장사 기사에서 고정 스키마 필드를 채
 - 근거가 없으면 가장 보수적인 값(unknown 또는 0)을 고른다.
 - 출력은 JSON 객체 하나뿐이다. 코드펜스·설명·주석을 붙이지 않는다."""
 
-_USER_TEMPLATE = """다음은 종목코드 {code} 관련 기사다.
+_USER_TEMPLATE = """다음은 {name}({code}, {market}, 업종: {sector}) 관련으로 분류된 기사다.
 
 제목: {title}
-본문: {body200}
-키워드: {keywords}
+본문(요약): {body}
+분류: {category}
 
-아래 7개 필드를 채운 JSON 객체 하나만 출력하라.
+아래 필드를 채운 JSON 객체 하나만 출력하라. 모든 판단은 **{name}** 기준이다.
 
+subject: 이 기사에서 {name}의 비중. main(기사의 주인공) / partial(여러 회사 중 하나로 비중 있게 다룸) / mention(업계 나열·지나가는 언급·다른 회사가 주인공)
+reports_price_move: 기사가 {name}의 **이미 일어난** 주가 움직임(급등·급락·상한가·하한가·신고가·장 마감 시세)을 주요 내용으로 보도하는가. true / false
 material_type: 재료 유형. 다음 중 하나 — {material_types}
-persistence: 실적에 반영되는 지속성. one_off(일회성 사건) / multi_quarter(여러 분기에 걸쳐 반영) / structural(사업 구조가 바뀌는 수준)
-specificity: 구체성. 0(방향만 언급) / 1(대상과 시기 중 하나만 명시) / 2(둘 다 있으나 금액 없음) / 3(금액·기간·상대방이 모두 명시)
-freshness: 정보 신선도. new(처음 알려지는 내용) / follow_up(기존 건의 진행 경과) / repeat(이미 알려진 내용의 재보도)
-sentiment_direction: 이 사안이 회사 사업에 미치는 방향. -1(부정) / 0(중립) / 1(긍정)
-sentiment_strength: 그 방향의 강도. 0(거의 없음) / 1(작음) / 2(보통) / 3(큼)
-scale_vs_size: 회사 규모(시가총액·매출) 대비 사안의 크기. unknown(판단 근거가 본문에 없음) / small / medium / large
+persistence: 실적에 반영되는 지속성. one_off / multi_quarter / structural
+specificity: 구체성. 0(방향만) / 1(대상·시기 중 하나) / 2(둘 다, 금액 없음) / 3(금액·기간·상대방 모두)
+freshness: new(처음 알려짐) / follow_up(기존 건 진행 경과) / repeat(이미 알려진 내용의 재보도·해설·칼럼)
+surprise: 이 내용이 기존 기대와 얼마나 다른가. 0(예상된 일·일정대로) / 1(다소 뜻밖) / 2(크게 뜻밖)
+sentiment_direction: {name} 사업에 미치는 방향. -1 / 0 / 1
+sentiment_strength: 그 방향의 강도. 0 / 1 / 2 / 3
+scale_vs_size: {name} 규모 대비 사안의 크기. unknown / small / medium / large
+
+규칙: 본문에 없는 내용은 추정하지 않는다. 인터뷰·칼럼·업계 동향 기사는 대체로 repeat 이고 강도가 낮다.
 
 출력 형식 예시:
-{{"material_type":"수주","persistence":"multi_quarter","specificity":3,"freshness":"new","sentiment_direction":1,"sentiment_strength":2,"scale_vs_size":"medium"}}"""
+{{"subject":"main","reports_price_move":false,"material_type":"수주","persistence":"multi_quarter","specificity":3,"freshness":"new","surprise":1,"sentiment_direction":1,"sentiment_strength":2,"scale_vs_size":"medium"}}"""
 
 
-def build_prompt(*, code: str, title: str, body200: str, keywords: str = "") -> tuple[str, str]:
+def build_prompt(
+    *,
+    code: str,
+    name: str,
+    market: str | None,
+    sector: str | None,
+    title: str,
+    body: str,
+    category: str | None,
+) -> tuple[str, str]:
     user = _USER_TEMPLATE.format(
         code=code.strip(),
+        name=name.strip(),
+        market=market or "-",
+        sector=sector or "-",
         title=title.strip(),
-        body200=body200.strip(),
-        keywords=keywords.strip(),
+        body=body.strip(),
+        category=category or "",
         material_types=" / ".join(MATERIAL_TYPES),
     )
     return _SYSTEM, user
@@ -245,15 +268,14 @@ def build_prompt(*, code: str, title: str, body200: str, keywords: str = "") -> 
 # --- HTTP call ---------------------------------------------------------------
 
 DEFAULT_MODEL = "claude-haiku-4-5-20251001"
-_MAX_OUTPUT_TOKENS = 300
+_MAX_OUTPUT_TOKENS = 400
 _MAX_RETRIES = 2
 
 
 class AnthropicClient:
     """Minimal Anthropic Messages API client for article material-scoring.
 
-    Raw httpx, no SDK (see module docstring). API key read from the
-    `ANTHROPIC_API_KEY` env var if not passed explicitly -- never logged.
+    API key read from `ANTHROPIC_API_KEY` if not passed -- never logged.
     """
 
     def __init__(self, api_key: str | None = None, model: str = DEFAULT_MODEL) -> None:
@@ -290,17 +312,30 @@ class AnthropicClient:
             },
         )
         response.raise_for_status()
-        payload = response.json()
-        blocks = payload.get("content") or []
-        text = "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
-        return text
+        blocks = response.json().get("content") or []
+        return "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
 
     async def score_article(
-        self, *, code: str, title: str, body200: str, keywords: str = ""
+        self,
+        *,
+        code: str,
+        name: str,
+        market: str | None,
+        sector: str | None,
+        title: str,
+        body: str,
+        category: str | None,
     ) -> ArticleFeatures:
-        """Score one article, retrying on a schema violation (not a network error)."""
-        system, user = build_prompt(code=code, title=title, body200=body200, keywords=keywords)
-
+        """Score one (article, company) pair, retrying on schema violations."""
+        system, user = build_prompt(
+            code=code,
+            name=name,
+            market=market,
+            sector=sector,
+            title=title,
+            body=body,
+            category=category,
+        )
         last_error: SchemaError | None = None
         for attempt in range(_MAX_RETRIES + 1):
             text = await self._complete(system, user)
@@ -316,20 +351,3 @@ class AnthropicClient:
         raise ExternalAPIError(
             f"Article scoring failed schema validation after {_MAX_RETRIES + 1} attempts: {last_error}"
         )
-
-    async def analyze_sentiment(self, article: NewsArticle) -> Sentiment:
-        """Score `article` and map the result onto a domain `Sentiment`.
-
-        Uses `article.summary or article.content` as the scored text --
-        Toss currently supplies only a ~300-char summary (see module
-        docstring), not a full article body.
-        """
-        body = article.summary or article.content
-        ticker = article.tickers[0].value if article.tickers else ""
-        features = await self.score_article(
-            code=ticker,
-            title=article.title,
-            body200=body,
-            keywords=article.category or "",
-        )
-        return features.to_sentiment()

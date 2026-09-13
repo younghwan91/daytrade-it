@@ -1,15 +1,17 @@
 """Live news→signal daemon.
 
-Polls Toss's live news dashboard, scores each new article with Claude
-(`infrastructure/external/anthropic_client.py`), and -- when a technical
-confirmation agrees with the news direction (`application/signals/
-technical_confirmation.py`) -- persists an actionable COMPOSITE signal to
-`gptquant.trading_signals` via `SignalRepository`, so `execute_trade(
-signal_id=...)` can pick it up later. See 2026-09-13's session notes
-(memory: daytrade-it-news-signal-pipeline) for why this shape: news alone
-is deliberately not actionable (`SignalGenerator.combine_signals()`), and
-a price-only ML classifier was tried and rejected (no edge) before this
-simple rule-based technical check.
+Polls Toss's live news dashboard and, for every (article, tagged company)
+pair, scores it with Claude (`infrastructure/external/anthropic_client.py`,
+prompt v2). A bullish main/partial-subject pair whose stock is not already
+up > 2% vs. the prior close (`application/signals/entry_filter.py`) becomes
+a COMPOSITE BUY signal in `gptquant.trading_signals`, expiring at that
+session's close, for `execute_trade(signal_id=...)` to pick up.
+
+Every rule here was measured against real same-session outcomes before
+being adopted -- see docs/research/2026-09-13-news-prompt-eval.md.
+Articles published before the previous session's close are skipped (the
+eval only labeled first-session reactions), and nothing is polled before
+09:00:30 KST (the eval entered pre-market news at the opening price).
 
 This process places NO orders itself -- it only writes signal rows.
 Executing a signal is a separate, explicit `execute_trade` call (through
@@ -42,14 +44,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from kiwoom_client import KiwoomAPI
 from sqlalchemy import select
 
-from daytrade_it.application.signals.technical_confirmation import generate_technical_confirmation
+from daytrade_it.application.signals.entry_filter import generate_no_chase_confirmation
 from daytrade_it.domain.entities.news import NewsArticle
-from daytrade_it.domain.services.signal_generator import SignalGenerator
-from daytrade_it.domain.value_objects import Sentiment
-from daytrade_it.infrastructure.brokers.base import BrokerInterface
+from daytrade_it.domain.services.signal_generator import SignalConfig, SignalGenerator
+from daytrade_it.domain.value_objects import Ticker
+from daytrade_it.infrastructure.brokers.base import KST, BrokerInterface
 from daytrade_it.infrastructure.brokers.kiwoom_broker import KiwoomBroker
-from daytrade_it.infrastructure.external.anthropic_client import AnthropicClient
-from daytrade_it.infrastructure.external.quant_airflow_db_client import QuantAirflowDBClient
+from daytrade_it.infrastructure.external.anthropic_client import PROMPT_VERSION, AnthropicClient
+from daytrade_it.infrastructure.external.quant_airflow_db_client import (
+    QuantAirflowDBClient,
+    StockInfo,
+)
 from daytrade_it.infrastructure.external.toss_news_client import TossNewsClient
 from daytrade_it.infrastructure.persistence.database import DatabaseManager
 from daytrade_it.infrastructure.persistence.models import TradingSignalModel
@@ -60,39 +65,41 @@ logger = get_logger(__name__)
 
 KILL_SWITCH_PATH = Path("data/live_STOP")
 DEFAULT_STOP_TIME = dt.time(15, 20)  # KST -- mirrors scalp-it's daemon stop time
+SESSION_CLOSE = dt.time(15, 20)  # signals expire here; day trades are flat by the close
+FIRST_POLL = dt.time(9, 0, 30)
 
 
 def kill_switch_active() -> bool:
     return KILL_SWITCH_PATH.exists()
 
 
-async def process_article(
+def session_close_kst(day: dt.date) -> dt.datetime:
+    return dt.datetime.combine(day, SESSION_CLOSE, tzinfo=KST)
+
+
+async def process_pair(
     article: NewsArticle,
+    ticker: Ticker,
+    stock: StockInfo,
     claude: AnthropicClient,
     broker: BrokerInterface,
     db_client: QuantAirflowDBClient,
     gen: SignalGenerator,
     db: DatabaseManager,
+    expires_at: dt.datetime,
 ) -> None:
-    """Score one article and persist an actionable signal if one emerges.
+    """Judge one (article, company) pair; persist a BUY signal if one emerges.
 
-    Every failure mode here is caught and logged, never raised -- one bad
-    article (a Claude schema violation, a broker hiccup, a missing price
-    history) must not take down the whole poll loop or block the other
-    articles in the same batch.
+    Every failure is caught and logged, never raised -- one bad pair must
+    not stop the loop or the other pairs in the batch.
     """
-    if not article.tickers:
-        return
-    ticker = article.tickers[0]
-
-    # Dedup across restarts: TossNewsClient's seen-id cache is in-memory
-    # only, so a crash-restart would otherwise re-score every article on
-    # the dashboard (Claude cost) and re-persist the same signals.
+    # Dedup across restarts (TossNewsClient's seen-id cache is in-memory).
     try:
         async with UnitOfWork(db) as uow:
             existing = await uow.session.execute(
                 select(TradingSignalModel.id).where(
-                    TradingSignalModel.news_article_id == article.id
+                    TradingSignalModel.news_article_id == article.id,
+                    TradingSignalModel.ticker == ticker.value,
                 )
             )
             if existing.first() is not None:
@@ -102,35 +109,68 @@ async def process_article(
         return
 
     try:
-        sentiment: Sentiment = await claude.analyze_sentiment(article)
+        features = await claude.score_article(
+            code=ticker.value,
+            name=stock.name,
+            market=stock.market,
+            sector=stock.sector,
+            title=article.title,
+            body=article.summary or article.content,
+            category=article.category,
+        )
     except Exception:
-        logger.exception("news_signal_poller: sentiment scoring failed", article_id=str(article.id))
+        logger.exception(
+            "news_signal_poller: scoring failed", article_id=str(article.id), ticker=ticker.value
+        )
         return
 
-    news_signal = gen.generate_from_news(article, sentiment)
+    sentiment = features.to_sentiment()
+    logger.info(
+        "news_signal_poller: judged",
+        ticker=ticker.value,
+        name=stock.name,
+        subject=features.subject,
+        score=round(sentiment.score, 3),
+        label=sentiment.label.value,
+        title=article.title[:80],
+    )
+    # Entries are BUY-only: KRX retail can't short, and no SELL-side rule
+    # was evaluated (dev had n=6 bearish main-subject pairs).
+    if not sentiment.is_bullish:
+        return
+
+    news_signal = gen.generate_from_news(
+        article.model_copy(update={"tickers": [ticker]}), sentiment
+    )
     if news_signal is None:
         return
 
     try:
-        tech_signal = generate_technical_confirmation(ticker, broker, db_client)
+        entry_signal = generate_no_chase_confirmation(ticker, broker, db_client, expires_at)
     except Exception:
-        logger.exception("news_signal_poller: technical confirmation failed", ticker=ticker.value)
+        logger.exception("news_signal_poller: entry filter failed", ticker=ticker.value)
         return
-    if tech_signal is None:
-        return
-
-    # combine_signals() resolves a direction conflict by confidence and
-    # drops the losing side -- so news BUY + technical SELL would yield a
-    # technical-only SELL "composite" with no news behind it (seen live
-    # 2026-09-13). This daemon's thesis is news-driven: the technical check
-    # may only confirm the news direction, never override it.
-    if tech_signal.direction != news_signal.direction:
+    if entry_signal is None:
         return
 
-    composite = gen.combine_signals([news_signal, tech_signal])
+    composite = gen.combine_signals([news_signal, entry_signal])
     if composite is None:
         return
-    composite = composite.model_copy(update={"news_article_id": article.id})
+    composite = composite.model_copy(
+        update={
+            "news_article_id": article.id,
+            "expires_at": expires_at,
+            "metadata": {
+                **composite.metadata,
+                "prompt_version": PROMPT_VERSION,
+                "article_title": article.title[:200],
+                "subject": features.subject,
+                "material_type": features.material_type,
+                "news_score": sentiment.score,
+                "pre_entry_move": entry_signal.metadata["pre_entry_move"],
+            },
+        }
+    )
 
     try:
         async with UnitOfWork(db) as uow:
@@ -144,10 +184,33 @@ async def process_article(
         "news_signal_poller: ACTIONABLE SIGNAL PERSISTED",
         signal_id=str(saved.id),
         ticker=ticker.value,
+        name=stock.name,
         direction=composite.direction.value,
-        confidence=composite.confidence.value,
+        news_score=round(sentiment.score, 3),
+        pre_entry_move=entry_signal.metadata["pre_entry_move"],
         article_title=article.title,
     )
+
+
+async def process_article(
+    article: NewsArticle,
+    stocks: dict[str, StockInfo],
+    stale_before: dt.datetime,
+    expires_at: dt.datetime,
+    **deps: object,
+) -> None:
+    # Published before the previous session closed: that session already
+    # had the chance to trade it, and the eval never measured such articles
+    # (every labeled pair traded on its first session after publication).
+    if article.published_at < stale_before:
+        return
+    if dt.datetime.now(KST) >= expires_at:
+        return
+    for ticker in article.tickers:
+        stock = stocks.get(ticker.value)
+        if stock is None:
+            continue
+        await process_pair(article, ticker, stock, expires_at=expires_at, **deps)  # type: ignore[arg-type]
 
 
 async def run(*, once: bool, stop_at: dt.time) -> None:
@@ -163,7 +226,33 @@ async def run(*, once: bool, stop_at: dt.time) -> None:
         return
 
     db_client = QuantAirflowDBClient()
-    gen = SignalGenerator()
+    stocks = db_client.get_stock_master()
+    # min_confidence=0: the BUY set must be exactly score > SIGNAL_THRESHOLD,
+    # the rule that was evaluated (see anthropic_client.ArticleFeatures).
+    gen = SignalGenerator(SignalConfig(min_confidence=0.0))
+
+    today = dt.date.today()
+    prior_bars = db_client.get_adjusted_daily_bars(
+        Ticker(value="005930"),
+        start=today - dt.timedelta(days=14),
+        end=today - dt.timedelta(days=1),
+    )
+    if not prior_bars:
+        logger.error("news_signal_poller: cannot determine previous trading day, exiting")
+        broker.disconnect()
+        return
+    stale_before = session_close_kst(prior_bars[-1].date)
+    expires_at = session_close_kst(today)
+
+    # Articles are marked seen when polled. Polling before the open would
+    # burn them on a pre-open quote (the eval entered pre-market news at the
+    # opening price), so wait for the opening auction to print.
+    if not once:
+        first_poll_at = dt.datetime.combine(today, FIRST_POLL, tzinfo=KST)
+        wait = (first_poll_at - dt.datetime.now(KST)).total_seconds()
+        if wait > 0:
+            logger.info("news_signal_poller: waiting for market open", seconds=int(wait))
+            await asyncio.sleep(wait)
 
     try:
         async with AnthropicClient() as claude, TossNewsClient() as news_client:
@@ -171,7 +260,7 @@ async def run(*, once: bool, stop_at: dt.time) -> None:
                 if kill_switch_active():
                     logger.warning("news_signal_poller: kill switch active, stopping")
                     break
-                if not once and dt.datetime.now().time() >= stop_at:
+                if not once and dt.datetime.now(KST).time() >= stop_at:
                     logger.info(
                         "news_signal_poller: stop time reached, exiting", stop_at=str(stop_at)
                     )
@@ -186,7 +275,17 @@ async def run(*, once: bool, stop_at: dt.time) -> None:
                     new_articles = []
 
                 for article in new_articles:
-                    await process_article(article, claude, broker, db_client, gen, db)
+                    await process_article(
+                        article,
+                        stocks,
+                        stale_before,
+                        expires_at,
+                        claude=claude,
+                        broker=broker,
+                        db_client=db_client,
+                        gen=gen,
+                        db=db,
+                    )
 
                 if once:
                     break

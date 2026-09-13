@@ -108,6 +108,15 @@ class AdjustedDailyBar(BaseModel):
     source: str = Field(description="Provenance, e.g. 'kiwoom' or 'naver' (delisted backfill)")
 
 
+class StockInfo(BaseModel):
+    """One row of ``stocks`` (listed-stock master)."""
+
+    code: str
+    name: str
+    market: str | None = None
+    sector: str | None = None
+
+
 class SupplyDemandRow(BaseModel):
     """One row of ``supply_demand`` (investor net-buy flows)."""
 
@@ -409,6 +418,15 @@ class QuantAirflowDBClient:
             )
             for r in rows
         ]
+
+    # -------------------------------------------------------------------
+    # stocks
+    # -------------------------------------------------------------------
+
+    def get_stock_master(self) -> dict[str, StockInfo]:
+        """All listed stocks keyed by code (``stocks`` table, ~2.6k rows)."""
+        rows = self._query("SELECT code, name, market, sector FROM stocks", ())
+        return {r[0]: StockInfo(code=r[0], name=r[1], market=r[2], sector=r[3]) for r in rows}
 
     # -------------------------------------------------------------------
     # supply_demand
