@@ -46,7 +46,7 @@ dependencies = [
     "httpx>=0.26.0",
     "aiohttp>=3.9.0",
     "polygon-api-client>=1.14.0",
-    "krx-news-client>=0.2.0",
+    "krx-news-client>=0.3.0",
     "kiwoom-client>=0.4.0",
 
     # Utilities
@@ -83,15 +83,6 @@ Repository = "https://github.com/younghwan91/daytrade-it"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
-
-# krx-news-client isn't on PyPI -- it's a sibling repo, originally pinned as
-# a local path dependency (~/Documents/git/krx-news-client per Task 1/2's
-# spikes, docs/spikes/002-toss-reliability.md). That path stopped existing
-# after the 2026-09-11 Documents/git cleanup and broke `uv sync` entirely
-# (silently, until someone ran sync). Pinned to the git repo instead so this
-# doesn't depend on a specific local directory layout again.
-[tool.uv.sources]
-krx-news-client = { git = "https://github.com/younghwan91/krx-news-client.git" }
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/daytrade_it"]

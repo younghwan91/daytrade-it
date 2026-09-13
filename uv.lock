@@ -897,7 +897,7 @@ requires-dist = [
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.26.0" },
     { name = "hypothesis", marker = "extra == 'dev'", specifier = ">=6.98.0" },
     { name = "kiwoom-client", specifier = ">=0.4.0" },
-    { name = "krx-news-client", git = "https://github.com/younghwan91/krx-news-client.git" },
+    { name = "krx-news-client", specifier = ">=0.3.0" },
     { name = "mlflow", specifier = ">=2.10.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.8.0" },
     { name = "numpy", specifier = ">=1.26.0" },
@@ -1651,13 +1651,17 @@ wheels = [
 
 [[package]]
 name = "krx-news-client"
-version = "0.2.0"
-source = { git = "https://github.com/younghwan91/krx-news-client.git#aa03d4743db3036f0865b31800fd7c5aa1f0f628" }
+version = "0.3.0"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "beautifulsoup4" },
     { name = "httpx" },
     { name = "lxml" },
     { name = "pydantic" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/29/eb/ecf95b8fdd0d781e2164f9f1db4eef9e8e36f36146365ad7e887c690fb18/krx_news_client-0.3.0.tar.gz", hash = "sha256:c36cc9042564be449907659d5eb508031ca57490689b5bf29f59517da40625c6", size = 48869, upload-time = "2026-09-13T06:40:53.537Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c1/7e/3733831ff9dc6f123911d3d01f8a55e5fdc2f6c759342205c0096971eae4/krx_news_client-0.3.0-py3-none-any.whl", hash = "sha256:c355133a9358a629ab1b4883385d9590b6b8227a6fd3c6e5f5f67f21fcf7e93d", size = 18170, upload-time = "2026-09-13T06:40:52.237Z" },
 ]
 
 [[package]]
