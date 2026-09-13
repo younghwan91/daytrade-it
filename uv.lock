@@ -896,7 +896,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.26.0" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.26.0" },
     { name = "hypothesis", marker = "extra == 'dev'", specifier = ">=6.98.0" },
-    { name = "kiwoom-client", git = "https://github.com/younghwan91/kiwoom-client.git?rev=1debc40100d96ce808e14be1ca2e702b7c9983ac" },
+    { name = "kiwoom-client", specifier = ">=0.4.0" },
     { name = "krx-news-client", git = "https://github.com/younghwan91/krx-news-client.git" },
     { name = "mlflow", specifier = ">=2.10.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.8.0" },
@@ -1638,11 +1638,15 @@ wheels = [
 
 [[package]]
 name = "kiwoom-client"
-version = "0.3.0"
-source = { git = "https://github.com/younghwan91/kiwoom-client.git?rev=1debc40100d96ce808e14be1ca2e702b7c9983ac#1debc40100d96ce808e14be1ca2e702b7c9983ac" }
+version = "0.4.0"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "httpx" },
     { name = "websockets" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/37/b8/3eef7303c7d24268b54924dbd0c8a5ec3c7bc9c1f93fca7e81ea08c1f466/kiwoom_client-0.4.0.tar.gz", hash = "sha256:4242212d6ec635325794f5b28fd848acd7f3d40ce0b8e2719619e6ea5490bb73", size = 268141, upload-time = "2026-09-13T06:17:09.895Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/8b/f6/2d3bafbd753f44f79b313ed3e289612482e8b7a78e2d0b1367986be6663a/kiwoom_client-0.4.0-py3-none-any.whl", hash = "sha256:234bf1902bb0781805bdb82084ec51168847071bacb3836bcbb7b53fc5b3ad65", size = 57730, upload-time = "2026-09-13T06:17:08.668Z" },
 ]
 
 [[package]]
