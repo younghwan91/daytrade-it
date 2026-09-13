@@ -1,7 +1,7 @@
 """initial schema: news_articles, trading_signals, trades, positions, price_bars
 
 Revision ID: 917480f365fd
-Revises: 
+Revises:
 Create Date: 2026-09-13 19:43:01.665609
 
 """
