@@ -899,7 +899,7 @@ requires-dist = [
     { name = "hypothesis", marker = "extra == 'dev'", specifier = ">=6.98.0" },
     { name = "kiwoom-client", specifier = ">=0.4.0" },
     { name = "krx-news-client", specifier = ">=0.3.0" },
-    { name = "krx-quant-core", git = "https://github.com/younghwan91/krx-quant-core?rev=v0.1.0" },
+    { name = "krx-quant-core", git = "https://github.com/younghwan91/krx-quant-core?rev=v0.1.1" },
     { name = "mlflow", specifier = ">=2.10.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.8.0" },
     { name = "numpy", specifier = ">=1.26.0" },
@@ -1668,8 +1668,8 @@ wheels = [
 
 [[package]]
 name = "krx-quant-core"
-version = "0.1.0"
-source = { git = "https://github.com/younghwan91/krx-quant-core?rev=v0.1.0#69a9287166006f3e6e7ce88bba63ba6fdd8f6ec3" }
+version = "0.1.1"
+source = { git = "https://github.com/younghwan91/krx-quant-core?rev=v0.1.1#b2abece44883e55e1c1c318df4d74e77c2b23ba3" }
 dependencies = [
     { name = "kiwoom-client" },
     { name = "numpy" },

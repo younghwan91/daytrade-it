@@ -49,7 +49,7 @@ dependencies = [
     "krx-news-client>=0.3.0",
     "kiwoom-client>=0.4.0",
     # 시장 규칙·비용모델·공시 게이트 등 국장 공통 로직의 정본(scalp-it 과 공유).
-    "krx-quant-core @ git+https://github.com/younghwan91/krx-quant-core@v0.1.0",
+    "krx-quant-core @ git+https://github.com/younghwan91/krx-quant-core@v0.1.1",
 
     # Utilities
     "structlog>=24.1.0",
