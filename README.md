@@ -57,15 +57,80 @@ src/daytrade_it/
 └── shared/              # Config, logging, error hierarchy
 ```
 
-Data flow, as designed (not all links wired yet — see the table above):
+Data flow, as designed — colors/dashing mark actual wiring state, not intent
+(see the table above for the full caveat on each component):
 
+```mermaid
+flowchart LR
+    subgraph NEWS["뉴스·공시 — 폴링은 실제로 돈다, RiskGate 로의 연결선만 없다"]
+        TOSS["TossNewsClient"]
+        DARTC["DartClient"]
+        POLL["NewsPoller\nToss-first · DART-fallback"]
+    end
+
+    subgraph DATA["시장 데이터 → 시그널"]
+        QADB[("quant-airflow\nTimescaleDB (read-only)")]
+        FE["Feature engineering"]
+        XGB["XGBoost\n(재학습 전)"]
+        SG["SignalGenerator\n0.4 sentiment · 0.4 ML · 0.2 technical"]
+    end
+
+    subgraph RISK["리스크 게이트 — execute_trade 앞단에 실제로 배선됨"]
+        RG["RiskGate\n적대적 테스트 완료"]
+        RM["RiskManager.validate_trade()"]
+    end
+
+    subgraph LIVE["실전 매매 — MCP execute_trade 경로"]
+        BROKER["KiwoomBroker.place_order()"]
+        ORDER["키움 REST 실주문"]
+    end
+
+    subgraph BT["백테스트 — 별도 오프라인 경로"]
+        BTENGINE["BacktestEngine\n실제 비용모델 + quant-airflow 데이터"]
+        STUB["전략 로직 — 데모 volume-momentum stub\n(strategy_is_placeholder=True)"]
+    end
+
+    TOSS --> POLL
+    DARTC --> POLL
+    POLL -.->|"설계상 경로 — 코드에 이 연결선이 없다"| RG
+
+    QADB --> FE --> XGB --> SG
+    SG --> RM
+    RG -->|"진입 차단 · 강제청산\n(중대 severity DART 공시)"| RM
+    RM -->|"통과한 주문만"| BROKER --> ORDER
+
+    QADB --> BTENGINE --> STUB
+
+    classDef real fill:#1a7f37,stroke:#0d4d20,color:#fff
+    classDef partial fill:#9a6700,stroke:#6b4a00,color:#fff
+    classDef stub fill:#8b1a1a,stroke:#5c1111,color:#fff
+    classDef unwired fill:#57606a,stroke:#32383f,color:#fff
+
+    class RG,RM,FE,QADB real
+    class SG,XGB,BTENGINE,BROKER partial
+    class STUB stub
+    class TOSS,DARTC,POLL unwired
 ```
-Toss/DART news ──▶ NewsPoller ──▶ RiskGate ──┐
-                                              ▼
-quant-airflow DB ──▶ Feature engineering ──▶ SignalGenerator ──▶ RiskManager ──▶ KiwoomBroker
-                          (XGBoost)          (0.4 sentiment /
-                                               0.4 ML / 0.2 technical)
-```
+
+**범례**: 🟢 실제 배선·테스트됨 · 🟠 부분적(코드는 있으나 미검증/미완성) ·
+🔴 데모 스텁 · ⚪ 개별 컴포넌트는 동작하지만 다음 단계로 이어지는 연결선이
+없음(점선). 실선/점선은 코드에 그 호출·의존관계가 실제로 있는지를 뜻하지,
+설계 의도를 뜻하지 않는다 — 위 색·점선 배정은 이 문서 갱신 시점(2026-09-13)
+기준으로 코드를 직접 grep 해 확인한 것이다.
+
+**실전 매매(라이브 주문) 경로.** `execute_trade` MCP 도구가 유일한 실주문
+진입점이다 — `RiskManager.validate_trade()`를 거쳐야만
+`KiwoomBroker.place_order()`에 도달하고, 게이트가 막으면 주문이 브로커에
+아예 도달하지 않는다(이 라우팅 자체는 실배선·테스트됨). 다만 브로커 자체는
+**한 번도 라이브로 실행된 적이 없다** — 모킹된 `KiwoomAPI`에 대해서만
+유닛테스트됐고, 이 환경에서 라이브/모의투자 키움 자격증명이 주어진 적이
+없다. `kiwoom-client`의 README와 예제가 주문요청 필드명에 대해 서로
+어긋나 있는 문제는 문서화된 최선의 추정으로 임시 봉합해 뒀고
+`TODO(verify-before-live-capital)`로 표시돼 있다 — **그 확인 전에는 실제
+자본으로 주문을 넣지 말 것.** (참고로 이 레포가 아니라 형제 레포
+`scalp-it`이 실제로 실주문을 내는 라이브 시스템이다 — 이 레포의
+`execute_trade`는 설계상 그 역할을 하도록 만들어졌지만 위 이유로 아직
+검증되지 않았다.)
 
 ---
 
