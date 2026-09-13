@@ -28,7 +28,7 @@ fully wired yet. Read this before trusting any number it returns.
 | **Backtest engine** | ⚠️ Partially real. Real market data (`quant_airflow_db_client.py`, read-only off `quant-airflow`'s TimescaleDB) and a real Korean cost model (증권거래세, 위탁수수료, KOSPI/KOSDAQ tick-size-aware slippage). But the *strategy* under test is still a demo volume-momentum stub, not this system's actual signal-generation logic. `BacktestResult.strategy_is_placeholder` tells you which is which — don't read a Sharpe ratio here as validation of the news-driven strategy. |
 | **News ingestion** (`toss_news_client.py` / `dart_client.py` / `news_poller.py`) | ⚠️ Built, not wired. Poll-and-dedup with a Toss-first, DART-fallback circuit breaker — fully tested — but not yet connected to the MCP tools. `get_news`/`get_price_history` raise `NotImplementedError` rather than silently serving stale US-market data. |
 | **Sentiment accuracy** | ❌ Unvalidated. A Korean FinBERT checkpoint scored 60.5% accuracy / 18.2% BEARISH recall on a 76-article hand-labeled sample — not usable for a risk gate as-is. The OpenAI comparison leg is implemented but has never run (no API key available in this environment). See `PLAN.md`'s Phase 0 Results. |
-| **Broker** (`kiwoom_broker.py`) | ⚠️ Unit-tested, never live. Tested against a mocked `KiwoomAPI` only — no live/mock Kiwoom credentials have ever been available here. A field-name ambiguity in `kiwoom-client` itself (its README and its examples disagree on order-request field names) is resolved by a documented best guess, flagged `TODO(verify-before-live-capital)`. Do not place real orders until that's confirmed. |
+| **Broker** (`kiwoom_broker.py`) | ⚠️ Limit orders only. Unit-tested against a mocked `KiwoomAPI`. The order-request field names and values (`dmst_stex_tp="KRX"`, `stk_cd`, `ord_qty`, `ord_uv`, limit `trde_tp="0"`, `org_ord_no`) were confirmed 2026-09-13 against the same TR family's 22 live fills in sibling `scalp-it` (see `kiwoom_broker.py`'s docstring and `krx_quant_core.execution.kiwoom_spec`). The **market** order code (`"03"`) is still unverified, so `execute_trade` refuses MARKET orders. |
 | **XGBoost model** | ❌ Not retrained. Korean feature keywords are in place; retraining needs the backtest harness (done) validated against a real strategy (not done) first. |
 
 ---
@@ -121,16 +121,13 @@ flowchart LR
 **실전 매매(라이브 주문) 경로.** `execute_trade` MCP 도구가 유일한 실주문
 진입점이다 — `RiskManager.validate_trade()`를 거쳐야만
 `KiwoomBroker.place_order()`에 도달하고, 게이트가 막으면 주문이 브로커에
-아예 도달하지 않는다(이 라우팅 자체는 실배선·테스트됨). 다만 브로커 자체는
-**한 번도 라이브로 실행된 적이 없다** — 모킹된 `KiwoomAPI`에 대해서만
-유닛테스트됐고, 이 환경에서 라이브/모의투자 키움 자격증명이 주어진 적이
-없다. `kiwoom-client`의 README와 예제가 주문요청 필드명에 대해 서로
-어긋나 있는 문제는 문서화된 최선의 추정으로 임시 봉합해 뒀고
-`TODO(verify-before-live-capital)`로 표시돼 있다 — **그 확인 전에는 실제
-자본으로 주문을 넣지 말 것.** (참고로 이 레포가 아니라 형제 레포
-`scalp-it`이 실제로 실주문을 내는 라이브 시스템이다 — 이 레포의
-`execute_trade`는 설계상 그 역할을 하도록 만들어졌지만 위 이유로 아직
-검증되지 않았다.)
+아예 도달하지 않는다(이 라우팅 자체는 실배선·테스트됨). 주문요청
+필드명·값(`dmst_stex_tp="KRX"`, 지정가 `trde_tp="0"`, `org_ord_no` 등)은
+2026-09-13 형제 레포 `scalp-it`의 같은 TR(`kt10000`/`kt10001`/`kt10003`) 실발주
+22건(전부 `return_code == 0`)과 대조해 확인됐다 — `kiwoom-client` README와
+예제가 어긋나던 문제는 README 쪽이 맞았다. **시장가 매매구분(`"03"`)은 아직
+실호출로 확인되지 않았다** — 그래서 `execute_trade`는 MARKET 주문을 거부하고
+지정가만 낸다.
 
 ---
 
@@ -235,9 +232,21 @@ exact field names; `.env.example` has the full list).
 
 - **`domain/services/risk_gate.py`** — sentiment/disclosure-driven entry blocks and hard-severity force-exits, independent of the ML/technical signal
 - **`domain/services/tick_size.py`** — KRX price-band tick-size rounding, applied at Kiwoom order construction and at backtest/paper-broker fills
-  (delegates the actual table to `kiwoom_client.tick_size` as of 2026-09-12 — scalp-it had the same table duplicated independently; kiwoom-client,
-  the repo that actually places the order, is now the single source)
+  (the table itself lives in `kiwoom_client.tick_size`, the repo that actually places the order)
 - **`domain/services/cost_model.py`** — KRX transaction costs (증권거래세 rate cited, but **not confirmed against a primary source** — treat with the same caution as the commission/slippage placeholders)
+
+### Shared core (`krx-quant-core`)
+
+Market-generic logic shared with `scalp-it` lives in
+[`krx-quant-core`](https://github.com/younghwan91/krx-quant-core) (pinned tag in
+`pyproject.toml`): tick helpers, the cost model, the disclosure risk gate and
+its `dart.db` reader, the backtest-host guard, KRX code normalization, Kiwoom
+protocol constants, the KST clock, and backtest performance metrics. The
+modules above (`risk_gate.py`, `cost_model.py`, `tick_size.py`,
+`dart_disclosure_db.py`, `shared/runtime_host.py`) keep their import paths as
+thin re-exports — change the logic in core, not here. Strategy code,
+`AutoTrader` and `execute_trade` stay in this repo.
+
 - Position sizing by account risk percentage, per-ticker position limits
 - KRX trading-window enforcement (09:00–15:30 KST)
 - Daily loss limits
@@ -250,6 +259,7 @@ This system is one piece of a larger personal stack:
 |---|---|
 | [`krx-news-client`](https://github.com/younghwan91/krx-news-client) | Toss/DART news scraping client library |
 | [`kiwoom-client`](https://github.com/younghwan91/kiwoom-client) | Kiwoom Securities REST API client |
+| [`krx-quant-core`](https://github.com/younghwan91/krx-quant-core) | KRX market rules, costs, risk gate, execution constants — shared with `scalp-it` |
 | `quant-airflow` | Batch ingestion (kiwoom + krx-news-client → TimescaleDB) — this system reads it read-only |
 | `kr-quant` | KOSPI/KOSDAQ research, downstream of `quant-airflow`, no live trading |
 
