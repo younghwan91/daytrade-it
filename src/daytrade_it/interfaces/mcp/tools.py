@@ -940,18 +940,27 @@ async def execute_trade(
     # positions lookup itself fails, that's treated the same as "already
     # holding" rather than silently proceeding, since we cannot prove the
     # opposite.
-    if side == OrderSide.BUY:
-        try:
-            current_positions_raw = ctx.broker.get_positions()
-        except Exception as exc:
-            raise ValueError(
-                f"Could not verify current positions before entry (fail-closed): {exc}"
-            ) from exc
-        if any(p.ticker == signal.ticker.value and p.quantity > 0 for p in current_positions_raw):
-            raise ValueError(
-                f"Already holding {signal.ticker.value} -- refusing duplicate entry "
-                "(use close_position to exit first)"
-            )
+    # SELL gets the mirror-image check: KRX retail accounts cannot short, so
+    # a SELL signal on a ticker we don't hold is a no-holdings sell
+    # (scalp-it audit C-4 "무보유 매도 금지") -- refuse it here rather than
+    # let Kiwoom reject it after the fact.
+    try:
+        current_positions_raw = ctx.broker.get_positions()
+    except Exception as exc:
+        raise ValueError(
+            f"Could not verify current positions before ordering (fail-closed): {exc}"
+        ) from exc
+    holding = any(p.ticker == signal.ticker.value and p.quantity > 0 for p in current_positions_raw)
+    if side == OrderSide.BUY and holding:
+        raise ValueError(
+            f"Already holding {signal.ticker.value} -- refusing duplicate entry "
+            "(use close_position to exit first)"
+        )
+    if side == OrderSide.SELL and not holding:
+        raise ValueError(
+            f"Not holding {signal.ticker.value} -- refusing a no-holdings SELL "
+            "(KRX retail accounts cannot short)"
+        )
 
     # Risk-gate check (whole-branch review finding #4): RiskManager/RiskGate
     # (Task 11's flagship deliverable) had zero production call sites --

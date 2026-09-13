@@ -246,10 +246,12 @@ class _FakeBroker:
         )
 
 
-def _make_signal_repository() -> _FakeSignalRepository:
+def _make_signal_repository(
+    direction: SignalDirection = SignalDirection.BUY,
+) -> _FakeSignalRepository:
     signal = TradingSignal(
         ticker=Ticker(value="005930"),
-        direction=SignalDirection.BUY,
+        direction=direction,
         confidence=Confidence(value=0.8),
         source=SignalSource.COMPOSITE,
         expires_at=datetime.now(UTC) + timedelta(hours=1),
@@ -413,6 +415,36 @@ async def test_execute_trade_rejects_duplicate_entry() -> None:
     MCPToolContext.set_instance(ctx)
     try:
         with pytest.raises(ValueError, match="Already holding"):
+            await execute_trade(
+                signal_id=str(UUID(int=0)),
+                order_type="LIMIT",
+                limit_price=70000.0,
+            )
+    finally:
+        MCPToolContext.set_instance(None)  # type: ignore[arg-type]
+
+    assert broker.place_order_calls == []
+
+
+@pytest.mark.asyncio
+async def test_execute_trade_rejects_sell_without_holding() -> None:
+    """KRX retail accounts cannot short: a SELL signal on a ticker with no
+    held position must be refused before place_order()."""
+    account = BrokerAccount(
+        account_id="acct-1",
+        cash=Decimal("10000000"),
+        buying_power=Decimal("10000000"),
+        equity=Decimal("10000000"),
+    )
+    broker = _FakeBroker(account=account)  # get_positions() -> []
+    ctx = MCPToolContext(
+        signal_repository=_make_signal_repository(SignalDirection.SELL),
+        broker=broker,
+        risk_manager=RiskManager(),
+    )
+    MCPToolContext.set_instance(ctx)
+    try:
+        with pytest.raises(ValueError, match="Not holding"):
             await execute_trade(
                 signal_id=str(UUID(int=0)),
                 order_type="LIMIT",

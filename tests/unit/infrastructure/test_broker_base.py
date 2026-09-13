@@ -102,3 +102,26 @@ def test_kst_is_asia_seoul() -> None:
     assert now_kst.tzinfo is not None
     # UTC offset for Asia/Seoul is a fixed +9:00 (no DST observed).
     assert now_kst.utcoffset().total_seconds() == 9 * 3600
+
+
+def test_quote_mid_price_two_sided_book() -> None:
+    quote = Quote(ticker="005930", bid=Decimal("70000"), ask=Decimal("70100"))
+    assert quote.mid_price == Decimal("70050")
+
+
+def test_quote_mid_price_upper_limit_empty_ask_uses_bid() -> None:
+    """A stock locked at 상한가 has no sellers (Kiwoom reports ask=0).
+    Averaging with the empty side used to halve the price, making a
+    limit-up stock read as a -50% crash (seen live 2026-09-13, 000922)."""
+    quote = Quote(ticker="000922", bid=Decimal("15130"), ask=Decimal("0"))
+    assert quote.mid_price == Decimal("15130")
+
+
+def test_quote_mid_price_lower_limit_empty_bid_uses_ask() -> None:
+    quote = Quote(ticker="005930", bid=Decimal("0"), ask=Decimal("49000"))
+    assert quote.mid_price == Decimal("49000")
+
+
+def test_quote_mid_price_empty_book_is_zero() -> None:
+    quote = Quote(ticker="005930", bid=Decimal("0"), ask=Decimal("0"))
+    assert quote.mid_price == Decimal("0")

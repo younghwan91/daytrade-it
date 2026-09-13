@@ -315,8 +315,16 @@ class Quote:
 
     @property
     def mid_price(self) -> Decimal:
-        """Calculate mid price from bid/ask."""
-        return (self.bid + self.ask) / 2
+        """Mid of bid/ask, or the one populated side of a one-sided book.
+
+        A KRX stock locked at upper limit (상한가) has no sellers, so Kiwoom
+        reports ask=0; one locked at lower limit has bid=0. Averaging with
+        the zero side halves the price -- a limit-up stock would read as a
+        -50% crash. Returns 0 only when both sides are empty.
+        """
+        if self.bid > 0 and self.ask > 0:
+            return (self.bid + self.ask) / 2
+        return max(self.bid, self.ask)
 
     @property
     def spread(self) -> Decimal:

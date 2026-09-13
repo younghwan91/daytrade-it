@@ -21,10 +21,23 @@ warn() { printf '  \033[33mWARN\033[0m %s\n' "$*"; WARN=$((WARN + 1)); }
 bad()  { printf '  \033[31mFAIL\033[0m %s\n' "$*"; FAIL=$((FAIL + 1)); }
 sec()  { printf '\n%s\n' "$*"; }
 
+# 크론 PATH 에는 ~/.local/bin 이 없다 -- uv 가 거기 있다.
+export PATH="$HOME/.local/bin:$PATH"
+
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)" || { echo "레포 경로 유도 실패"; exit 1; }
 cd "$REPO" || { echo "cd 실패: $REPO"; exit 1; }
 
 echo "개장 전 점검(daytrade-it) -- $(date '+%F %T %A') · $(hostname) · $REPO"
+
+# 크론은 빈 환경으로 돈다 -- news_signal_daemon.sh 와 같은 출처에서 키를 읽는다.
+# 이미 설정돼 있으면(손으로 돌릴 때) 덮어쓰지 않는다.
+if [ -z "${GPTQ_KIWOOM_APP_KEY:-}" ] && [ -f ../quant-airflow/.env ]; then
+    # xargs 로 읽는다(데몬과 같은 방식) -- .env 값이 따옴표로 싸여 있어서 cut 으로
+    # 읽으면 따옴표까지 키에 붙어 키움 인증이 8001 로 실패한다.
+    export $(grep -E '^KIWOOM_APP_(KEY|SECRET)=' ../quant-airflow/.env | xargs)
+    export GPTQ_KIWOOM_APP_KEY="$KIWOOM_APP_KEY" GPTQ_KIWOOM_APP_SECRET="$KIWOOM_APP_SECRET"
+    export GPTQ_KIWOOM_IS_MOCK="${GPTQ_KIWOOM_IS_MOCK:-false}"
+fi
 
 # ───────────────────────────────────────────────────── 1. 자격증명·설정
 sec "1) 자격증명과 설정"
@@ -79,13 +92,20 @@ fi
 
 # ───────────────────────────────────────────────────────── 4. 테스트 베이스라인
 sec "4) 테스트 베이스라인"
-TEST_OUT=$(uv run pytest tests -q --no-cov 2>&1 | tail -5)
-if echo "$TEST_OUT" | grep -q "40 failed"; then
-    warn "알려진 베이스라인(40 failed, 구 US 티커 픽스처)과 일치 -- 새 회귀 없음"
-elif echo "$TEST_OUT" | grep -qE "[0-9]+ failed"; then
-    bad "테스트 실패 수가 알려진 베이스라인(40)과 다름 -- 새 회귀 의심: $(echo "$TEST_OUT" | grep -E '[0-9]+ failed')"
+# 알려진 기존 실패(e2e 워크플로 테스트 31건, DB/API 서버 의존). 이보다 늘면 회귀,
+# 같거나 줄면 통과 -- 누가 기존 실패를 고쳐도 점검이 거짓 FAIL 을 내지 않게 한다.
+KNOWN_FAILURES=31
+TEST_OUT=$(uv run pytest tests -q --no-cov 2>&1 | tail -1)
+FAILED_COUNT=$(echo "$TEST_OUT" | grep -oE '[0-9]+ failed' | grep -oE '[0-9]+' || echo 0)
+# 요약줄이 아예 없으면(pytest 가 안 돌았으면) "실패 0건"이 아니라 점검 불가다.
+if ! echo "$TEST_OUT" | grep -qE '[0-9]+ passed'; then
+    bad "pytest 요약을 읽지 못함 -- 테스트가 실행되지 않았다: ${TEST_OUT}"
+elif [ "$FAILED_COUNT" -gt "$KNOWN_FAILURES" ]; then
+    bad "테스트 실패 ${FAILED_COUNT}건 > 알려진 베이스라인 ${KNOWN_FAILURES}건 -- 새 회귀 의심"
+elif [ "$FAILED_COUNT" -gt 0 ]; then
+    warn "테스트 실패 ${FAILED_COUNT}건 (베이스라인 ${KNOWN_FAILURES}건 이하, 기존 e2e 의존성) -- 새 회귀 없음"
 else
-    ok "전체 테스트 통과(베이스라인 실패 0)"
+    ok "전체 테스트 통과"
 fi
 
 # ────────────────────────────────────────────────────── 5. 실계좌 조회(읽기 전용)
