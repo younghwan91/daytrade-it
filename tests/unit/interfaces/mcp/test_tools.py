@@ -572,3 +572,101 @@ async def test_close_position_sells_with_limit_for_kiwoom_positions() -> None:
     assert order.side == OrderSide.SELL
     assert order.order_type == OrderType.LIMIT
     assert order.quantity == Decimal(1)
+
+
+# -- DART disclosure gate on the live entry path --------------------------------
+
+
+def _healthy_account() -> BrokerAccount:
+    return BrokerAccount(
+        account_id="acct-1",
+        cash=Decimal("10000000"),
+        buying_power=Decimal("10000000"),
+        equity=Decimal("10000000"),
+    )
+
+
+def _add_disclosure(db_path, code: str, report_nm: str) -> None:  # noqa: ANN001
+    import datetime as _dt  # noqa: PLC0415
+    import sqlite3  # noqa: PLC0415
+
+    from daytrade_it.infrastructure.brokers.base import now_kst  # noqa: PLC0415
+
+    con = sqlite3.connect(db_path)
+    con.execute(
+        "INSERT INTO disclosures VALUES (?, ?, ?, '', 'K', ?, '', 0)",
+        (report_nm, (now_kst() - _dt.timedelta(days=1)).strftime("%Y%m%d"), code, report_nm),
+    )
+    con.commit()
+    con.close()
+
+
+async def _buy(broker: _FakeBroker, direction: SignalDirection = SignalDirection.BUY):  # noqa: ANN202
+    ctx = MCPToolContext(
+        signal_repository=_make_signal_repository(direction),
+        broker=broker,
+        risk_manager=RiskManager(),
+    )
+    MCPToolContext.set_instance(ctx)
+    try:
+        return await execute_trade(
+            signal_id=str(UUID(int=0)), order_type="LIMIT", limit_price=70000.0
+        )
+    finally:
+        MCPToolContext.set_instance(None)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_execute_trade_refuses_entry_on_hard_dart_disclosure(
+    _fresh_empty_dart_db,  # noqa: ANN001
+) -> None:
+    _add_disclosure(_fresh_empty_dart_db, "005930", "횡령ㆍ배임혐의발생")
+    broker = _FakeBroker(account=_healthy_account())
+
+    with pytest.raises(ValueError, match="횡령"):
+        await _buy(broker)
+
+    assert broker.place_order_calls == []
+
+
+@pytest.mark.asyncio
+async def test_execute_trade_ignores_mechanical_halt(_fresh_empty_dart_db) -> None:  # noqa: ANN001
+    _add_disclosure(_fresh_empty_dart_db, "005930", "주권매매거래정지 (단일판매공급계약)")
+    broker = _FakeBroker(account=_healthy_account())
+
+    await _buy(broker)
+
+    assert len(broker.place_order_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_execute_trade_refuses_entry_when_disclosure_data_missing(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,  # noqa: ANN001
+) -> None:
+    from daytrade_it.interfaces.mcp import tools  # noqa: PLC0415
+
+    monkeypatch.setattr(tools, "_DART_DB_PATH", tmp_path / "missing" / "dart.db")
+    broker = _FakeBroker(account=_healthy_account())
+
+    with pytest.raises(ValueError, match="disclosure data unavailable"):
+        await _buy(broker)
+
+    assert broker.place_order_calls == []
+
+
+@pytest.mark.asyncio
+async def test_execute_trade_refuses_entry_when_disclosure_data_stale(
+    _fresh_empty_dart_db,  # noqa: ANN001
+) -> None:
+    import os  # noqa: PLC0415
+    import time  # noqa: PLC0415
+
+    old = time.time() - 31 * 60
+    os.utime(_fresh_empty_dart_db, (old, old))
+    broker = _FakeBroker(account=_healthy_account())
+
+    with pytest.raises(ValueError, match="stale"):
+        await _buy(broker)
+
+    assert broker.place_order_calls == []

@@ -862,6 +862,12 @@ _LIVE_TRADE_PRICE_BAND_PCT = Decimal("0.03")
 #: `data/pair_STOP`. Created/removed by a human, never by this code.
 _KILL_SWITCH_PATH = Path("data/live_STOP")
 
+#: scalp-it's OpenDART cache on this host (relative to the daytrade-it
+#: checkout, like the kill switch). execute_trade refuses a BUY while this
+#: shows a hard-severity disclosure for the ticker, and also while it is
+#: missing or stale -- see infrastructure/external/dart_disclosure_db.py.
+_DART_DB_PATH = Path("../scalp-it/data/dart.db")
+
 
 def _kill_switch_active() -> bool:
     return _KILL_SWITCH_PATH.exists()
@@ -994,12 +1000,33 @@ async def execute_trade(
 
     risk_account = _risk_manager_account_from_broker(ctx.broker.get_account())
     risk_positions = _risk_manager_positions_from_broker(ctx.broker.get_positions())
+    # DART disclosure gate (entries only): hard-severity filings for this
+    # ticker in the last week block the BUY. Fail-closed -- if the
+    # disclosure source can't vouch for the ticker, the entry is refused,
+    # never waved through. Exits (close_position, AutoTrader's flatten)
+    # don't go through here.
+    disclosure_type: str | None = None
+    if side == OrderSide.BUY:
+        from daytrade_it.infrastructure.external.dart_disclosure_db import (  # noqa: PLC0415
+            DartDisclosureDB,
+            DisclosureDataUnavailable,
+        )
+
+        try:
+            disclosure_type = DartDisclosureDB(_DART_DB_PATH).hard_disclosure(signal.ticker.value)
+        except DisclosureDataUnavailable as exc:
+            raise ValueError(
+                f"DART disclosure data unavailable -- refusing entry (fail-closed): {exc}"
+            ) from exc
+
+    # sentiment stays None: only bullish news signals reach this tool, so a
+    # bearish-sentiment entry block could never fire here.
     validation = ctx.risk_manager.validate_trade(
         signal=signal,
         account=risk_account,
         current_positions=risk_positions,
         sentiment=None,
-        disclosure_type=None,
+        disclosure_type=disclosure_type,
     )
     if not validation.is_approved:
         raise ValueError(f"Trade rejected by risk gate: {validation.reason}")

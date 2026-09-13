@@ -75,6 +75,58 @@ class TestClassifyDisclosureSeverity:
         assert classify_disclosure_severity("은행거래정지") is DisclosureSeverity.HARD
 
 
+class TestTradingHaltReasons:
+    """Trading-halt titles are judged by their stated reason.
+
+    Every title below is copied verbatim from scalp-it's data/dart.db
+    (OpenDART report_nm, 2026-07..09). Most halts on KRX are mechanical --
+    a stock split's re-listing, a bonus issue, or the 30-minute pause that
+    follows a material contract -- and gating on the bare word would block
+    exactly the news this system buys.
+    """
+
+    def test_bare_halt_without_reason_stays_hard(self) -> None:
+        # No reason given -> can't tell it's benign -> conservative.
+        assert classify_disclosure_severity("[기재정정]주권매매거래정지") is DisclosureSeverity.HARD
+
+    def test_mechanical_halts_are_unclassified(self) -> None:
+        mechanical = [
+            "주권매매거래정지 (주식의 병합, 분할 등 전자등록 변경, 말소)",
+            "주권매매거래정지해제 (액면병합 주권 변경상장)",
+            "주권매매거래정지해제 (감자 주권 변경상장)",
+            "주권매매거래정지 (단일판매공급계약)",
+            "주권매매거래정지 (무상증자)",
+            "매매거래정지및정지해제(중요내용공시)",
+            "주권매매거래정지기간변경 (주식의 병합, 분할 등 전자등록 변경, 말소)",
+            "주권매매거래정지해제 (상장유지 결정)",
+            "주권매매거래정지 (풍문 또는 보도 관련)",
+        ]
+        for title in mechanical:
+            assert classify_disclosure_severity(title) is DisclosureSeverity.UNCLASSIFIED, title
+
+    def test_halts_with_a_hard_reason_stay_hard(self) -> None:
+        hard = [
+            "주권매매거래정지 (상장폐지 사유발생)",
+            "주권매매거래정지해제 (상장폐지에 따른 정리매매 개시)",
+            "주권매매거래정지기간변경 (상장적격성 실질심사 대상(사유발생))",
+            "주권매매거래정지기간변경 (개선기간 부여)",
+            "주권매매거래정지 (투자자 보호)",
+            "주권매매거래정지기간변경 (회생절차 개시결정)",
+            "주권매매거래정지기간변경 (풍문사유(현직 임원의 횡령·배임혐의설) 미해소)",
+        ]
+        for title in hard:
+            assert classify_disclosure_severity(title) is DisclosureSeverity.HARD, title
+
+    def test_non_halt_hard_titles_are_unchanged(self) -> None:
+        # The reason rule applies to halt titles only.
+        assert classify_disclosure_severity("상장폐지결정") is DisclosureSeverity.HARD
+        assert classify_disclosure_severity("횡령ㆍ배임혐의발생") is DisclosureSeverity.HARD
+        assert (
+            classify_disclosure_severity("[기재정정]주요사항보고서(회생절차개시신청)")
+            is DisclosureSeverity.HARD
+        )
+
+
 class TestRiskGateDisclosureDriven:
     """Hard-severity disclosures force REJECT/HALT_ENTRY/FORCE_EXIT."""
 

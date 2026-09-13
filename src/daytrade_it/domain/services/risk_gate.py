@@ -146,6 +146,46 @@ _HARD_SEVERITY_KEYWORDS: tuple[str, ...] = (
 )
 
 
+#: Halt-family titles ("주권매매거래정지 (사유)", "...해제 (...)", "...기간변경 (...)").
+_HALT_KEYWORD = "매매거래정지"
+
+#: A trading-halt title is HARD only when its stated reason contains one of
+#: these. Checked against scalp-it's data/dart.db (26,551 OpenDART titles,
+#: 2026-07..09, 2026-09-13): of the 121+87+20 halt/lift/extension notices,
+#: most are mechanical -- stock split/merge re-listings (81 + 55), bonus
+#: issues, capital reductions, and the 30-minute pause after a material
+#: disclosure such as "(단일판매공급계약)", which is the very news a
+#: news-driven BUY acts on. Gating on the bare word would block those.
+#: Rumor/press-inquiry halts ("풍문") stay unclassified: they resolve either
+#: way, and the embezzlement-rumor case is still caught by "횡령"/"배임".
+_HARD_HALT_REASON_KEYWORDS: tuple[str, ...] = (
+    "상장폐지",
+    "상장적격성",  # listing-eligibility review
+    "개선기간",  # improvement period granted in a delisting review
+    "관리종목",
+    "투자자 보호",
+    "투자자보호",
+    "회생",
+    "파산",
+    "부도",
+    "횡령",
+    "배임",
+    "의견거절",
+    "부적정",
+    "감사범위제한",
+)
+
+
+def _is_hard_halt(disclosure_type: str) -> bool:
+    """Judge a halt-family title by its reason; no stated reason stays HARD."""
+    reason = disclosure_type.split(_HALT_KEYWORD, 1)[1]
+    # Drop the title's own suffix words, keep only the parenthesized reason.
+    reason = reason.split("(", 1)[1] if "(" in reason else ""
+    if not reason.strip(" )"):
+        return True
+    return any(keyword in reason for keyword in _HARD_HALT_REASON_KEYWORDS)
+
+
 def classify_disclosure_severity(disclosure_type: str | None) -> DisclosureSeverity:
     """Classify a DART ``disclosure_type`` (report_nm) string by severity.
 
@@ -160,6 +200,12 @@ def classify_disclosure_severity(disclosure_type: str | None) -> DisclosureSever
     """
     if not disclosure_type:
         return DisclosureSeverity.UNCLASSIFIED
+    if _HALT_KEYWORD in disclosure_type:
+        return (
+            DisclosureSeverity.HARD
+            if _is_hard_halt(disclosure_type)
+            else DisclosureSeverity.UNCLASSIFIED
+        )
     for keyword in _HARD_SEVERITY_KEYWORDS:
         if keyword in disclosure_type:
             return DisclosureSeverity.HARD

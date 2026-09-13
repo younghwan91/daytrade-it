@@ -182,6 +182,31 @@ else
     bad "DB 점검 실패: $(echo "$DB_CHECK" | tail -1)"
 fi
 
+# ─────────────────────────────────── 7. DART 공시 게이트 입력 (scalp-it data/dart.db)
+sec "7) DART 공시 게이트 -- ../scalp-it/data/dart.db 신선도"
+# execute_trade 는 이 파일이 없거나 30분 넘게 갱신 안 됐으면 매수를 전부 거부한다
+# (fail-closed, infrastructure/external/dart_disclosure_db.py). 08:40 scalp-dart 크론이
+# 실패했다면 여기서 먼저 드러나야 한다 -- 장이 열린 뒤 진입 거부로 알게 되면 늦다.
+DART_CHECK=$(uv run python - <<'PY' 2>&1
+from daytrade_it.infrastructure.external.dart_disclosure_db import (
+    DartDisclosureDB,
+    DisclosureDataUnavailable,
+)
+from daytrade_it.interfaces.mcp import tools
+
+try:
+    DartDisclosureDB(tools._DART_DB_PATH).hard_disclosure("005930")
+except DisclosureDataUnavailable as exc:
+    raise SystemExit(str(exc))
+print("OK")
+PY
+)
+if [ "$DART_CHECK" = "OK" ]; then
+    ok "dart.db 30분 이내 갱신 -- 공시 게이트 입력 정상"
+else
+    bad "공시 게이트 입력 불가 -- 오늘 매수가 전부 거부된다: $(echo "$DART_CHECK" | tail -1)"
+fi
+
 echo
 echo "──────────────────────────────────────────"
 if [ "$FAIL" -eq 0 ]; then
