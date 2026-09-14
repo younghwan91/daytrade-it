@@ -88,7 +88,7 @@ def live_entry_ts(r: dict, delay_min: int) -> dt.datetime | None:
 def main() -> None:
     require_backtest_host()
     ap = argparse.ArgumentParser()
-    ap.add_argument("--universe", choices=["buy", "pos", "all"], default="buy")
+    ap.add_argument("--universe", choices=["buy", "buy_nocap", "pos", "all"], default="buy")
     ap.add_argument("--min-n", type=int, default=15)
     ap.add_argument(
         "--delay",
@@ -145,6 +145,8 @@ def main() -> None:
 
     if a.universe == "buy":
         uni = [r for r in kept if (r["score"] or 0) > 0.15 and r["pre_move"] <= 0.02]
+    elif a.universe == "buy_nocap":
+        uni = [r for r in kept if (r["score"] or 0) > 0.15]
     elif a.universe == "pos":
         uni = [r for r in kept if (r["score"] or 0) > 0]
     else:
@@ -154,15 +156,17 @@ def main() -> None:
     def bucket(r: dict, dim: str):
         v = r.get(dim)
         if dim == "pre_move":
-            return (
-                "<-3%"
-                if v < -0.03
-                else "-3~-1%"
-                if v < -0.01
-                else "-1~+1%"
-                if v <= 0.01
-                else ">+1%"
-            )
+            for hi, label in (
+                (-0.03, "<-3%"),
+                (-0.01, "-3~-1%"),
+                (0.01, "-1~+1%"),
+                (0.02, "+1~+2%"),
+                (0.05, "+2~+5%"),
+                (0.10, "+5~+10%"),
+            ):
+                if v <= hi:
+                    return label
+            return ">+10%"
         if dim == "score":
             return (
                 None if v is None else "<=0.15" if v <= 0.15 else "0.15~0.4" if v <= 0.4 else ">0.4"
@@ -189,6 +193,7 @@ def main() -> None:
         "market",
         "category",
         "source",
+        "trade_day",
     ]
     hs = [str(h) for h in HORIZONS]
 
@@ -223,7 +228,7 @@ def main() -> None:
             print(
                 f"{dim:>18} {str(k)[:14]:>14} {len(rs):4d} "
                 + " ".join(f"{m * 100:+6.2f}" for m in means)
-                + f"   {b:>5}  {sum(agree) / len(agree):.0%}"
+                + f"   {b:>5}  {(sum(agree) / len(agree)) if agree else float('nan'):.0%}"
             )
 
 
