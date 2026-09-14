@@ -104,7 +104,12 @@ def main() -> None:
     for h in hs:
         h["feat"] = em.features(h)
     hs = [h for h in hs if len(h["feat"][0])]
+    cp.pre_moves(cur, hs)
+    cap = os.environ.get("PRE_MOVE_CAP")
+    if cap:
+        hs = [h for h in hs if h["pre_move"] is not None and h["pre_move"] <= float(cap)]
     days = sorted({h["r"]["trade_day"] for h in hs})
+    print(f"추격 금지 상한 {cap or '없음'}, 보유 후보 {len(hs)}")
 
     res: dict[str, dict[str, tuple[float, float]]] = defaultdict(dict)
     chosen = defaultdict(list)
