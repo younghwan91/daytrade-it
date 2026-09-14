@@ -71,7 +71,9 @@ from daytrade_it.application.trading.exit_rules import (
 )
 
 
-def bars_from(closes: list[float], start: str = "2026-09-01T09:00", vols: list[int] | None = None) -> list[Bar]:
+def bars_from(
+    closes: list[float], start: str = "2026-09-01T09:00", vols: list[int] | None = None
+) -> list[Bar]:
     t0 = datetime.fromisoformat(start)
     out = []
     for i, c in enumerate(closes):
@@ -217,7 +219,9 @@ class ExitRule(Protocol):
 
     def intrabar(self, bar: Bar, entry_price: float) -> PriceHit | None: ...
 
-    def on_close(self, bars: Sequence[Bar], entry_idx: int, i: int, entry_price: float) -> str | None: ...
+    def on_close(
+        self, bars: Sequence[Bar], entry_idx: int, i: int, entry_price: float
+    ) -> str | None: ...
 
 
 class _NoIntrabar:
@@ -226,7 +230,9 @@ class _NoIntrabar:
 
 
 class _NoClose:
-    def on_close(self, bars: Sequence[Bar], entry_idx: int, i: int, entry_price: float) -> str | None:  # noqa: ARG002
+    def on_close(
+        self, bars: Sequence[Bar], entry_idx: int, i: int, entry_price: float
+    ) -> str | None:  # noqa: ARG002
         return None
 
 
@@ -243,7 +249,9 @@ class Trailing(_NoIntrabar):
     def name(self) -> str:
         return f"T{self.pct:g}"
 
-    def on_close(self, bars: Sequence[Bar], entry_idx: int, i: int, entry_price: float) -> str | None:  # noqa: ARG002
+    def on_close(
+        self, bars: Sequence[Bar], entry_idx: int, i: int, entry_price: float
+    ) -> str | None:  # noqa: ARG002
         peak = max(b.high for b in bars[entry_idx : i + 1])
         return "trailing" if bars[i].close <= peak * (1 - self.pct) else None
 
@@ -276,7 +284,9 @@ class TimeExit(_NoIntrabar):
     def name(self) -> str:
         return f"H{self.minutes}"
 
-    def on_close(self, bars: Sequence[Bar], entry_idx: int, i: int, entry_price: float) -> str | None:  # noqa: ARG002
+    def on_close(
+        self, bars: Sequence[Bar], entry_idx: int, i: int, entry_price: float
+    ) -> str | None:  # noqa: ARG002
         return "time" if i - entry_idx + 1 >= self.minutes else None
 
 
@@ -289,7 +299,9 @@ class MomentumFade(_NoIntrabar):
     def name(self) -> str:
         return f"M{self.min_gain_pct:g}/{self.window}"
 
-    def on_close(self, bars: Sequence[Bar], entry_idx: int, i: int, entry_price: float) -> str | None:
+    def on_close(
+        self, bars: Sequence[Bar], entry_idx: int, i: int, entry_price: float
+    ) -> str | None:
         span = bars[entry_idx : i + 1]
         if len(span) < 2 * self.window:
             return None
@@ -446,7 +458,11 @@ def eval_rows() -> list[dict]:
         r = json.loads(line)
         key = f"{r['article_id']}|{r['ticker']}"
         j = cache.get(key)
-        score = _enp.v2_score(j, drop_mention=True, drop_price_move=False, use_surprise=False) if j else 0.0
+        score = (
+            _enp.v2_score(j, drop_mention=True, drop_price_move=False, use_surprise=False)
+            if j
+            else 0.0
+        )
         wide = r["pre_news_move"] <= MAX_PRE_MOVE
         out.append(
             {
@@ -640,7 +656,10 @@ def load_bars(cur, code: str, day: str) -> list[Bar]:
         "where code = %s and ts >= %s::date + time '09:00' and ts < %s::date + time '15:31' order by ts",
         (code, day, day),
     )
-    return [Bar(ts, float(o), float(h), float(lo), float(c), int(v)) for ts, o, h, lo, c, v in cur.fetchall()]
+    return [
+        Bar(ts, float(o), float(h), float(lo), float(c), int(v))
+        for ts, o, h, lo, c, v in cur.fetchall()
+    ]
 
 
 def entry_index(bars: list[Bar], entry_ts: str) -> int | None:
@@ -690,10 +709,35 @@ def run(phase: str, frozen: list[str] | None) -> None:
             base = simulate_exit(bars, i, bars[i].open, Baseline())
             for rule in rules:
                 r = simulate_exit(bars, i, bars[i].open, rule)
-                rows.append({**s, "rule": rule.name, "net": r.net_return, "base_net": base.net_return, "reason": r.reason})
+                rows.append(
+                    {
+                        **s,
+                        "rule": rule.name,
+                        "net": r.net_return,
+                        "base_net": base.net_return,
+                        "reason": r.reason,
+                    }
+                )
     with RESULTS.open("a") as f:
         for r in rows:
-            f.write(json.dumps({k: r[k] for k in ("key", "rule", "split", "ops", "wide", "net", "base_net", "reason")}) + "\n")
+            f.write(
+                json.dumps(
+                    {
+                        k: r[k]
+                        for k in (
+                            "key",
+                            "rule",
+                            "split",
+                            "ops",
+                            "wide",
+                            "net",
+                            "base_net",
+                            "reason",
+                        )
+                    }
+                )
+                + "\n"
+            )
     print(f"phase={phase} samples={len(samples)} skipped(no/gappy bars)={skipped}")
     for subset in ("ops", "wide"):
         by_rule: dict[str, list[dict]] = defaultdict(list)
@@ -701,7 +745,10 @@ def run(phase: str, frozen: list[str] | None) -> None:
             if r[subset]:
                 by_rule[r["rule"]].append(r)
         print(f"\n[{subset}]  rule | n | mean | median | hit | winsor | Δmedian vs B | Δ 95% CI")
-        for name, rs in sorted(by_rule.items(), key=lambda kv: -statistics.median(x["net"] - x["base_net"] for x in kv[1])):
+        for name, rs in sorted(
+            by_rule.items(),
+            key=lambda kv: -statistics.median(x["net"] - x["base_net"] for x in kv[1]),
+        ):
             nets = [x["net"] for x in rs]
             diffs = [x["net"] - x["base_net"] for x in rs]
             lo, hi = boot_ci(diffs)
@@ -866,7 +913,9 @@ def simulate_position(
                 break
     invested = sum(c * (1 + FEE) for c in costs)
     proceeds = exit_.exit_price * len(costs) * (1 - SELL_TAX - FEE)
-    return PositionResult(True, len(costs), statistics.fmean(costs), proceeds / invested - 1, exit_.reason)
+    return PositionResult(
+        True, len(costs), statistics.fmean(costs), proceeds / invested - 1, exit_.reason
+    )
 ```
 
 파일 상단 import에 `import statistics`를 추가한다.
@@ -890,15 +939,23 @@ ADD_GRID = [AddPolicy(e) for e in (0.02, 0.03, 0.05, None)]
 `run()`에 `stage` 인자를 받아 `stage == "entry"`면 규칙 루프 대신 다음을 쓴다. 청산 규칙은 `--exit-rule` 이름으로 `GRID`와 `Baseline()`에서 찾는다. 기준선은 `EntryPolicy(0.0, 5)` + `AddPolicy(None)` (현재 운영).
 
 ```python
-            ref = bars[i].open
-            base = simulate_position(bars, i, ref, EntryPolicy(0.0, 5), AddPolicy(None), exit_rule)
-            for ep in ENTRY_GRID:
-                for ap in ADD_GRID:
-                    name = f"E{ep.discount:g}/{ep.ttl}+A{ap.drop if ap.drop is not None else '-'}"
-                    if frozen is not None and name not in frozen:
-                        continue
-                    r = simulate_position(bars, i, ref, ep, ap, exit_rule)
-                    rows.append({**s, "rule": name, "net": r.net_return, "base_net": base.net_return, "reason": r.reason})
+ref = bars[i].open
+base = simulate_position(bars, i, ref, EntryPolicy(0.0, 5), AddPolicy(None), exit_rule)
+for ep in ENTRY_GRID:
+    for ap in ADD_GRID:
+        name = f"E{ep.discount:g}/{ep.ttl}+A{ap.drop if ap.drop is not None else '-'}"
+        if frozen is not None and name not in frozen:
+            continue
+        r = simulate_position(bars, i, ref, ep, ap, exit_rule)
+        rows.append(
+            {
+                **s,
+                "rule": name,
+                "net": r.net_return,
+                "base_net": base.net_return,
+                "reason": r.reason,
+            }
+        )
 ```
 
 argparse에 `--stage {exit,entry}`(기본 exit), `--exit-rule`(기본 `B`) 추가. 표 출력은 그대로 재사용한다(체결 안 된 쌍은 net=0으로 들어가 있다).
