@@ -7,10 +7,11 @@
   뉴스핌 "[리포트 브리핑]"도 로보뉴스다. 증권사 리포트라는 새 정보를 담지만 사용자
   지시(2026-09-15 "로봇 기사는 당연히 빼야지")로 뺀다.
 - listing: 시황·공시 목록·표·일정·헤드라인 모음. 특정 회사의 재료가 아니다.
-- not_about_company: 제목에 회사명이 없다. Toss 종목 페이지에는 시장 전체 기사도
-  섞이고 목록 API의 `stockCodes`는 비어 있어서, 제목이 사실상 유일한 관련성 신호다.
-
-`reports_price_move`는 거르지 않고 표시만 한다(사람이 쓴 "[특징주]" 등). 평가에서 따로 본다.
+`name_in_title`, `reports_price_move`는 거르지 않고 표시만 한다. 운영은 제목이 아니라
+Toss가 붙인 종목 태그(대시보드 `relatedStocks`)로 매매한다. 종목 페이지 목록의 기사는
+상세 API `stockCodes`에 그 종목이 들어 있었다(2026-09-15, 3종목 24건 중 24건). 그래서
+제목에 회사명이 없다고 버리면 운영보다 좁은 표본이 된다. 09-01~14 운영형 쌍 512개 중
+36%는 제목에 회사명이 없었다(대부분 subject=mention).
 """
 
 from __future__ import annotations
@@ -37,6 +38,7 @@ _CORP_MARKS = re.compile(r"\s|\(주\)|㈜|주식회사")
 class PrefilterDecision:
     keep: bool
     reason: str
+    name_in_title: bool = False
     reports_price_move: bool = False
 
 
@@ -52,6 +54,6 @@ def prefilter(*, title: str, summary: str, source: str, company_name: str) -> Pr
     if _LISTING_TITLE.search(title):
         return PrefilterDecision(False, "listing")
     name = _norm(company_name)
-    if not name or name not in _norm(title):
-        return PrefilterDecision(False, "not_about_company")
-    return PrefilterDecision(True, "ok", bool(_PRICE_MOVE_TITLE.search(title)))
+    return PrefilterDecision(
+        True, "ok", bool(name) and name in _norm(title), bool(_PRICE_MOVE_TITLE.search(title))
+    )

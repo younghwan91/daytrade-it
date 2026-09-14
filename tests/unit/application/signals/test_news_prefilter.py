@@ -50,14 +50,14 @@ def test_robot_and_listing_articles_are_dropped(
     assert (d.keep, d.reason) == (False, reason)
 
 
-def test_company_name_must_be_in_title() -> None:
+def test_article_without_company_name_is_kept_but_flagged() -> None:
     d = prefilter(
         title="상법 개정 후 첫 주총 시즌… 기업 '정관 변경·자사주 소각' 대응",
         summary="",
         source="infostockdaily",
         company_name="예시반도체",
     )
-    assert (d.keep, d.reason) == (False, "not_about_company")
+    assert (d.keep, d.name_in_title) == (True, False)
 
 
 def test_company_name_match_ignores_spaces_and_corp_marks() -> None:
@@ -67,7 +67,7 @@ def test_company_name_match_ignores_spaces_and_corp_marks() -> None:
         source="hankyung",
         company_name="HD현대마린솔루션(주)",
     )
-    assert d.keep
+    assert d.keep and d.name_in_title
 
 
 def test_human_article_about_company_is_kept_with_price_report_flag() -> None:
