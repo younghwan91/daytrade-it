@@ -136,6 +136,17 @@ def simulate_day(hs: list[dict], exits: dict, rank: str, reentry: str, seed: int
     return vals
 
 
+def pre_moves(cur, hs: list[dict]) -> None:
+    """h["pre_move"] = 진입 분 시가 / 전일 종가 - 1 (운영 추격 금지 필터와 같은 기준)."""
+    for h in hs:
+        cur.execute(
+            "select close from daily_bars_adjusted where code = %s and date < %s order by date desc limit 1",
+            (h["r"]["ticker"], h["r"]["trade_day"]),
+        )
+        row = cur.fetchone()
+        h["pre_move"] = (float(h["b"][h["i0"], 0]) / float(row[0]) - 1) if row else None
+
+
 def main() -> None:
     require_backtest_host()
     conn = psycopg2.connect(os.environ["KR_QUANT_DB"], connect_timeout=5)
@@ -146,8 +157,12 @@ def main() -> None:
     for h in hs:
         h["feat"] = em.features(h)
     hs = [h for h in hs if len(h["feat"][0])]
+    pre_moves(cur, hs)
+    cap = os.environ.get("PRE_MOVE_CAP")
+    if cap:
+        hs = [h for h in hs if h["pre_move"] is not None and h["pre_move"] <= float(cap)]
     days = sorted({h["r"]["trade_day"] for h in hs})
-    print(f"보유 후보 {len(hs)}, 거래일 {days}")
+    print(f"보유 후보 {len(hs)}, 거래일 {days}, 추격 금지 상한 {cap or '없음'}")
 
     results: dict[tuple, dict[str, list[float]]] = defaultdict(dict)
     p_used = []
