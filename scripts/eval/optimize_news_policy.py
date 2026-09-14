@@ -42,6 +42,7 @@ MAX_PER_DAY = 10
 MAX_OPEN = 5
 CLOSE = 999  # hold 분 값이 이 이상이면 15:00까지
 SESSIONS = ("pre_market", "intraday", "after_close")
+TIE_ORDER: dict[str, float] = {}
 
 
 @dataclass
@@ -178,7 +179,9 @@ def run_policy(pairs: list[Pair], params: dict) -> list[dict]:
     for p in pairs:
         by_day.setdefault(p.day, []).append(p)
     for day, ps in by_day.items():
-        ps = sorted(ps, key=lambda p: p.entry)
+        # 같은 분(특히 09:01 장 전 기사 묶음)의 처리 순서는 운영에서도 대시보드 순서라 정해져
+        # 있지 않다. TIE_ORDER 시드로 섞어 순서 운을 결과에서 분리한다.
+        ps = sorted(ps, key=lambda p: (p.entry, TIE_ORDER.get(p.key, 0.0)))
         open_until: list[dt.datetime] = []
         tickers: set[str] = set()
         n = 0
@@ -250,7 +253,7 @@ def summary(trades: list[dict]) -> str:
     ex = [t["excess"] for t in trades]
     net = [t["net"] for t in trades]
     return (
-        f"n={len(trades):3d} 초과합={sum(ex) * 100:+7.2f}%p 초과평균={statistics.fmean(ex) * 100:+.2f}%p "
+        f"n={len(trades):3d} 절삭초과합={score(trades) * 100:+7.2f}%p 초과합={sum(ex) * 100:+7.2f}%p 초과평균={statistics.fmean(ex) * 100:+.2f}%p "
         f"순수익평균={statistics.fmean(net) * 100:+.2f}% 적중={sum(x > 0 for x in net) / len(net):.0%}"
     )
 
@@ -261,9 +264,15 @@ def main() -> None:
     ap.add_argument("--trials", type=int, default=300)
     ap.add_argument("--delay", type=int, default=18)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--tie-seed", type=int, default=None, help="같은 분 신호 처리 순서를 섞는 시드")
     a = ap.parse_args()
 
     pairs = load_pairs(a.delay)
+    if a.tie_seed is not None:
+        import random  # noqa: PLC0415
+
+        rng = random.Random(a.tie_seed)
+        TIE_ORDER.update({p.key: rng.random() for p in pairs})
     days = sorted({p.day for p in pairs})
     print(f"BUY 쌍 {len(pairs)}개, 거래일 {days}")
     oof_base, oof_opt = [], []
