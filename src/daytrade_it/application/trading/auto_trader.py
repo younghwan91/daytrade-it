@@ -60,10 +60,12 @@ logger = get_logger(__name__)
 @dataclass(frozen=True)
 class TradingLimits:
     max_order_notional: Decimal = Decimal("400000")
-    #: 2, not more: scalp-it trades the same Kiwoom account and cash (~1.1M
-    #: KRW deposit on 2026-09-13), and RiskManager's default exposure check
-    #: rejects past ~500k KRW of held value anyway.
-    max_open_positions: int = 2
+    #: 5 from 2026-09-15 (user directive): on 09-14 a cap of 2 filled at
+    #: 09:00 and skipped ~25 later signals, so the forward sample was 2 trades.
+    #: Still bounded: scalp-it trades the same Kiwoom account and cash (~1.1M
+    #: KRW deposit), and RiskManager's exposure check rejects new entries once
+    #: the account holds more than ~500k KRW of value.
+    max_open_positions: int = 5
     max_entries_per_day: int = 10
     entry_start: dt.time = dt.time(9, 0, 30)
     #: Leave time for the move the eval measured (entry -> close).
