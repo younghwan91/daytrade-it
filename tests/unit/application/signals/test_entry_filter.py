@@ -63,6 +63,12 @@ def test_extended_stock_is_refused() -> None:
     assert signal is None
 
 
+def test_up_two_and_a_half_percent_still_confirms() -> None:
+    """2.5% was refused under the old 2% cap; the 3% cap won the policy eval."""
+    signal, _ = _run("71700", "71750", 70000.0)
+    assert signal is not None
+
+
 def test_limit_up_stock_with_empty_ask_is_refused_not_misread_as_crash() -> None:
     """ask=0 at 상한가 must read as the bid price (+30%, refused), not bid/2."""
     signal, _ = _run("91000", "0", 70000.0)

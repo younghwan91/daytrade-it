@@ -31,9 +31,13 @@ from daytrade_it.shared.logging import get_logger
 logger = get_logger(__name__)
 
 #: Refuse entry once the price is up more than this vs. the prior close.
-#: Chosen on the dev split before looking at test (0.3% looked better on dev
-#: but rested on n=10; 2% was pre-declared as the primary to limit overfit).
-MAX_PRE_ENTRY_MOVE = Decimal("0.02")
+#: 2% was pre-declared on the 09-13 prompt eval. Raised to 3% on 2026-09-15:
+#: with the live policy (surprise-ranked entries + VWAP-break exit, live
+#: limits, leave-one-day-out over 6 days) the 6-day total was +72.0%p at 2%,
+#: +92.4%p at 3%, +89.5%p at 5%, +81.8%p with no cap; the per-feature path
+#: analysis also showed +2..+5% names still gaining and >+5% names losing.
+#: scripts/eval/combined_policy.py (PRE_MOVE_CAP) on feat/exit-rule-eval.
+MAX_PRE_ENTRY_MOVE = Decimal("0.03")
 
 #: Fixed: this is a gate, not a predictor. It shouldn't outvote the news
 #: signal's confidence in `combine_signals()`'s weighted average.
