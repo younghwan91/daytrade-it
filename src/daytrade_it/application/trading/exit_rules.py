@@ -61,8 +61,12 @@ class _NoIntrabar:
 
 class _NoClose:
     def on_close(
-        self, bars: Sequence[Bar], entry_idx: int, i: int, entry_price: float
-    ) -> str | None:  # noqa: ARG002
+        self,
+        bars: Sequence[Bar],  # noqa: ARG002
+        entry_idx: int,  # noqa: ARG002
+        i: int,  # noqa: ARG002
+        entry_price: float,  # noqa: ARG002
+    ) -> str | None:
         return None
 
 
@@ -80,8 +84,12 @@ class Trailing(_NoIntrabar):
         return f"T{self.pct:g}"
 
     def on_close(
-        self, bars: Sequence[Bar], entry_idx: int, i: int, entry_price: float
-    ) -> str | None:  # noqa: ARG002
+        self,
+        bars: Sequence[Bar],  # noqa: ARG002
+        entry_idx: int,  # noqa: ARG002
+        i: int,  # noqa: ARG002
+        entry_price: float,  # noqa: ARG002
+    ) -> str | None:
         peak = max(b.high for b in bars[entry_idx : i + 1])
         return "trailing" if bars[i].close <= peak * (1 - self.pct) else None
 
@@ -115,8 +123,12 @@ class TimeExit(_NoIntrabar):
         return f"H{self.minutes}"
 
     def on_close(
-        self, bars: Sequence[Bar], entry_idx: int, i: int, entry_price: float
-    ) -> str | None:  # noqa: ARG002
+        self,
+        bars: Sequence[Bar],  # noqa: ARG002
+        entry_idx: int,  # noqa: ARG002
+        i: int,  # noqa: ARG002
+        entry_price: float,  # noqa: ARG002
+    ) -> str | None:
         return "time" if i - entry_idx + 1 >= self.minutes else None
 
 
