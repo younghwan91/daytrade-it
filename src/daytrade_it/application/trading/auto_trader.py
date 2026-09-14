@@ -10,6 +10,14 @@ the share price. The poller ranks each polled batch with `rank_batch` before
 entering, so when the slots fill at the open the highest-`surprise` names get
 them.
 
+Pyramiding (불타기, from 2026-09-15): once per ticker, 1 more share when the
+position is up >= +1% and the last completed 1-minute close is above the
+session VWAP with MA5 > MA20. It cannot go through `execute_trade` (that
+refuses a BUY on a held ticker), so it goes straight to the broker with the
+entry safeguards rebuilt here: 1 share LIMIT at the ask, kill switch, DART
+hard-disclosure gate (fail-closed), +/-3% band vs the last close, deposit
+cash, and a cap on what the trader holds (`max_trader_exposure`).
+
 Safety design follows scalp-it's order-safety audit
 (scalp-it docs/research/manju/41-order-safety-audit.md):
 
@@ -49,7 +57,7 @@ from typing import Any
 from uuid import UUID
 
 from daytrade_it.domain.entities.signal import SignalDirection, TradingSignal
-from daytrade_it.domain.services.risk_manager import RiskManager
+from daytrade_it.domain.services.risk_manager import RiskConfig, RiskManager
 from daytrade_it.infrastructure.brokers.base import (
     BrokerInterface,
     MinuteBar,
@@ -99,6 +107,15 @@ class TradingLimits:
     #: One ka10080 call per held ticker per interval (<= 5 per minute); the
     #: token is shared with scalp-it's live loop.
     exit_check_every: dt.timedelta = dt.timedelta(minutes=1)
+    #: Pyramiding: out-of-fold over 6 days with the +3% no-chase cap, +144.9%p
+    #: vs +92.4%p without it, better on 5 of 6 days; +1% chosen in 6/6 folds.
+    add_on_min_gain: Decimal | None = Decimal("0.01")
+    add_on_price_band: Decimal = Decimal("0.03")
+    #: 1,000,000 KRW, user-approved 2026-09-15 for pyramiding. Caps add-ons
+    #: (limit value of entries + add-ons not yet exited) and sets the
+    #: RiskManager account-exposure check that gates entries (was ~500k).
+    #: The deposit-cash check still applies (cash is shared with scalp-it).
+    max_trader_exposure: Decimal = Decimal("1000000")
 
 
 @dataclass
@@ -111,6 +128,8 @@ class _DayState:
     #: the user's (e.g. bought by hand), not the trader's.
     never_filled: set[str] = field(default_factory=set)
     exit_attempts: dict[str, int] = field(default_factory=dict)
+    add_ons: dict[str, dict[str, Any]] = field(default_factory=dict)
+    open_add_on_orders: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 def rank_batch(items: list[tuple[TradingSignal, int, float]]) -> list[TradingSignal]:
@@ -136,6 +155,40 @@ def vwap_exit_hit(
     close = done[-1].close
     hit = close / entry - 1 >= min_gain and close / vwap - 1 < -gap
     return hit, close, vwap
+
+
+def add_on_hit(bars: list[MinuteBar], entry: Decimal, now: dt.datetime, min_gain: Decimal) -> bool:
+    """Up >= min_gain vs entry, last completed close above VWAP, MA5 > MA20."""
+    minute = now.replace(tzinfo=None, second=0, microsecond=0)
+    done = [b for b in bars if b.ts.time() >= dt.time(9, 0) and b.ts < minute]
+    volume = sum(b.volume for b in done)
+    if len(done) < 20 or volume <= 0 or entry <= 0:
+        return False
+    close = done[-1].close
+    vwap = sum(b.close * b.volume for b in done) / volume
+    ma5 = sum(b.close for b in done[-5:]) / 5
+    ma20 = sum(b.close for b in done[-20:]) / 20
+    return close / entry - 1 >= min_gain and close > vwap and ma5 > ma20
+
+
+def _disclosure_blocks(ticker: str) -> bool:
+    """True if a hard-severity DART filing exists or the data can't vouch (fail-closed)."""
+    from daytrade_it.infrastructure.external.dart_disclosure_db import (  # noqa: PLC0415
+        DartDisclosureDB,
+        DisclosureDataUnavailable,
+    )
+    from daytrade_it.interfaces.mcp import tools  # noqa: PLC0415
+
+    try:
+        return DartDisclosureDB(tools._DART_DB_PATH).hard_disclosure(ticker) is not None
+    except DisclosureDataUnavailable:
+        return True
+
+
+def _kill_switch_on() -> bool:
+    from daytrade_it.interfaces.mcp import tools  # noqa: PLC0415
+
+    return tools._KILL_SWITCH_PATH.exists()
 
 
 class _SignalLookup:
@@ -201,6 +254,12 @@ class AutoTrader:
             # instead of re-sending a rejected sell on every tick.
             s.exits[row["ticker"]] = row
             s.exit_attempts[row["ticker"]] = s.exit_attempts.get(row["ticker"], 0) + 1
+        elif ev in ("add_on_submitted", "add_on_failed", "add_on_dry_run"):
+            s.add_ons[row["ticker"]] = row
+            if row.get("order_id"):
+                s.open_add_on_orders[row["order_id"]] = row
+        elif ev in ("add_on_cancelled", "add_on_resolved"):
+            s.open_add_on_orders.pop(row["order_id"], None)
 
     def _today(self) -> dt.date:
         return self._clock().date()
@@ -276,11 +335,7 @@ class AutoTrader:
         except Exception:
             logger.exception("auto_trader: account lookup failed", ticker=ticker)
             return None
-        committed = sum(
-            Decimal(row["limit"])
-            for t, row in self._state.entries.items()
-            if t not in self._state.exits and row.get("limit")
-        )
+        committed = self._committed()
         if cash - committed < quote.ask * Decimal("1.01"):
             return skip(f"insufficient deposit cash ({cash} - {committed} committed)")
 
@@ -296,7 +351,12 @@ class AutoTrader:
         self._signals.put(signal)
         MCPToolContext.set_instance(
             MCPToolContext(
-                signal_repository=self._signals, broker=self._broker, risk_manager=RiskManager()
+                signal_repository=self._signals,
+                broker=self._broker,
+                risk_manager=RiskManager(
+                    # check_total_exposure allows max_position_value * 10.
+                    RiskConfig(max_position_value=self._limits.max_trader_exposure / 10)
+                ),
             )
         )
         try:
@@ -331,6 +391,15 @@ class AutoTrader:
         )
         return None
 
+    def _committed(self) -> Decimal:
+        """Limit value of today's entries and add-ons not yet exited."""
+        s = self._state
+        rows = [*s.entries.items(), *s.add_ons.items()]
+        return sum(
+            (Decimal(row["limit"]) for t, row in rows if t not in s.exits and row.get("limit")),
+            Decimal(0),
+        )
+
     def _open_position_count(self) -> int | None:
         """Pending entry orders plus shares the trader holds above baseline.
 
@@ -357,6 +426,9 @@ class AutoTrader:
             submitted = dt.datetime.fromisoformat(row["ts"])
             if now - submitted >= self._limits.entry_order_ttl:
                 self._cancel_entry(order_id, row["ticker"], reason="ttl")
+        for order_id, row in list(self._state.open_add_on_orders.items()):
+            if now - dt.datetime.fromisoformat(row["ts"]) >= self._limits.entry_order_ttl:
+                self._cancel_add_on(order_id, row["ticker"], reason="ttl")
         if now.time() >= self._limits.flatten_at:
             self.flatten()
         else:
@@ -391,6 +463,15 @@ class AutoTrader:
             hit, close, vwap = vwap_exit_hit(
                 bars, Decimal(entry_limit), now, lim.vwap_exit_gap, lim.vwap_exit_min_gain
             )
+            if not hit:
+                if (
+                    lim.add_on_min_gain is not None
+                    and ticker not in self._state.add_ons
+                    and now.time() < lim.entry_end
+                    and add_on_hit(bars, Decimal(entry_limit), now, lim.add_on_min_gain)
+                ):
+                    self._add_on(ticker, bars)
+                continue
             if hit:
                 self._record(
                     "exit_signal",
@@ -402,7 +483,90 @@ class AutoTrader:
                 logger.info(
                     "auto_trader: VWAP EXIT", ticker=ticker, close=str(close), vwap=str(vwap)
                 )
+                self._cancel_pending_add_ons(ticker, reason="exit")
+                qty = self._own_holdings_for(ticker) or qty
                 self._sell(ticker, qty)
+
+    def _add_on(self, ticker: str, bars: list[MinuteBar]) -> None:
+        """One more share of a held ticker (pyramiding), with entry safeguards rebuilt."""
+        lim = self._limits
+
+        def skip(reason: str) -> None:
+            logger.info("auto_trader: add-on skipped", ticker=ticker, reason=reason)
+
+        if _kill_switch_on():
+            return skip("kill switch")
+        try:
+            quote = self._broker.get_quote(ticker)
+            cash = self._broker.get_account().cash
+        except Exception:
+            logger.exception("auto_trader: add-on quote/account failed", ticker=ticker)
+            return None
+        last_close = bars[-1].close
+        if quote.ask <= 0 or last_close <= 0:
+            return skip("no ask")
+        if abs(quote.ask / last_close - 1) > lim.add_on_price_band:
+            return skip(f"ask {quote.ask} outside band vs last close {last_close}")
+        committed = self._committed()
+        if committed + quote.ask > lim.max_trader_exposure:
+            return skip(f"exposure cap ({committed} + {quote.ask} > {lim.max_trader_exposure})")
+        if cash - committed < quote.ask * Decimal("1.01"):
+            return skip(f"insufficient deposit cash ({cash} - {committed} committed)")
+        try:
+            blocked = _disclosure_blocks(ticker)
+        except Exception:
+            logger.exception("auto_trader: add-on disclosure check failed", ticker=ticker)
+            blocked = True
+        if blocked:
+            return skip("DART hard disclosure or data unavailable")
+        if not self._live:
+            self._record("add_on_dry_run", ticker=ticker, limit=str(quote.ask))
+            return None
+        try:
+            result = self._broker.place_order(
+                Order(
+                    ticker=ticker,
+                    quantity=Decimal(1),
+                    side=OrderSide.BUY,
+                    order_type=OrderType.LIMIT,
+                    limit_price=quote.ask,
+                )
+            )
+        except Exception as exc:
+            logger.exception("auto_trader: ADD-ON ORDER FAILED", ticker=ticker)
+            self._record("add_on_failed", ticker=ticker, error=str(exc))
+            return None
+        self._record(
+            "add_on_submitted", ticker=ticker, order_id=result.order_id, limit=str(quote.ask)
+        )
+        logger.info("auto_trader: ADD-ON SUBMITTED", ticker=ticker, limit=str(quote.ask))
+        return None
+
+    def _cancel_add_on(self, order_id: str, ticker: str, *, reason: str) -> None:
+        try:
+            status = self._broker.get_order_status(order_id)
+        except Exception:
+            self._record("add_on_resolved", order_id=order_id, ticker=ticker, reason=reason)
+            return
+        if status.remaining_quantity <= 0:
+            self._record("add_on_resolved", order_id=order_id, ticker=ticker, reason=reason)
+            return
+        try:
+            cancelled = self._broker.cancel_order(order_id)
+        except Exception:
+            logger.exception("auto_trader: add-on cancel failed", order_id=order_id, ticker=ticker)
+            return
+        if cancelled:
+            self._record("add_on_cancelled", order_id=order_id, ticker=ticker, reason=reason)
+
+    def _cancel_pending_add_ons(self, ticker: str | None, *, reason: str) -> None:
+        for order_id, row in list(self._state.open_add_on_orders.items()):
+            if ticker is None or row["ticker"] == ticker:
+                self._cancel_add_on(order_id, row["ticker"], reason=reason)
+
+    def _own_holdings_for(self, ticker: str) -> int | None:
+        own = self._own_holdings()
+        return None if own is None else own.get(ticker)
 
     def _cancel_entry(self, order_id: str, ticker: str, *, reason: str) -> None:
         try:
@@ -443,7 +607,8 @@ class AutoTrader:
         for ticker in self._state.entries:
             if ticker in self._state.never_filled:
                 continue
-            qty = min(held.get(ticker, 0) - baseline.get(ticker, 0), 1)
+            cap = 2 if ticker in self._state.add_ons else 1
+            qty = min(held.get(ticker, 0) - baseline.get(ticker, 0), cap)
             if qty > 0:
                 own[ticker] = qty
         return own
@@ -466,6 +631,7 @@ class AutoTrader:
             return
         for order_id, row in list(self._state.open_entry_orders.items()):
             self._cancel_entry(order_id, row["ticker"], reason="flatten")
+        self._cancel_pending_add_ons(None, reason="flatten")
 
         own_holdings = self._own_holdings()
         if own_holdings is None:

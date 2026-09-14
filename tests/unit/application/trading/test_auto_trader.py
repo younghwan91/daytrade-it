@@ -131,6 +131,9 @@ def _no_kill_switch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from daytrade_it.interfaces.mcp import tools
 
     monkeypatch.setattr(tools, "_KILL_SWITCH_PATH", tmp_path / "no_such_live_STOP")
+    from daytrade_it.application.trading import auto_trader
+
+    monkeypatch.setattr(auto_trader, "_disclosure_blocks", lambda _ticker: False)
 
 
 def _trader(tmp_path: Path, broker: FakeBroker, clock: Clock, *, live: bool = True) -> AutoTrader:
@@ -490,3 +493,125 @@ def test_rank_batch_orders_by_surprise_then_score() -> None:
     a, b, c = _signal("000001"), _signal("000002"), _signal("000003")
     ranked = rank_batch([(a, 0, 0.9), (b, 1, 0.2), (c, 1, 0.5)])
     assert [s.ticker.value for s in ranked] == ["000003", "000002", "000001"]
+
+
+# -- pyramiding (불타기) ----------------------------------------------------------
+
+
+def _rising(until_minute: int = 25, step: int = 50) -> list[MinuteBar]:
+    """09:01..09:MM closes 70000 +50/min, even volume: last close above VWAP, MA5 > MA20."""
+    return _bars(*[(f"09:{m:02d}", 70000 + step * m, 100) for m in range(1, until_minute + 1)])
+
+
+def _buys(broker: FakeBroker) -> list:
+    return [o for o in broker.orders if o.side == OrderSide.BUY]
+
+
+async def test_add_on_buys_one_share_when_trend_holds(tmp_path: Path) -> None:
+    broker = FakeBroker()
+    trader, clock = await _held_from_0901(tmp_path, broker)
+    broker.bars = {"005930": _rising()}  # last close 71250: +1.6% vs 70100
+    clock.now = clock.now.replace(minute=26)
+    trader.manage()
+    buys = _buys(broker)
+    assert [(o.quantity, o.order_type, o.limit_price) for o in buys[1:]] == [
+        (1, OrderType.LIMIT, Decimal("70100"))
+    ]
+    assert "add_on_submitted" in _events(tmp_path)
+
+
+async def test_add_on_happens_at_most_once_per_ticker(tmp_path: Path) -> None:
+    broker = FakeBroker()
+    trader, clock = await _held_from_0901(tmp_path, broker)
+    broker.bars = {"005930": _rising()}
+    clock.now = clock.now.replace(minute=26)
+    trader.manage()
+    broker.fill("0000002", "005930")
+    broker.bars = {"005930": _rising(28)}
+    clock.advance(minutes=2)
+    trader.manage()
+    assert len(_buys(broker)) == 2
+
+
+async def test_no_add_on_below_minimum_gain(tmp_path: Path) -> None:
+    broker = FakeBroker()
+    trader, clock = await _held_from_0901(tmp_path, broker)
+    broker.bars = {"005930": _rising(step=20)}  # last close 70500: +0.6%
+    clock.now = clock.now.replace(minute=26)
+    trader.manage()
+    assert len(_buys(broker)) == 1
+
+
+async def test_no_add_on_with_kill_switch(tmp_path: Path) -> None:
+    from daytrade_it.interfaces.mcp import tools
+
+    broker = FakeBroker()
+    trader, clock = await _held_from_0901(tmp_path, broker)
+    tools._KILL_SWITCH_PATH.touch()
+    broker.bars = {"005930": _rising()}
+    clock.now = clock.now.replace(minute=26)
+    trader.manage()
+    assert len(_buys(broker)) == 1
+
+
+async def test_no_add_on_past_exposure_cap(tmp_path: Path) -> None:
+    broker = FakeBroker()
+    clock = Clock("09:01")
+    trader = AutoTrader(
+        broker,
+        tmp_path / "ledger",
+        live=True,
+        clock=clock,
+        limits=TradingLimits(max_trader_exposure=Decimal("100000")),
+    )
+    await trader.enter(_signal("005930"))
+    broker.fill("0000001", "005930")
+    broker.bars = {"005930": _rising()}
+    clock.now = clock.now.replace(minute=26)
+    trader.manage()
+    assert len(_buys(broker)) == 1
+
+
+async def test_flatten_sells_both_shares_after_filled_add_on(tmp_path: Path) -> None:
+    broker = FakeBroker()
+    trader, clock = await _held_from_0901(tmp_path, broker)
+    broker.bars = {"005930": _rising()}
+    clock.now = clock.now.replace(minute=26)
+    trader.manage()
+    broker.fill("0000002", "005930")
+    clock.now = clock.now.replace(hour=15, minute=0)
+    trader.manage()
+    sells = [o for o in broker.orders if o.side == OrderSide.SELL]
+    assert [(o.ticker, o.quantity) for o in sells] == [("005930", 2)]
+
+
+async def test_unfilled_add_on_is_cancelled_and_original_share_still_sold(tmp_path: Path) -> None:
+    broker = FakeBroker()
+    trader, clock = await _held_from_0901(tmp_path, broker)
+    broker.bars = {"005930": _rising()}
+    clock.now = clock.now.replace(minute=26)
+    trader.manage()
+    clock.advance(minutes=5)
+    trader.manage()
+    assert "0000002" in broker.cancelled
+    assert "add_on_cancelled" in _events(tmp_path)
+    clock.now = clock.now.replace(hour=15, minute=0)
+    trader.manage()
+    sells = [o for o in broker.orders if o.side == OrderSide.SELL]
+    assert [(o.ticker, o.quantity) for o in sells] == [("005930", 1)]
+
+
+async def test_vwap_exit_cancels_pending_add_on_first(tmp_path: Path) -> None:
+    broker = FakeBroker()
+    trader, clock = await _held_from_0901(tmp_path, broker)
+    broker.bars = {"005930": _rising()}
+    clock.now = clock.now.replace(minute=26)
+    trader.manage()  # add-on 0000002 pending
+    # 급등 후 VWAP 아래로: 진입 +2% 이상, VWAP -1% 이탈
+    broker.bars = {
+        "005930": _bars(("09:01", 73000, 10000), ("09:05", 73000, 10000), ("09:27", 71600, 100))
+    }
+    clock.advance(minutes=2)
+    trader.manage()
+    assert "0000002" in broker.cancelled
+    assert [o.side for o in broker.orders][-1] == OrderSide.SELL
