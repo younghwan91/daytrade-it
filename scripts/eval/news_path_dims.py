@@ -68,11 +68,34 @@ def pair_path(bars, proxy, entry_ts: dt.datetime) -> dict | None:
     return {"entry_price": e[1], "paths": out}
 
 
+ENTRY_OPEN = dt.time(9, 1)  # 데몬 첫 폴링 09:00:30 → 주문은 09:00대, 다음 분 시가로 보수적으로
+ENTRY_END = dt.time(14, 30)  # TradingLimits.entry_end
+
+
+def live_entry_ts(r: dict, delay_min: int) -> dt.datetime | None:
+    """운영 데몬이 이 기사를 보고 주문했을 분. 장 전·장 후 기사는 다음 장 첫 폴링."""
+    day = dt.date.fromisoformat(r["trade_day"])
+    if r["session"] != "intraday":
+        t = dt.datetime.combine(day, ENTRY_OPEN)
+    else:
+        t = dt.datetime.fromisoformat(r["published_kst"]) + dt.timedelta(minutes=delay_min)
+        if t.second or t.microsecond:
+            t = t.replace(second=0, microsecond=0) + dt.timedelta(minutes=1)
+        t = max(t, dt.datetime.combine(day, ENTRY_OPEN))
+    return t if t.time() <= ENTRY_END else None
+
+
 def main() -> None:
     require_backtest_host()
     ap = argparse.ArgumentParser()
     ap.add_argument("--universe", choices=["buy", "pos", "all"], default="buy")
     ap.add_argument("--min-n", type=int, default=15)
+    ap.add_argument(
+        "--delay",
+        type=int,
+        default=18,
+        help="장중 기사: 발행 후 운영이 보고 주문하기까지 분. 09-14 데몬 실측 중앙값 18, p90 35",
+    )
     a = ap.parse_args()
 
     rows = [json.loads(line) for line in PAIRS.open()]
@@ -103,7 +126,12 @@ def main() -> None:
             (r["ticker"], r["trade_day"]),
         )
         prev = cur.fetchone()
-        p = pair_path(b, bars(PROXY[mk], r["trade_day"]), dt.datetime.fromisoformat(r["entry_ts"]))
+        entry_ts = live_entry_ts(r, a.delay)
+        if entry_ts is None:
+            drop["after_entry_end"] += 1
+            continue
+        r["entry_ts"] = entry_ts.isoformat(timespec="minutes")
+        p = pair_path(b, bars(PROXY[mk], r["trade_day"]), entry_ts)
         if p is None or not prev:
             drop["no_entry_or_prev"] += 1
             continue
