@@ -294,6 +294,19 @@ async def process_pair(
             logger.exception("news_signal_poller: trader.enter failed", ticker=ticker.value)
 
 
+async def enter_batch(trader: AutoTrader, pending: list) -> None:
+    """Enter one poll's signals in `rank_batch` order; one failure never stops the rest."""
+    ranked = rank_batch(pending)
+    logger.info(
+        "news_signal_poller: entering batch by surprise", order=[s.ticker.value for s in ranked]
+    )
+    for signal in ranked:
+        try:
+            await trader.enter(signal)
+        except Exception:
+            logger.exception("news_signal_poller: trader.enter failed", ticker=signal.ticker.value)
+
+
 async def process_article(
     article: NewsArticle,
     stocks: dict[str, StockInfo],
@@ -452,19 +465,7 @@ async def run(
                             pending=pending,
                         )
                     if trader is not None and pending:
-                        ranked = rank_batch(pending)
-                        logger.info(
-                            "news_signal_poller: entering batch by surprise",
-                            order=[s.ticker.value for s in ranked],
-                        )
-                        for signal in ranked:
-                            try:
-                                await trader.enter(signal)
-                            except Exception:
-                                logger.exception(
-                                    "news_signal_poller: trader.enter failed",
-                                    ticker=signal.ticker.value,
-                                )
+                        await enter_batch(trader, pending)
 
                 if once:
                     break
