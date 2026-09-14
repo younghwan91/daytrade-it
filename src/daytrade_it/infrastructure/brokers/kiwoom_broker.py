@@ -68,6 +68,7 @@ is a one-line change plus a test update, not a larger refactor.
 from __future__ import annotations
 
 import logging
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any
 
@@ -85,6 +86,7 @@ from daytrade_it.domain.services.tick_size import round_to_tick
 from daytrade_it.infrastructure.brokers.base import (
     Account,
     BrokerInterface,
+    MinuteBar,
     Order,
     OrderResult,
     OrderSide,
@@ -345,6 +347,41 @@ class KiwoomBroker(BrokerInterface):
         except Exception as exc:
             raise BrokerError(f"Kiwoom get_quote failed: {exc}", broker_name="kiwoom") from exc
         return self._map_quote(ticker, raw)
+
+    def get_minute_bars(self, ticker: str, day: date | None = None) -> list[MinuteBar]:
+        """ka10080 1-minute bars for `day` (default today, KST), oldest first.
+
+        One page is ~900 bars (≈2.3 sessions), newest first, so the first page
+        always covers the current session. Fields and sign handling follow
+        scalp-it `adapters/kiwoom.py` (verified live): prices carry a
+        direction sign that is not a negative price; `cntr_tm` is
+        YYYYMMDDHHMMSS KST.
+        """
+        self._ensure_connected()
+        day = day or now_kst().date()
+        try:
+            raw = self._api.chart.stock_minute_chart(stk_cd=ticker, tic_scope="1", upd_stkpc_tp="1")
+        except Exception as exc:
+            raise BrokerError(f"Kiwoom minute bars failed: {exc}", broker_name="kiwoom") from exc
+        bars = []
+        for row in raw.get("stk_min_pole_chart_qry") or []:
+            text = str(row.get("cntr_tm") or "")
+            if len(text) != 14 or not text.isdigit():
+                continue
+            ts = datetime.strptime(text, "%Y%m%d%H%M%S")
+            if ts.date() != day:
+                continue
+            bars.append(
+                MinuteBar(
+                    ts=ts,
+                    open=_to_decimal(row.get("open_pric")),
+                    high=_to_decimal(row.get("high_pric")),
+                    low=_to_decimal(row.get("low_pric")),
+                    close=_to_decimal(row.get("cur_prc")),
+                    volume=int(_to_decimal(row.get("trde_qty"))),
+                )
+            )
+        return sorted(bars, key=lambda b: b.ts)
 
     # -- Request builders ------------------------------------------------------
 

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from enum import StrEnum
 
@@ -279,6 +279,18 @@ class OrderStatus:
             self.filled_avg_price = Decimal(str(self.filled_avg_price))
 
 
+@dataclass(frozen=True)
+class MinuteBar:
+    """One 1-minute bar. `ts` is the bar's minute in KST, tz-naive (Kiwoom's clock)."""
+
+    ts: datetime
+    open: Decimal
+    high: Decimal
+    low: Decimal
+    close: Decimal
+    volume: int
+
+
 @dataclass
 class Quote:
     """Market quote for a ticker.
@@ -458,6 +470,14 @@ class BrokerInterface(ABC):
             BrokerError: If unable to retrieve quote.
         """
         ...
+
+    def get_minute_bars(self, ticker: str, day: date | None = None) -> list[MinuteBar]:
+        """Today's (or `day`'s) 1-minute bars, oldest first.
+
+        Not abstract: only brokers with a chart feed implement it, and callers
+        treat NotImplementedError as "no intraday exit signal".
+        """
+        raise NotImplementedError
 
     @property
     @abstractmethod

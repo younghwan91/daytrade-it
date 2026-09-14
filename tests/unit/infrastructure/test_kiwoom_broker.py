@@ -118,6 +118,45 @@ class _FakeMarketModule:
         return self.quote_response
 
 
+class _FakeChartModule:
+    def __init__(self) -> None:
+        self.kwargs: dict[str, Any] = {}
+        # ka10080: newest first, prices carry direction signs.
+        self.minute_response: dict[str, Any] = {
+            "return_code": 0,
+            "stk_min_pole_chart_qry": [
+                {
+                    "cntr_tm": "20260915090200",
+                    "cur_prc": "-10100",
+                    "open_pric": "+10200",
+                    "high_pric": "+10250",
+                    "low_pric": "-10050",
+                    "trde_qty": "300",
+                },
+                {
+                    "cntr_tm": "20260915090100",
+                    "cur_prc": "+10200",
+                    "open_pric": "+10000",
+                    "high_pric": "+10300",
+                    "low_pric": "+10000",
+                    "trde_qty": "1,200",
+                },
+                {
+                    "cntr_tm": "20260914152000",
+                    "cur_prc": "+9900",
+                    "open_pric": "+9900",
+                    "high_pric": "+9900",
+                    "low_pric": "+9900",
+                    "trde_qty": "50",
+                },
+            ],
+        }
+
+    def stock_minute_chart(self, **kwargs: Any) -> dict[str, Any]:
+        self.kwargs = kwargs
+        return self.minute_response
+
+
 class _FakeKiwoomAPI:
     """Stands in for `kiwoom_client.KiwoomAPI` -- same `.order`/`.account`/
     `.market` surface, `login`/`logout`/`close` methods, no network calls.
@@ -127,6 +166,7 @@ class _FakeKiwoomAPI:
         self.order = _FakeOrderModule()
         self.account = _FakeAccountModule()
         self.market = _FakeMarketModule()
+        self.chart = _FakeChartModule()
         self.login_called = False
         self.logout_called = False
         self.close_called = False
@@ -414,6 +454,36 @@ class TestQuoteMapping:
         fake_api.market.stock_quote = _raise  # type: ignore[method-assign]
         with pytest.raises(BrokerError):
             broker.get_quote("005930")
+
+
+class TestMinuteBars:
+    def test_get_minute_bars_returns_the_days_bars_oldest_first_unsigned(
+        self, broker: KiwoomBroker, fake_api: _FakeKiwoomAPI
+    ) -> None:
+        import datetime as dt
+
+        bars = broker.get_minute_bars("005930", day=dt.date(2026, 9, 15))
+        assert fake_api.chart.kwargs == {"stk_cd": "005930", "tic_scope": "1", "upd_stkpc_tp": "1"}
+        assert [b.ts for b in bars] == [
+            dt.datetime(2026, 9, 15, 9, 1),
+            dt.datetime(2026, 9, 15, 9, 2),
+        ]
+        assert (bars[1].open, bars[1].low, bars[1].close) == (
+            Decimal("10200"),
+            Decimal("10050"),
+            Decimal("10100"),
+        )
+        assert bars[0].volume == 1200
+
+    def test_get_minute_bars_failure_raises_broker_error(
+        self, broker: KiwoomBroker, fake_api: _FakeKiwoomAPI
+    ) -> None:
+        def _raise(**kwargs: Any) -> dict[str, Any]:
+            raise RuntimeError("network error")
+
+        fake_api.chart.stock_minute_chart = _raise  # type: ignore[method-assign]
+        with pytest.raises(BrokerError):
+            broker.get_minute_bars("005930")
 
 
 class TestNoLiveNetworkCalls:

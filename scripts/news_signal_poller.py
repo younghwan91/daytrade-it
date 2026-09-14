@@ -50,7 +50,7 @@ from kiwoom_client import KiwoomAPI
 from sqlalchemy import select
 
 from daytrade_it.application.signals.entry_filter import generate_no_chase_confirmation
-from daytrade_it.application.trading.auto_trader import AutoTrader
+from daytrade_it.application.trading.auto_trader import AutoTrader, rank_batch
 from daytrade_it.domain.entities.news import NewsArticle
 from daytrade_it.domain.services.signal_generator import SignalConfig, SignalGenerator
 from daytrade_it.domain.value_objects import Ticker
@@ -139,6 +139,7 @@ async def process_pair(
     trader: AutoTrader | None,
     judgments: JudgmentLog,
     full_body_text: str | None,
+    pending: list | None = None,
 ) -> None:
     """Judge one (article, company) pair; persist a BUY signal if one emerges.
 
@@ -256,6 +257,7 @@ async def process_pair(
                 "article_title": article.title[:200],
                 "subject": features.subject,
                 "material_type": features.material_type,
+                "surprise": features.surprise,
                 "news_score": sentiment.score,
                 "pre_entry_move": entry_signal.metadata["pre_entry_move"],
             },
@@ -282,6 +284,10 @@ async def process_pair(
     )
 
     if trader is not None:
+        if pending is not None:
+            # Entered after the whole poll is judged, in rank_batch order.
+            pending.append((saved, int(features.surprise), float(sentiment.score)))
+            return
         try:
             await trader.enter(saved)
         except Exception:
@@ -428,6 +434,7 @@ async def run(
                         )
                         new_articles = []
 
+                    pending: list = []
                     for article in new_articles:
                         await process_article(
                             article,
@@ -442,7 +449,22 @@ async def run(
                             trader=trader,
                             judgments=judgments,
                             http=http,
+                            pending=pending,
                         )
+                    if trader is not None and pending:
+                        ranked = rank_batch(pending)
+                        logger.info(
+                            "news_signal_poller: entering batch by surprise",
+                            order=[s.ticker.value for s in ranked],
+                        )
+                        for signal in ranked:
+                            try:
+                                await trader.enter(signal)
+                            except Exception:
+                                logger.exception(
+                                    "news_signal_poller: trader.enter failed",
+                                    ticker=signal.ticker.value,
+                                )
 
                 if once:
                     break

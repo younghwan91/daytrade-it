@@ -8,12 +8,13 @@ from pathlib import Path
 
 import pytest
 
-from daytrade_it.application.trading.auto_trader import AutoTrader, TradingLimits
+from daytrade_it.application.trading.auto_trader import AutoTrader, TradingLimits, rank_batch
 from daytrade_it.domain.entities.signal import SignalDirection, SignalSource, TradingSignal
 from daytrade_it.domain.value_objects import Confidence, Ticker
 from daytrade_it.infrastructure.brokers.base import (
     KST,
     Account,
+    MinuteBar,
     OrderResult,
     OrderSide,
     OrderStatus,
@@ -49,6 +50,14 @@ class FakeBroker:
         self.cancelled: list[str] = []
         self.place_error: Exception | None = None
         self._seq = 0
+        self.bars: dict[str, list[MinuteBar]] | None = None  # None: no chart feed
+        self.bar_calls = 0
+
+    def get_minute_bars(self, ticker: str, day: dt.date | None = None) -> list[MinuteBar]:
+        self.bar_calls += 1
+        if self.bars is None:
+            raise NotImplementedError
+        return self.bars.get(ticker, [])
 
     def get_account(self) -> Account:
         return Account(
@@ -376,3 +385,108 @@ async def test_no_leftover_report_when_flat(tmp_path: Path) -> None:
     clock.now = clock.now.replace(hour=15, minute=30)
     assert trader.report_leftovers() == {}
     assert "overnight_positions" not in _events(tmp_path)
+
+
+def _bars(*spec: tuple[str, int, int]) -> list[MinuteBar]:
+    """(HH:MM, close, volume) -> bars on the Clock's day, tz-naive like Kiwoom."""
+    out = []
+    for hhmm, close, vol in spec:
+        h, m = map(int, hhmm.split(":"))
+        c = Decimal(close)
+        out.append(MinuteBar(dt.datetime(2026, 9, 14, h, m), c, c, c, c, vol))
+    return out
+
+
+async def _held_from_0901(tmp_path: Path, broker: FakeBroker) -> tuple[AutoTrader, Clock]:
+    clock = Clock("09:01")
+    trader = _trader(tmp_path, broker, clock)
+    await trader.enter(_signal("005930"))  # limit at ask 70100
+    broker.fill("0000001", "005930")
+    return trader, clock
+
+
+# 진입 70100. 73000에서 거래가 몰려 VWAP≈73000, 이후 71600: 진입 대비 +2.1%, VWAP 대비 -1.9%.
+_UP_THEN_BREAK = ("09:01", 73000, 10000), ("09:05", 73000, 10000), ("09:11", 71600, 100)
+
+
+async def test_vwap_break_after_gain_sells_before_the_close(tmp_path: Path) -> None:
+    broker = FakeBroker()
+    trader, clock = await _held_from_0901(tmp_path, broker)
+    broker.bars = {"005930": _bars(*_UP_THEN_BREAK)}
+    clock.now = clock.now.replace(minute=12)
+    trader.manage()
+    sells = [o for o in broker.orders if o.side == OrderSide.SELL]
+    assert [(o.ticker, o.quantity, o.limit_price) for o in sells] == [
+        ("005930", 1, Decimal("70000"))
+    ]
+    assert "exit_signal" in _events(tmp_path)
+
+
+async def test_no_vwap_exit_when_gain_below_minimum(tmp_path: Path) -> None:
+    broker = FakeBroker()
+    trader, clock = await _held_from_0901(tmp_path, broker)
+    # +1.3% only: below VWAP but the position never reached +2%.
+    broker.bars = {"005930": _bars(("09:01", 73000, 10000), ("09:11", 71000, 100))}
+    clock.now = clock.now.replace(minute=12)
+    trader.manage()
+    assert [o for o in broker.orders if o.side == OrderSide.SELL] == []
+
+
+async def test_vwap_exit_ignores_the_forming_minute(tmp_path: Path) -> None:
+    broker = FakeBroker()
+    trader, clock = await _held_from_0901(tmp_path, broker)
+    broker.bars = {"005930": _bars(*_UP_THEN_BREAK)}
+    clock.now = clock.now.replace(minute=11, second=30)  # 09:11 bar still forming
+    trader.manage()
+    assert [o for o in broker.orders if o.side == OrderSide.SELL] == []
+    clock.advance(seconds=60)  # 09:12:30, 09:11 closed, check interval passed
+    trader.manage()
+    assert len([o for o in broker.orders if o.side == OrderSide.SELL]) == 1
+
+
+async def test_vwap_check_is_rate_limited_per_ticker(tmp_path: Path) -> None:
+    broker = FakeBroker()
+    trader, clock = await _held_from_0901(tmp_path, broker)
+    broker.bars = {"005930": _bars(("09:01", 73000, 10000))}
+    clock.now = clock.now.replace(minute=12)
+    trader.manage()
+    clock.advance(seconds=20)
+    trader.manage()
+    assert broker.bar_calls == 1
+
+
+async def test_no_chart_feed_means_hold_to_flatten(tmp_path: Path) -> None:
+    broker = FakeBroker()  # bars None -> NotImplementedError
+    trader, clock = await _held_from_0901(tmp_path, broker)
+    clock.now = clock.now.replace(minute=30)
+    trader.manage()
+    assert [o for o in broker.orders if o.side == OrderSide.SELL] == []
+
+
+async def test_unfilled_entry_is_not_checked_for_vwap_exit(tmp_path: Path) -> None:
+    broker, clock = FakeBroker(), Clock("09:01")
+    trader = _trader(tmp_path, broker, clock)
+    await trader.enter(_signal("005930"))  # never filled
+    broker.bars = {"005930": _bars(*_UP_THEN_BREAK)}
+    clock.now = clock.now.replace(minute=3)
+    trader.manage()
+    assert broker.bar_calls == 0
+
+
+async def test_unfilled_early_exit_is_repriced_after_retry_interval(tmp_path: Path) -> None:
+    broker = FakeBroker()
+    trader, clock = await _held_from_0901(tmp_path, broker)
+    broker.bars = {"005930": _bars(*_UP_THEN_BREAK)}
+    clock.now = clock.now.replace(minute=12)
+    trader.manage()
+    clock.advance(minutes=1)
+    trader.manage()
+    sells = [o for o in broker.orders if o.side == OrderSide.SELL]
+    assert [o.limit_price for o in sells] == [Decimal("70000"), Decimal("69650")]
+    assert broker.cancelled[-1] == "0000002"
+
+
+def test_rank_batch_orders_by_surprise_then_score() -> None:
+    a, b, c = _signal("000001"), _signal("000002"), _signal("000003")
+    ranked = rank_batch([(a, 0, 0.9), (b, 1, 0.2), (c, 1, 0.5)])
+    assert [s.ticker.value for s in ranked] == ["000003", "000002", "000001"]

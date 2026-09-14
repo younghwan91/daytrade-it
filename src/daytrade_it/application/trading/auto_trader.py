@@ -1,9 +1,14 @@
 """Automated execution for news signals: enter 1 share, flat by the close.
 
-Mirrors the rule that was evaluated (docs/research/2026-09-13-news-prompt-
-eval.md): enter after the news, exit at the session close. No stop-loss or
-take-profit -- none was evaluated, and with a 1-share cap the loss per
-position is bounded by the share price.
+Mirrors the rules that were evaluated (docs/research/2026-09-13-news-prompt-
+eval.md, docs/research/2026-09-15-news-policy-optimization.md on branch
+feat/exit-rule-eval): enter after the news; exit early when a position that
+gained >= +2% breaks 1% below the session VWAP (1-minute bars), otherwise at
+the session close. No fixed stop-loss or take-profit -- both lost to holding
+in the evaluation, and with a 1-share cap the loss per position is bounded by
+the share price. The poller ranks each polled batch with `rank_batch` before
+entering, so when the slots fill at the open the highest-`surprise` names get
+them.
 
 Safety design follows scalp-it's order-safety audit
 (scalp-it docs/research/manju/41-order-safety-audit.md):
@@ -47,6 +52,7 @@ from daytrade_it.domain.entities.signal import SignalDirection, TradingSignal
 from daytrade_it.domain.services.risk_manager import RiskManager
 from daytrade_it.infrastructure.brokers.base import (
     BrokerInterface,
+    MinuteBar,
     Order,
     OrderSide,
     OrderType,
@@ -83,6 +89,16 @@ class TradingLimits:
     #: how far a thin book or the closing auction can take it.
     exit_discount_step: Decimal = Decimal("0.005")
     exit_discount_cap: Decimal = Decimal("0.02")
+    #: Early exit: sell when the last completed 1-minute close is at least
+    #: `vwap_exit_min_gain` above the entry limit and more than
+    #: `vwap_exit_gap` below the session VWAP (close x volume from 09:00).
+    #: Chosen out-of-fold in 5 of 6 leave-one-day-out folds; +0.63%p per
+    #: trade over holding to the close, better on 5 of 6 days. None disables.
+    vwap_exit_gap: Decimal | None = Decimal("0.01")
+    vwap_exit_min_gain: Decimal = Decimal("0.02")
+    #: One ka10080 call per held ticker per interval (<= 5 per minute); the
+    #: token is shared with scalp-it's live loop.
+    exit_check_every: dt.timedelta = dt.timedelta(minutes=1)
 
 
 @dataclass
@@ -95,6 +111,31 @@ class _DayState:
     #: the user's (e.g. bought by hand), not the trader's.
     never_filled: set[str] = field(default_factory=set)
     exit_attempts: dict[str, int] = field(default_factory=dict)
+
+
+def rank_batch(items: list[tuple[TradingSignal, int, float]]) -> list[TradingSignal]:
+    """Entry order for one poll's signals: v2 `surprise` desc, then news score desc.
+
+    At the open one poll yields more BUYs than there are slots; ranking by
+    surprise beat random picks out-of-fold (+1.92 vs +1.37%p per trade).
+    """
+    return [s for s, _, _ in sorted(items, key=lambda x: (-x[1], -x[2]))]
+
+
+def vwap_exit_hit(
+    bars: list[MinuteBar], entry: Decimal, now: dt.datetime, gap: Decimal, min_gain: Decimal
+) -> tuple[bool, Decimal | None, Decimal | None]:
+    """(hit, last completed close, VWAP). Only bars whose minute has ended count."""
+    minute = now.replace(tzinfo=None, second=0, microsecond=0)
+    # Regular session only, as evaluated: Kiwoom also returns NXT pre/after-market bars.
+    done = [b for b in bars if b.ts.time() >= dt.time(9, 0) and b.ts < minute]
+    volume = sum(b.volume for b in done)
+    if not done or volume <= 0 or entry <= 0:
+        return False, None, None
+    vwap = sum(b.close * b.volume for b in done) / volume
+    close = done[-1].close
+    hit = close / entry - 1 >= min_gain and close / vwap - 1 < -gap
+    return hit, close, vwap
 
 
 class _SignalLookup:
@@ -128,6 +169,8 @@ class AutoTrader:
         self._signals = _SignalLookup()
         self._day: dt.date | None = None
         self._state = _DayState()
+        #: In-memory only: after a restart the first check simply runs at once.
+        self._last_exit_check: dict[str, dt.datetime] = {}
 
     # -- ledger ----------------------------------------------------------------
 
@@ -316,6 +359,50 @@ class AutoTrader:
                 self._cancel_entry(order_id, row["ticker"], reason="ttl")
         if now.time() >= self._limits.flatten_at:
             self.flatten()
+        else:
+            self._early_exits(now)
+
+    def _early_exits(self, now: dt.datetime) -> None:
+        """VWAP-break exits before `flatten_at`; re-price unfilled early sells."""
+        lim = self._limits
+        if lim.vwap_exit_gap is None or not self._state.entries:
+            return
+        own = self._own_holdings()
+        if not own:
+            return
+        for ticker, qty in own.items():
+            if ticker in self._state.exits:
+                self._exit_or_retry(ticker, qty, now)
+                continue
+            last = self._last_exit_check.get(ticker)
+            if last is not None and now - last < lim.exit_check_every:
+                continue
+            self._last_exit_check[ticker] = now
+            entry_limit = self._state.entries[ticker].get("limit")
+            if not entry_limit:
+                continue
+            try:
+                bars = self._broker.get_minute_bars(ticker)
+            except NotImplementedError:
+                return
+            except Exception:
+                logger.exception("auto_trader: minute bars failed", ticker=ticker)
+                continue
+            hit, close, vwap = vwap_exit_hit(
+                bars, Decimal(entry_limit), now, lim.vwap_exit_gap, lim.vwap_exit_min_gain
+            )
+            if hit:
+                self._record(
+                    "exit_signal",
+                    ticker=ticker,
+                    reason="vwap_break",
+                    close=str(close),
+                    vwap=str(vwap),
+                )
+                logger.info(
+                    "auto_trader: VWAP EXIT", ticker=ticker, close=str(close), vwap=str(vwap)
+                )
+                self._sell(ticker, qty)
 
     def _cancel_entry(self, order_id: str, ticker: str, *, reason: str) -> None:
         try:
@@ -386,16 +473,20 @@ class AutoTrader:
 
         now = self._clock()
         for ticker, own in own_holdings.items():
-            prior = self._state.exits.get(ticker)
-            if prior is not None:
-                if now - dt.datetime.fromisoformat(prior["ts"]) < self._limits.exit_retry_after:
-                    continue
-                if prior.get("order_id"):
-                    try:
-                        self._broker.cancel_order(prior["order_id"])
-                    except Exception:
-                        logger.exception("auto_trader: stale exit cancel failed", ticker=ticker)
-            self._sell(ticker, own)
+            self._exit_or_retry(ticker, own, now)
+
+    def _exit_or_retry(self, ticker: str, quantity: int, now: dt.datetime) -> None:
+        """Sell, or re-price a sell still unfilled after `exit_retry_after`."""
+        prior = self._state.exits.get(ticker)
+        if prior is not None:
+            if now - dt.datetime.fromisoformat(prior["ts"]) < self._limits.exit_retry_after:
+                return
+            if prior.get("order_id"):
+                try:
+                    self._broker.cancel_order(prior["order_id"])
+                except Exception:
+                    logger.exception("auto_trader: stale exit cancel failed", ticker=ticker)
+        self._sell(ticker, quantity)
 
     def _sell(self, ticker: str, quantity: int) -> None:
         try:
