@@ -74,9 +74,14 @@ def usable(bars: list[Bar], i: int) -> bool:
 
 
 def boot_ci(vals: list[float], n: int = 2000) -> tuple[float, float]:
+    """평균의 부트스트랩 95% CI."""
     rng = random.Random(0)
-    meds = sorted(statistics.median(rng.choices(vals, k=len(vals))) for _ in range(n))
-    return meds[int(0.025 * n)], meds[int(0.975 * n)]
+    means = sorted(statistics.fmean(rng.choices(vals, k=len(vals))) for _ in range(n))
+    return means[int(0.025 * n)], means[int(0.975 * n)]
+
+
+def clip(v: float, cap: float = 0.10) -> float:
+    return max(-cap, min(cap, v))
 
 
 def winsor_mean(vals: list[float], cap: float = 0.10) -> float:
@@ -137,18 +142,24 @@ def run(phase: str, frozen: list[str] | None) -> None:
         for r in rows:
             if r[subset]:
                 by_rule[r["rule"]].append(r)
-        print(f"\n[{subset}]  rule | n | mean | median | hit | winsor | Δmedian vs B | Δ 95% CI")
+        # 선택 지표는 ±10% 절삭 순수익률의 기준선 대비 평균 차이(Δw). 차이의 중앙값은
+        # 규칙이 발동하지 않은 쌍(차이 0)이 과반이라 dev에서 거의 전부 0으로 뭉개졌다.
+        print(
+            f"\n[{subset}]  rule | n | fired | mean | median | hit | winsor | Δmedian vs B | Δw vs B | Δw 95% CI"
+        )
         for name, rs in sorted(
             by_rule.items(),
-            key=lambda kv: -statistics.median(x["net"] - x["base_net"] for x in kv[1]),
+            key=lambda kv: -statistics.fmean(clip(x["net"]) - clip(x["base_net"]) for x in kv[1]),
         ):
             nets = [x["net"] for x in rs]
             diffs = [x["net"] - x["base_net"] for x in rs]
-            lo, hi = boot_ci(diffs)
+            wdiffs = [clip(x["net"]) - clip(x["base_net"]) for x in rs]
+            fired = sum(x["reason"] not in ("flatten", "data_end") for x in rs) / len(rs)
+            lo, hi = boot_ci(wdiffs)
             print(
-                f"{name:>14} | {len(rs):3d} | {statistics.fmean(nets):+.2%} | {statistics.median(nets):+.2%} | "
+                f"{name:>14} | {len(rs):3d} | {fired:4.0%} | {statistics.fmean(nets):+.2%} | {statistics.median(nets):+.2%} | "
                 f"{sum(n > 0 for n in nets) / len(nets):.0%} | {winsor_mean(nets):+.2%} | "
-                f"{statistics.median(diffs):+.2%} | [{lo:+.2%}, {hi:+.2%}]"
+                f"{statistics.median(diffs):+.2%} | {statistics.fmean(wdiffs):+.2%} | [{lo:+.2%}, {hi:+.2%}]"
             )
 
 
