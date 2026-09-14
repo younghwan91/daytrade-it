@@ -183,9 +183,8 @@ def main() -> None:
     cur.execute("SET max_parallel_workers_per_gather = 0")
     cands = build(cur, cap)
     days = sorted({c["day"] for c in cands})
-    print(
-        f"후보 {len(cands)}개 · 일별 {dict((d, sum(c['day'] == d for c in cands)) for d in days)} · K={a.k} cap={a.cap}"
-    )
+    per_day = {d: sum(c["day"] == d for c in cands) for d in days}
+    print(f"후보 {len(cands)}개 · 일별 {per_day} · K={a.k} cap={a.cap}")
 
     def pick_mean(chosen: list[dict]) -> float:
         return statistics.fmean(clip(c["excess"]) for c in chosen) if chosen else 0.0
