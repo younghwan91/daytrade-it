@@ -173,7 +173,7 @@ class _DayState:
     deferred: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
-RANK_KEYS: tuple[str, ...] = ("surprise", "persistence", "score")
+RANK_KEYS: tuple[str, ...] = ("surprise", "persistence", "score", "bandit")
 _PERSISTENCE_RANK = {"one_off": 0, "multi_quarter": 1, "structural": 2}
 
 
@@ -188,6 +188,8 @@ def rank_batch(
     - `score`: news score desc, then surprise desc.
     - `persistence`: `signal.metadata["persistence"]` desc (structural >
       multi_quarter > one_off; missing ranks last), then surprise, then score.
+    - `bandit`: `signal.metadata["bandit_m"]` desc (missing ranks last), then
+      surprise, then score (spec 2026-09-16-bandit-entry-design.md).
     """
     if key == "surprise":
         sort_key = lambda x: (-x[1], -x[2])  # noqa: E731
@@ -196,6 +198,12 @@ def rank_batch(
     elif key == "persistence":
         sort_key = lambda x: (  # noqa: E731
             -_PERSISTENCE_RANK.get(x[0].metadata.get("persistence"), -1),
+            -x[1],
+            -x[2],
+        )
+    elif key == "bandit":
+        sort_key = lambda x: (  # noqa: E731
+            -float(x[0].metadata.get("bandit_m", float("-inf"))),
             -x[1],
             -x[2],
         )

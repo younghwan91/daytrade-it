@@ -32,6 +32,8 @@ logger = get_logger(__name__)
 
 SESSIONS: tuple[str, ...] = ("premarket", "intraday")
 _REGULAR_OPEN = dt.time(9, 0)
+_MARKET_TICKER = "069500"  # KODEX 200
+_MARKET_LOOKBACK_DAYS = 10
 
 
 @dataclass(frozen=True)
@@ -44,7 +46,10 @@ class SelectionConfig:
       `max_pre_move=None` uses `entry_filter.MAX_PRE_ENTRY_MOVE` at call time.
     - `sessions`: `premarket` if published before 09:00 KST of the trading day
       (including the previous evening), else `intraday`.
-    - `rank_key`: `auto_trader.rank_batch` key (surprise | persistence | score).
+    - `rank_key`: `auto_trader.rank_batch` key (surprise | persistence | score | bandit).
+    - `bandit_model`: path to a `trading.bandit` model file; None (default) =
+      no bandit, no extra broker calls. The policy loader resolves a relative
+      path against the policy file's directory.
     """
 
     min_score: float = SIGNAL_THRESHOLD
@@ -55,6 +60,7 @@ class SelectionConfig:
     max_pre_move: Decimal | None = None
     sessions: tuple[str, ...] = SESSIONS
     rank_key: str = "surprise"
+    bandit_model: str | None = None
 
 
 def article_session(published_at: dt.datetime, expires_at: dt.datetime) -> str:
@@ -152,6 +158,21 @@ def build_entry_candidate(
     ):
         logger.info("news_entry: not selected", ticker=ticker.value, reason="min_pre_move")
         return None
+    bandit_meta: dict[str, float] = {}
+    if selection.bandit_model is not None:
+        verdict = _bandit_verdict(
+            article,
+            ticker,
+            features,
+            broker,
+            db_client,
+            expires_at,
+            selection.bandit_model,
+            float(Decimal(entry_signal.metadata["pre_entry_move"])),
+        )
+        if verdict is None:
+            return None
+        bandit_meta = verdict
     composite = gen.combine_signals([news_signal, entry_signal])
     if composite is None:
         return None
@@ -169,7 +190,63 @@ def build_entry_candidate(
                 "surprise": features.surprise,
                 "news_score": sentiment.score,
                 "pre_entry_move": entry_signal.metadata["pre_entry_move"],
+                **bandit_meta,
             },
         }
     )
     return EntryCandidate(composite, int(features.surprise), float(sentiment.score))
+
+
+def _bandit_verdict(
+    article: NewsArticle,
+    ticker: Ticker,
+    features: ArticleFeatures,
+    broker: BrokerInterface,
+    db_client: QuantAirflowDBClient,
+    expires_at: dt.datetime,
+    model_path: str,
+    pre_entry_move: float,
+) -> dict[str, float] | None:
+    """{"bandit_m", "bandit_p"} if the bandit enters, else None (skip or failure).
+
+    Fail-closed: any model-load or data-fetch error skips the candidate.
+    """
+    from daytrade_it.application.trading import bandit
+
+    try:
+        model = bandit.load_model(model_path)
+        decided_at = dt.datetime.now(KST)
+        bars = broker.get_minute_bars(ticker.value)
+        mkt_quote = broker.get_quote(_MARKET_TICKER)
+        mkt_price = mkt_quote.last_price or mkt_quote.mid_price
+        today = dt.date.today()
+        mkt_daily = db_client.get_adjusted_daily_bars(
+            Ticker(value=_MARKET_TICKER),
+            start=today - dt.timedelta(days=_MARKET_LOOKBACK_DAYS),
+            end=today - dt.timedelta(days=1),
+        )
+        mkt_prev_close = (
+            Decimal(str(mkt_daily[-1].close)) if mkt_daily and mkt_daily[-1].close else None
+        )
+        x = bandit.features_for(
+            features,
+            pre_entry_move,
+            article.published_at,
+            expires_at,
+            decided_at,
+            bars,
+            mkt_price if mkt_price and mkt_price > 0 else None,
+            mkt_prev_close,
+        )
+        enter, m, p = bandit.decide(model, x)
+    except Exception as exc:
+        logger.warning(
+            "news_entry: bandit failed, skip",
+            ticker=ticker.value,
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        return None
+    if not enter:
+        logger.info("news_entry: bandit skip", ticker=ticker.value, m=m, p=p)
+        return None
+    return {"bandit_m": m, "bandit_p": p}

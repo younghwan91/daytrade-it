@@ -112,3 +112,36 @@ def test_unknown_subject_raises(tmp_path: Path) -> None:
         load_policy(path)
     path.write_text(json.dumps({"selection": {"subjects": ["mention"]}}))
     assert load_policy(path).selection.subjects == ("mention",)
+
+
+def _write_model(path: Path) -> None:
+    import numpy as np
+
+    from daytrade_it.application.trading.bandit import FEATURES, fit
+
+    rng = np.random.default_rng(0)
+    X = rng.normal(size=(30, len(FEATURES)))
+    path.write_text(fit(X, X[:, 0], lam=1.0).to_json())
+
+
+def test_bandit_model_round_trip_and_relative_resolution(tmp_path: Path) -> None:
+    _write_model(tmp_path / "bandit.json")
+    path = tmp_path / "p.json"
+    policy = NewsPolicy(
+        selection=SelectionConfig(bandit_model=str(tmp_path / "bandit.json"), rank_key="bandit")
+    )
+    dump_policy(policy, path)
+    assert json.loads(path.read_text())["selection"]["bandit_model"] == str(
+        tmp_path / "bandit.json"
+    )
+    assert load_policy(path) == policy
+
+    path.write_text(json.dumps({"selection": {"bandit_model": "bandit.json"}}))
+    assert load_policy(path).selection.bandit_model == str(tmp_path / "bandit.json")
+
+
+def test_bandit_model_missing_file_raises(tmp_path: Path) -> None:
+    path = tmp_path / "p.json"
+    path.write_text(json.dumps({"selection": {"bandit_model": "nope.json"}}))
+    with pytest.raises(ValueError):
+        load_policy(path)

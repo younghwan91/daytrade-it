@@ -260,3 +260,101 @@ def test_selection_prior_evening_article_is_premarket() -> None:
     evening = dt.datetime(2026, 9, 14, 18, 0, tzinfo=KST)
     assert _build(BULL, "10000", SelectionConfig(sessions=("intraday",)), published=evening) is None
     assert _build(BULL, "10000", SelectionConfig(sessions=("premarket",)), published=evening)
+
+
+# --- bandit (spec 2026-09-16-bandit-entry-design.md) ---------------------------
+
+import numpy as np  # noqa: E402
+
+from daytrade_it.application.trading.bandit import FEATURES, fit  # noqa: E402
+from daytrade_it.infrastructure.brokers.base import MinuteBar  # noqa: E402
+
+
+class _BanditBroker(_Broker):
+    def __init__(self, last: str, fail_bars: bool = False) -> None:
+        super().__init__(last)
+        self.fail_bars = fail_bars
+        self.quotes: list[str] = []
+
+    def get_quote(self, ticker: str) -> Quote:
+        self.quotes.append(ticker)
+        return super().get_quote(ticker)
+
+    def get_minute_bars(self, ticker: str, day=None) -> list[MinuteBar]:  # noqa: ANN001
+        if self.fail_bars:
+            raise RuntimeError("chart feed down")
+        c = Decimal("10000")
+        return [MinuteBar(dt.datetime(2026, 9, 15, 9, m), c, c, c, c, 10) for m in range(30)]
+
+
+def _pre_move_model(tmp_path, min_prob: float = 0.6):  # noqa: ANN001, ANN202
+    """Reward rises with pre_entry_move: +2% → enter, −2% → skip."""
+    rng = np.random.default_rng(0)
+    X = rng.normal(size=(300, len(FEATURES)))
+    i = FEATURES.index("pre_entry_move")
+    X[:, i] = rng.uniform(-0.03, 0.03, size=300)
+    y = X[:, i] + rng.normal(scale=0.002, size=300)
+    path = tmp_path / "bandit.json"
+    path.write_text(fit(X, y, lam=1.0, min_prob=min_prob).to_json())
+    return str(path)
+
+
+def _build_bandit(last: str, model: str, broker=None):  # noqa: ANN001, ANN202
+    gen = SignalGenerator(SignalConfig(min_confidence=0.0))
+    broker = broker or _BanditBroker(last)
+    with time_machine.travel(NOW, tick=False):
+        return build_entry_candidate(
+            _article(["005930"]),
+            Ticker(value="005930"),
+            BULL,
+            broker,
+            _DB(),
+            gen,
+            EXPIRES,
+            selection=SelectionConfig(bandit_model=model),
+        )
+
+
+def test_bandit_enter_records_m_and_p(tmp_path) -> None:  # noqa: ANN001
+    model = _pre_move_model(tmp_path)
+    broker = _BanditBroker("10200")
+    c = _build_bandit("10200", model, broker)
+    assert c is not None
+    assert c.signal.metadata["bandit_m"] > 0
+    assert c.signal.metadata["bandit_p"] >= 0.6
+    assert "069500" in broker.quotes
+
+
+def test_bandit_skip_returns_none(tmp_path) -> None:  # noqa: ANN001
+    model = _pre_move_model(tmp_path)
+    assert _build(BULL, "9800") is not None  # rules alone admit it
+    assert _build_bandit("9800", model) is None
+
+
+def test_bandit_fetch_failure_is_fail_closed(tmp_path) -> None:  # noqa: ANN001
+    model = _pre_move_model(tmp_path)
+    assert _build_bandit("10200", model, _BanditBroker("10200", fail_bars=True)) is None
+    assert _build_bandit("10200", str(tmp_path / "missing.json")) is None
+
+
+def test_default_selection_has_no_bandit_and_no_extra_calls() -> None:
+    assert SelectionConfig().bandit_model is None
+    c = _build(BULL, "10200")  # _Broker has no get_minute_bars: would fail if called
+    assert c is not None and "bandit_m" not in c.signal.metadata
+
+
+def test_rank_batch_bandit_orders_by_m_then_surprise_then_score() -> None:
+    def s(code: str, m: float) -> TradingSignal:
+        sig = _sig(code)
+        return sig.model_copy(update={"metadata": {"bandit_m": m}})
+
+    items = [
+        (s("000001", 0.001), 3, 0.9),
+        (s("000002", 0.01), 0, 0.1),
+        (s("000003", 0.001), 3, 0.95),
+    ]
+    assert [x.ticker.value for x in rank_batch(items, key="bandit")] == [
+        "000002",
+        "000003",
+        "000001",
+    ]

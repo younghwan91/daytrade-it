@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from daytrade_it.application.signals.news_entry import SESSIONS, SelectionConfig
+from daytrade_it.application.trading import bandit
 from daytrade_it.application.trading.auto_trader import RANK_KEYS, TradingLimits
 from daytrade_it.infrastructure.external.anthropic_client import SUBJECT_LEVELS
 
@@ -119,6 +120,13 @@ def _validate(policy: NewsPolicy) -> None:
     bad = set(sel.subjects) - set(SUBJECT_LEVELS)
     if bad:
         raise ValueError(f"selection.subjects: unknown {sorted(bad)}")
+    if sel.bandit_model is not None:
+        if not Path(sel.bandit_model).is_file():
+            raise ValueError(f"selection.bandit_model: no such file {sel.bandit_model!r}")
+        try:
+            bandit.load_model(sel.bandit_model)
+        except Exception as exc:
+            raise ValueError(f"selection.bandit_model: unreadable model: {exc}") from exc
 
 
 def load_policy(path: Path) -> NewsPolicy:
@@ -135,8 +143,20 @@ def load_policy(path: Path) -> NewsPolicy:
         limits=_from_dict(TradingLimits, raw.get("limits", {}), "limits"),
         selection=_from_dict(SelectionConfig, raw.get("selection", {}), "selection"),
     )
+    policy = _resolve_bandit_model(policy, path)
     _validate(policy)
     return policy
+
+
+def _resolve_bandit_model(policy: NewsPolicy, path: Path) -> NewsPolicy:
+    """Relative `selection.bandit_model` → against the policy file's directory."""
+    model = policy.selection.bandit_model
+    if model is None or Path(model).is_absolute():
+        return policy
+    resolved = str(path.parent / model)
+    return dataclasses.replace(
+        policy, selection=dataclasses.replace(policy.selection, bandit_model=resolved)
+    )
 
 
 def policy_to_dict(policy: NewsPolicy) -> dict[str, dict[str, Any]]:
