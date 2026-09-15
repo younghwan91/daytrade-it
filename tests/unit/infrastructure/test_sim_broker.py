@@ -177,3 +177,73 @@ def test_limit_up_lock_has_no_ask_and_never_fills_buys() -> None:
     )
     c.now = dt.datetime(2026, 9, 15, 9, 5, tzinfo=KST)
     assert b.get_order_status(r.order_id).remaining_quantity == 1
+
+
+# -- risk realism (final review I3) ----------------------------------------
+
+
+def test_positions_and_equity_are_marked_at_the_current_minute_open() -> None:
+    c = _Clock()
+    b = _broker(c)
+    b.place_order(_buy(1005))
+    c.now = dt.datetime(2026, 9, 15, 9, 3, 20, tzinfo=KST)  # 09:02 closed 990, 09:03 opens 995
+    [p] = b.get_positions()
+    assert (p.current_price, p.market_value) == (Decimal(995), Decimal(995))
+    acct = b.get_account()
+    assert acct.cash == Decimal(1_000_000 - 1005)
+    assert acct.buying_power == acct.cash
+    assert acct.equity == acct.cash + Decimal(995)
+
+
+def test_marketable_buy_beyond_cash_is_rejected_at_placement() -> None:
+    b = SimBroker(BARS, {"000001": Decimal(1000)}, _Clock(), cash=Decimal(1000))
+    with pytest.raises(BrokerError):
+        b.place_order(_buy(1005))
+    assert b.fills == [] and b.get_positions() == []
+    assert b.get_account().cash == Decimal(1000)
+
+
+def test_resting_buy_is_cancelled_with_a_record_when_cash_is_short_at_fill() -> None:
+    c = _Clock()
+    b = SimBroker(BARS, {"000001": Decimal(1000)}, c, cash=Decimal(1500))
+    r = b.place_order(_buy(985))  # rests; 985 <= cash now
+    b.place_order(_buy(1005))  # marketable, cash 495 left
+    c.now = dt.datetime(2026, 9, 15, 9, 3, 0, tzinfo=KST)  # 09:02 bar trades through 985
+    with pytest.raises(BrokerError):
+        b.get_order_status(r.order_id)
+    assert all(f["order_id"] != r.order_id for f in b.fills)
+    [rej] = b.rejections
+    assert rej["order_id"] == r.order_id and "cash" in rej["reason"]
+    assert b.get_account().cash == Decimal(495)
+
+
+def test_fills_record_limit_and_whether_the_order_rested() -> None:
+    c = _Clock()
+    b = _broker(c)
+    b.place_order(_buy(1005))
+    b.place_order(_buy(985))
+    c.now = dt.datetime(2026, 9, 15, 9, 3, 0, tzinfo=KST)
+    b.get_positions()
+    assert [(f["limit"], f["resting"]) for f in b.fills] == [
+        (Decimal(1005), False),
+        (Decimal(985), True),
+    ]
+
+
+# -- price-limit lock without look-ahead (final review minor) ----------------
+
+
+def test_lock_ignores_current_minute_high_low_and_uses_limit_price_from_prev_close() -> None:
+    """09:01 opens at the upper limit (1300 over 1000) but trades to 1350 later in the
+    minute: the high is unknown at 09:01:10, so the quote must not depend on it."""
+    bars = {
+        "000002": [_bar("09:00", 1200, 1200, 1200, 1200), _bar("09:01", 1300, 1350, 1300, 1320)]
+    }
+    b = SimBroker(bars, {"000002": Decimal(1000)}, _Clock())
+    assert b.get_quote("000002").ask == 0
+
+
+def test_open_below_the_limit_is_not_locked_even_if_bar_is_flat() -> None:
+    bars = {"000002": [_bar("09:01", 1200, 1200, 1200, 1200)]}
+    b = SimBroker(bars, {"000002": Decimal(1000)}, _Clock())
+    assert b.get_quote("000002").ask == Decimal(1200)
