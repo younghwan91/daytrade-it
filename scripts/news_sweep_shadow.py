@@ -21,7 +21,8 @@ prompt, same v2 score, same archive row); v4 shadow is off (spec). Rows go to
 `data/news_judgments_universe/{day}.jsonl` in the live archive format plus
 `"pool": "universe"` and `"sweep_seen_at"`. Every request is logged to
 `data/news_sweep/{day}.jsonl` (code, ts, planned_at, status, new_ids) for
-measuring detection delay. Unless `--no-broker`, the live entry filter
+measuring detection delay. Only with `--with-broker` (uses the LIVE Kiwoom
+token: KIWOOM_APP_KEY/SECRET, quotes and minute bars only), the live entry filter
 (`build_entry_candidate`, broker quotes/minute bars only) is evaluated from
 09:00:30 and written to `data/news_sweep_candidates/{day}.jsonl` -- nothing
 is persisted to gptquant and no trader is ever constructed.
@@ -35,15 +36,19 @@ SAFETY -- read before running:
   * Running this during market hours from the trader's IP competes with the
     live daemon's Toss access (same unofficial API; ~3600 extra requests/hour).
     Do NOT schedule it (no cron/systemd). Run it only with the user's explicit
-    approval, ideally from a separate IP or through `--proxy URL`.
+    approval. It refuses to start without `--proxy URL` unless
+    `--allow-trader-ip` is passed explicitly.
+  * Default is judge-only (no broker). `--with-broker` connects with the LIVE
+    Kiwoom app key/secret (quotes/minute bars only, never an order) -- that
+    token is shared with the live trader, so opt in only deliberately.
   * The sweep stops after 3 consecutive 429/403 responses.
   * `--dry-run-http` prints the request schedule and exits without any HTTP.
   * `--max-requests N` caps total Toss requests; SIGTERM/SIGINT stop cleanly.
 
 Usage:
     uv run python scripts/news_sweep_shadow.py --dry-run-http --universe-file codes.txt
-    uv run python scripts/news_sweep_shadow.py --no-broker --max-requests 600
-    uv run python scripts/news_sweep_shadow.py --proxy http://host:3128
+    uv run python scripts/news_sweep_shadow.py --proxy http://host:3128 --max-requests 600
+    uv run python scripts/news_sweep_shadow.py --proxy http://host:3128 --with-broker
 """
 
 from __future__ import annotations
@@ -634,7 +639,18 @@ def load_universe_file(path: Path) -> list[str]:
     return [c.strip() for c in path.read_text().split() if c.strip()]
 
 
+def check_network_args(args: argparse.Namespace) -> None:
+    """Refuse a real sweep from the trader's own IP unless explicitly allowed (F6)."""
+    if args.dry_run_http or args.proxy or args.allow_trader_ip:
+        return
+    raise SystemExit(
+        "refusing to sweep Toss from this host's IP (competes with the live daemon): "
+        "pass --proxy URL, or --allow-trader-ip to override deliberately"
+    )
+
+
 async def main_async(args: argparse.Namespace) -> None:
+    check_network_args(args)
     day = args.day or dt.datetime.now(KST).date()
 
     db_client = None
@@ -673,7 +689,7 @@ async def main_async(args: argparse.Namespace) -> None:
 
     candidate_ctx: dict[str, Any] | None = None
     broker = None
-    if not args.no_broker:
+    if args.with_broker:
         from kiwoom_client import KiwoomAPI
 
         from daytrade_it.application.trading.policy import load_policy
@@ -689,7 +705,7 @@ async def main_async(args: argparse.Namespace) -> None:
             )
         )
         if not broker.connect():
-            raise SystemExit("broker connect failed (use --no-broker to judge only)")
+            raise SystemExit("broker connect failed (omit --with-broker to judge only)")
         selection = load_policy(POLICY_PATH).selection
         candidate_ctx = {
             "broker": broker,
@@ -706,7 +722,7 @@ async def main_async(args: argparse.Namespace) -> None:
         universe=len(universe),
         prev_day=str(prev_day),
         proxy=bool(args.proxy),
-        broker=not args.no_broker,
+        broker=args.with_broker,
         max_requests=args.max_requests,
     )
     try:
@@ -745,9 +761,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dry-run-http", action="store_true", help="Print schedule, no HTTP")
     parser.add_argument("--max-requests", type=int, default=None, help="Cap on Toss requests")
     parser.add_argument(
-        "--no-broker", action="store_true", help="Judge + archive only (no entry filter)"
+        "--with-broker",
+        action="store_true",
+        help="Also run the shadow entry filter; uses the live Kiwoom token "
+        "(quotes/minute bars only, no orders). Default: judge + archive only",
     )
     parser.add_argument("--proxy", default=None, help="httpx proxy URL for Toss requests")
+    parser.add_argument(
+        "--allow-trader-ip",
+        action="store_true",
+        help="Allow sweeping without --proxy (competes with the live daemon's Toss access)",
+    )
     parser.add_argument("--size", type=int, default=UNIVERSE_SIZE, help="Universe size")
     parser.add_argument(
         "--universe-file",

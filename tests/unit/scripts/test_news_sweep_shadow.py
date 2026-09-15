@@ -327,10 +327,40 @@ def test_importing_module_does_not_load_the_trader_or_live_daemon() -> None:
 
 def test_parser_has_safety_flags() -> None:
     args = shadow.build_parser().parse_args(
-        ["--dry-run-http", "--max-requests", "5", "--no-broker", "--proxy", "http://p:1"]
+        ["--dry-run-http", "--max-requests", "5", "--proxy", "http://p:1"]
     )
-    assert args.dry_run_http and args.no_broker
+    assert args.dry_run_http and not args.with_broker
     assert args.max_requests == 5 and args.proxy == "http://p:1"
+
+
+def test_broker_is_opt_in() -> None:
+    # F6: default is judge-only; the live Kiwoom token is used only with --with-broker.
+    parser = shadow.build_parser()
+    assert parser.parse_args([]).with_broker is False
+    assert parser.parse_args(["--with-broker"]).with_broker is True
+    assert "live Kiwoom" in parser.format_help()
+
+
+def test_refuses_to_sweep_from_trader_ip_without_proxy() -> None:
+    parser = shadow.build_parser()
+    with pytest.raises(SystemExit, match="--proxy"):
+        shadow.check_network_args(parser.parse_args([]))
+    shadow.check_network_args(parser.parse_args(["--proxy", "http://p:1"]))
+    shadow.check_network_args(parser.parse_args(["--allow-trader-ip"]))
+    shadow.check_network_args(parser.parse_args(["--dry-run-http"]))  # no HTTP at all
+
+
+async def test_main_refuses_before_any_db_or_http_without_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def boom(*_a, **_k):
+        raise AssertionError("must refuse before touching DB/HTTP")
+
+    monkeypatch.setattr(shadow, "load_universe_file", boom)
+    monkeypatch.setattr(shadow, "prior_day_trade_values", boom)
+    args = shadow.build_parser().parse_args(["--universe-file", "x.txt"])
+    with pytest.raises(SystemExit, match="--proxy"):
+        await shadow.main_async(args)
 
 
 @pytest.mark.parametrize("status", [403, 429])
