@@ -66,20 +66,35 @@ def posterior_mu(
     if arr.size == 0:
         raise ValueError("d must not be empty")
 
-    # Grid extent: wide enough to cover both the prior and the raw data scale,
-    # so an outlier-heavy candidate isn't clipped before the prior can shrink it.
-    spread = float(np.std(arr)) if arr.size > 1 else float(np.mean(np.abs(arr)))
-    spread = max(spread, 1.0)
-    mu_span = max(4.0 * prior_sd + 2.0 * float(np.max(np.abs(arr))), 1.0)
-    mu_grid = np.linspace(-mu_span, mu_span, grid)
-    dmu = float(mu_grid[1] - mu_grid[0])
+    # mu grid: nonuniform (sinh-warped), dense near 0 and sparse in the tails,
+    # so a small-but-real edge (tens of KRW) isn't quantized away by a grid
+    # spaced to cover +/-4 prior_sd (thousands of KRW). Span still covers the
+    # prior's support plus the raw data scale, so an outlier candidate isn't
+    # clipped before the prior can shrink it.
+    max_abs_d = float(np.max(np.abs(arr)))
+    mu_span = max(4.0 * prior_sd + 2.0 * max_abs_d, 1.0)
+    t = np.linspace(-1.0, 1.0, grid)
+    alpha = 5.0
+    mu_grid = mu_span * np.sinh(alpha * t) / math.sinh(alpha)
 
+    # Trapezoidal cell widths for the nonuniform mu grid, so summing
+    # density * width approximates the continuous posterior (a naive
+    # unweighted sum would over-count the wide tail cells).
+    mu_weights = np.empty(grid)
+    mu_weights[1:-1] = (mu_grid[2:] - mu_grid[:-2]) / 2.0
+    mu_weights[0] = (mu_grid[1] - mu_grid[0]) / 2.0
+    mu_weights[-1] = (mu_grid[-1] - mu_grid[-2]) / 2.0
+
+    # sigma grid: log-uniform, scaled to the *data's* own scale (not the mu
+    # grid -- a grid-tied floor swamps a small real signal regardless of
+    # sample size). A small absolute floor keeps near-zero-variance data
+    # (e.g. an identical d_t every day) from producing an unbounded
+    # likelihood spike as sigma -> 0.
+    median_d = float(np.median(arr))
+    data_scale = max(float(np.max(np.abs(arr - median_d))), max_abs_d, prior_sd, 1.0)
     n_sigma = 121
-    # Floor sigma at ~10 mu-grid cells: for near-constant data the MLE sigma
-    # -> 0, which would otherwise put an unbounded likelihood spike on a
-    # single quantized mu cell (a discretization artifact, not a real signal).
-    sigma_lo = max(1e-6, 0.01 * spread, 10.0 * dmu)
-    sigma_hi = max(spread, prior_sd) * 50.0 + 1.0
+    sigma_lo = 1.0
+    sigma_hi = max(10.0 * data_scale, sigma_lo * 10.0)
     log_sigma = np.linspace(math.log(sigma_lo), math.log(sigma_hi), n_sigma)
     sigma_grid = np.exp(log_sigma)
     dlog = (log_sigma[-1] - log_sigma[0]) / (n_sigma - 1)
@@ -99,11 +114,25 @@ def posterior_mu(
 
     log_prior_mu = -0.5 * np.log(2 * math.pi * prior_sd**2) - mu_grid**2 / (2 * prior_sd**2)
 
-    log_post = integrated + log_prior_mu
-    log_post -= log_post.max()
-    post = np.exp(log_post)
+    log_density = integrated + log_prior_mu
+    log_density -= log_density.max()
+    density = np.exp(log_density)
+    post = density * mu_weights
     post /= post.sum()
     return mu_grid, post
+
+
+def prob_mu_gt_0(mu_grid: np.ndarray, post: np.ndarray) -> float:
+    """P(mu > 0) from a `posterior_mu` grid.
+
+    The mu grid is symmetric and (for an odd `grid`) always has a point at
+    exactly 0, so for near-zero-variance data virtually all posterior mass
+    can land on that single cell. Splitting it half-and-half avoids that
+    discretization artifact swinging the result to ~0 or ~1 instead of ~0.5.
+    """
+    pos = float(post[mu_grid > 0].sum())
+    zero_mass = float(post[mu_grid == 0].sum())
+    return pos + 0.5 * zero_mass
 
 
 def _loser_ratio(days: dict[str, dict]) -> float:
@@ -142,7 +171,7 @@ def judge(
     days_ge_0 = sum(1 for delta in deltas if delta >= 0)
 
     mu_grid, post = posterior_mu(deltas, prior_sd=prior_sd)
-    p_mu_gt_0 = float(post[mu_grid > 0].sum())
+    p_mu_gt_0 = prob_mu_gt_0(mu_grid, post)
     mu_mean = float(np.sum(mu_grid * post))
 
     worst_day_candidate = min(float(v["net"]) for v in candidate.values())

@@ -10,7 +10,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "scripts" / "eval"))
 
-from bayes_judge import judge, posterior_mu  # noqa: E402
+from bayes_judge import judge, posterior_mu, prob_mu_gt_0  # noqa: E402
 
 
 def _day(net: float, trades: int = 1, losers: int = 0) -> dict:
@@ -35,20 +35,30 @@ def test_posterior_mu_grid_sums_to_one() -> None:
 
 def test_posterior_mu_all_positive_strongly_favors_mu_gt_0() -> None:
     mu_grid, post = posterior_mu([3000.0] * 7, prior_sd=5000.0)
-    p_gt_0 = float(post[mu_grid > 0].sum())
-    assert p_gt_0 > 0.95
+    assert prob_mu_gt_0(mu_grid, post) > 0.95
 
 
 def test_posterior_mu_all_zero_is_near_half() -> None:
     mu_grid, post = posterior_mu([0.0] * 7, prior_sd=5000.0)
-    p_gt_0 = float(post[mu_grid > 0].sum())
-    assert 0.4 <= p_gt_0 <= 0.6
+    assert 0.4 <= prob_mu_gt_0(mu_grid, post) <= 0.6
 
 
 def test_posterior_mu_all_negative_strongly_favors_mu_lt_0() -> None:
     mu_grid, post = posterior_mu([-3000.0] * 7, prior_sd=5000.0)
-    p_gt_0 = float(post[mu_grid > 0].sum())
-    assert p_gt_0 < 0.05
+    assert prob_mu_gt_0(mu_grid, post) < 0.05
+
+
+def test_posterior_mu_small_consistent_edge_gains_confidence_with_n() -> None:
+    # A small but consistent daily edge (+50 KRW, prior_sd=5000) must not stay
+    # stuck near 0.5 as more days confirm it -- this was the reported bug:
+    # the sigma floor was tied to the mu grid (via prior_sd) instead of the
+    # data, swamping a real small signal regardless of sample size.
+    ps = []
+    for n in (7, 30, 100, 300):
+        mu_grid, post = posterior_mu([50.0] * n, prior_sd=5000.0)
+        ps.append(prob_mu_gt_0(mu_grid, post))
+    assert all(b >= a - 1e-9 for a, b in zip(ps, ps[1:], strict=False))
+    assert ps[1] > 0.90  # n=30
 
 
 def test_posterior_mu_rejects_empty_input() -> None:
