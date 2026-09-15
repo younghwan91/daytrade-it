@@ -337,7 +337,7 @@ def divergences(
             )
     for kind, t, limit, price, dev in fill_deviations(live_ledger, sim_fills):
         if abs(dev) > MAX_FILL_DEV:
-            r = next(x for x in live_ledger if x["ticker"] == t and x.get("limit") == limit)
+            r = next(x for x in live_ledger if x.get("ticker") == t and x.get("limit") == limit)
             cls, note = (
                 _price_class(bars, t, Decimal(limit), _kst(r["ts"]), f"{kind} limit")
                 if r.get("ts")

@@ -125,3 +125,19 @@ def test_divergences_add_on_and_exit_follow_entry_price_reproducibility() -> Non
         ("add_on", "intra_minute_price"),
         ("exit_qty", "intra_minute_price"),
     }
+
+
+def test_divergences_fill_over_half_percent_with_baseline_rows_in_ledger() -> None:
+    live_ledger = [
+        {"event": "baseline", "positions": {}},
+        {
+            "event": "entry_submitted",
+            "ticker": "A",
+            "limit": "11030",
+            "ts": "2026-09-15T09:00:46+09:00",
+        },
+    ]
+    sim_ledger = [{"event": "entry_submitted", "ticker": "A", "limit": "11120"}]
+    fills = [{"ticker": "A", "side": "buy", "price": Decimal(11120)}]
+    rows = divergences([], live_ledger, sim_ledger, fills, {"A": [_bar("09:00", 11120)]}, {})
+    assert [(r["kind"], r["cls"]) for r in rows] == [("fill", "intra_minute_price")]
