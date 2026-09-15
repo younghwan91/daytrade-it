@@ -17,7 +17,9 @@ from daytrade_it.application.replay.day_replay import (
     snapshot_dart,
 )
 from daytrade_it.application.replay.events import ReplayEvent
+from daytrade_it.application.signals.news_entry import SelectionConfig
 from daytrade_it.application.trading.auto_trader import TradingLimits
+from daytrade_it.application.trading.policy import NewsPolicy
 from daytrade_it.infrastructure.brokers.base import KST, MinuteBar
 from daytrade_it.infrastructure.brokers.sim_broker import SimBroker
 from daytrade_it.infrastructure.external.quant_airflow_db_client import StockInfo
@@ -106,8 +108,9 @@ def test_replay_enters_ranked_batch_respects_cap_and_flattens(tmp_path: Path) ->
         _event("3", "000003", "09:00:35"),
     ]
     cfg = DayConfig(
-        limits=TradingLimits(max_open_positions=2, vwap_exit_gap=None, add_on_min_gain=None),
-        max_pre_entry_move=Decimal("0.03"),
+        policy=NewsPolicy(
+            limits=TradingLimits(max_open_positions=2, vwap_exit_gap=None, add_on_min_gain=None)
+        ),
     )
     res = replay_day(
         DAY,
@@ -135,8 +138,9 @@ def _run_day(tmp_path: Path, broker: SimBroker, clock_holder: dict):  # noqa: AN
     }
     events = [_event("1", "000001", "09:00:35"), _event("2", "000002", "09:00:35")]
     cfg = DayConfig(
-        limits=TradingLimits(max_open_positions=2, vwap_exit_gap=None, add_on_min_gain=None),
-        max_pre_entry_move=Decimal("0.03"),
+        policy=NewsPolicy(
+            limits=TradingLimits(max_open_positions=2, vwap_exit_gap=None, add_on_min_gain=None)
+        ),
     )
     return replay_day(
         DAY,
@@ -196,8 +200,9 @@ def _cap1_day(tmp_path: Path, enter_on_decide: bool):  # noqa: ANN202
     second = replace(_event("2", "000002", "09:00:40"), features={**V2, "surprise": 3})
     first = replace(first, batch_at=second.batch_at)
     cfg = DayConfig(
-        limits=TradingLimits(max_open_positions=1, vwap_exit_gap=None, add_on_min_gain=None),
-        max_pre_entry_move=Decimal("0.03"),
+        policy=NewsPolicy(
+            limits=TradingLimits(max_open_positions=1, vwap_exit_gap=None, add_on_min_gain=None)
+        ),
         enter_on_decide=enter_on_decide,
     )
     return replay_day(
@@ -246,8 +251,7 @@ def test_decisions_record_extended_pairs_with_pre_entry_move(tmp_path: Path) -> 
     broker = SimBroker(bars, {"000001": Decimal(10000)}, lambda: clock_holder["now"]())
     stocks = {"000001": StockInfo(code="000001", name="n", market="KOSPI", sector="s")}
     cfg = DayConfig(
-        limits=TradingLimits(vwap_exit_gap=None, add_on_min_gain=None),
-        max_pre_entry_move=Decimal("0.03"),
+        policy=NewsPolicy(limits=TradingLimits(vwap_exit_gap=None, add_on_min_gain=None)),
         enter_on_decide=True,
     )
     res = replay_day(
@@ -299,7 +303,7 @@ def _replay(
 
 def _cfg(**kw: object) -> DayConfig:
     limits = {"max_open_positions": 2, "vwap_exit_gap": None, "add_on_min_gain": None, **kw}
-    return DayConfig(limits=TradingLimits(**limits), max_pre_entry_move=Decimal("0.03"))
+    return DayConfig(policy=NewsPolicy(limits=TradingLimits(**limits)))
 
 
 def test_risk_gate_refusals_are_counted_with_marked_positions(tmp_path: Path) -> None:
@@ -358,3 +362,47 @@ def test_leftover_positions_at_end_of_replay_are_reported(tmp_path: Path) -> Non
     cfg = replace(_cfg(), exits_until=dt.time(14, 0))  # stop before flatten_at
     res = _replay(tmp_path, *_fresh_broker(), cfg)
     assert res.positions == {"000001": 1, "000002": 1}
+
+
+# -- Task 5: replay driven by NewsPolicy ---------------------------------------
+
+
+def test_policy_max_pre_move_sets_the_no_chase_cap(tmp_path: Path) -> None:
+    """10,250 vs prev 10,000 = +2.5%: enters under the default 3% cap, extended at 2%."""
+    limits = TradingLimits(vwap_exit_gap=None, add_on_min_gain=None)
+    outcomes = []
+    for sel in (SelectionConfig(), SelectionConfig(max_pre_move=Decimal("0.02"))):
+        clock_holder: dict = {}
+        bars = {"000001": _bars(10250)}
+        broker = SimBroker(bars, {"000001": Decimal(10000)}, lambda h=clock_holder: h["now"]())
+        cfg = DayConfig(policy=NewsPolicy(limits=limits, selection=sel), enter_on_decide=True)
+        res = _replay(
+            tmp_path, broker, clock_holder, cfg, events=[_event("1", "000001", "09:00:35")]
+        )
+        outcomes.append([d["outcome"] for d in res.decisions])
+    assert outcomes == [["entered"], ["extended"]]
+
+
+def test_policy_rank_key_orders_the_batch(tmp_path: Path) -> None:
+    """Cap 1: surprise ranks 000002 (surprise 3) first; score ranks 000001 (strength 3)."""
+    first = replace(
+        _event("1", "000001", "09:00:35"),
+        features={**V2, "surprise": 1, "sentiment_strength": 3},
+    )
+    second = replace(
+        _event("2", "000002", "09:00:35"),
+        features={**V2, "surprise": 3, "sentiment_strength": 2},
+    )
+    entered = []
+    for key in ("surprise", "score"):
+        limits = TradingLimits(max_open_positions=1, vwap_exit_gap=None, add_on_min_gain=None)
+        cfg = DayConfig(policy=NewsPolicy(limits=limits, selection=SelectionConfig(rank_key=key)))
+        res = _replay(tmp_path, *_fresh_broker(), cfg, events=[first, second])
+        entered.append([r["ticker"] for r in res.ledger if r["event"] == "entry_submitted"])
+    assert entered == [["000002"], ["000001"]]
+
+
+def test_policy_selection_min_score_filters_pairs(tmp_path: Path) -> None:
+    cfg = DayConfig(policy=NewsPolicy(selection=SelectionConfig(min_score=1.0)))
+    res = _replay(tmp_path, *_fresh_broker(), cfg)
+    assert {d["outcome"] for d in res.decisions} == {"no_signal"}

@@ -43,6 +43,7 @@ from daytrade_it.application.replay.day_replay import (
     MAX_MISSING_BARS,
     DayConfig,
     ReplayDataError,
+    no_chase_cap,
     replay_day,
 )
 from daytrade_it.application.replay.events import load_events
@@ -52,7 +53,9 @@ from daytrade_it.application.replay.prev_close import (
     dump_prev_closes,
     load_prev_closes,
 )
+from daytrade_it.application.signals.news_entry import SelectionConfig
 from daytrade_it.application.trading.auto_trader import TradingLimits, add_on_hit, vwap_exit_hit
+from daytrade_it.application.trading.policy import NewsPolicy
 from daytrade_it.infrastructure.brokers.base import KST, MinuteBar
 from daytrade_it.infrastructure.brokers.sim_broker import SimBroker
 from daytrade_it.infrastructure.external.quant_airflow_db_client import QuantAirflowDBClient
@@ -93,12 +96,14 @@ LIVE_CONFIGS = {
     # batch, VWAP exit) and b57e6d8 (add-on): each BUY entered as judged. Live
     # ledger: entries followed their judgment by about two seconds.
     dt.date(2026, 9, 14): DayConfig(
-        limits=TradingLimits(max_open_positions=2, vwap_exit_gap=None, add_on_min_gain=None),
-        max_pre_entry_move=Decimal("0.02"),
+        policy=NewsPolicy(
+            limits=TradingLimits(max_open_positions=2, vwap_exit_gap=None, add_on_min_gain=None),
+            selection=SelectionConfig(max_pre_move=Decimal("0.02")),
+        ),
         enter_on_decide=True,
     ),
     # 48d6cb1 defaults.
-    dt.date(2026, 9, 15): DayConfig(limits=TradingLimits(), max_pre_entry_move=Decimal("0.03")),
+    dt.date(2026, 9, 15): DayConfig(policy=NewsPolicy()),
 }
 
 #: Orders placed by the second daemon started by the duplicated 08:55 cron on
@@ -1023,12 +1028,12 @@ def main() -> None:
             res.fills,
             bars,
             prev,
-            max_move=cfg.max_pre_entry_move,
-            limits=cfg.limits,
+            max_move=no_chase_cap(cfg.policy),
+            limits=cfg.policy.limits,
             unmatched_live=unused,
         )
         divs += fill_rule_divergences(res.fills, bars)
-        divs += exit_divergences(live, res.ledger, res.fills, bars, cfg.limits)
+        divs += exit_divergences(live, res.ledger, res.fills, bars, cfg.policy.limits)
         n_dec = sum(1 for x in divs if x["kind"] == "decision")
         n_other = sum(1 for x in divs if x["cls"] not in PASSING_CLASSES)
         by_cls = {

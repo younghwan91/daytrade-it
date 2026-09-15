@@ -34,7 +34,8 @@ from daytrade_it.application.signals.news_entry import (
     build_entry_candidate,
     tradable_tickers,
 )
-from daytrade_it.application.trading.auto_trader import AutoTrader, TradingLimits, rank_batch
+from daytrade_it.application.trading.auto_trader import AutoTrader, rank_batch
+from daytrade_it.application.trading.policy import NewsPolicy
 from daytrade_it.domain.services.signal_generator import SignalConfig, SignalGenerator
 from daytrade_it.domain.value_objects import Ticker
 from daytrade_it.infrastructure.brokers.base import KST
@@ -73,13 +74,22 @@ def _enter_outcome(new_logs: list[dict], ticker: str, decision: dict) -> None:
 
 @dataclass(frozen=True)
 class DayConfig:
-    limits: TradingLimits
-    max_pre_entry_move: Decimal
+    #: Trading limits + stock selection, the same object the live poller loads.
+    policy: NewsPolicy = field(default_factory=NewsPolicy)
     manage_every: dt.timedelta = dt.timedelta(seconds=30)
     exits_until: dt.time = dt.time(15, 30)
     #: Poller before d357b88 (live through 09-14): each BUY went to
     #: `trader.enter` right after its judgment, in judgment order, unranked.
     enter_on_decide: bool = False
+
+
+#: `entry_filter.MAX_PRE_ENTRY_MOVE` when the policy leaves `max_pre_move` unset.
+DEFAULT_MAX_PRE_ENTRY_MOVE = Decimal("0.03")
+
+
+def no_chase_cap(policy: NewsPolicy) -> Decimal:
+    """The no-chase cap the replay installs for `policy`."""
+    return policy.selection.max_pre_move or DEFAULT_MAX_PRE_ENTRY_MOVE
 
 
 @dataclass
@@ -207,7 +217,7 @@ def replay_day(
     timeline = _timeline(day, events, config)
     decisions: list[dict] = []
     try:
-        entry_filter.MAX_PRE_ENTRY_MOVE = config.max_pre_entry_move
+        entry_filter.MAX_PRE_ENTRY_MOVE = no_chase_cap(config.policy)
         tools._DART_DB_PATH = snapshot
         tools._KILL_SWITCH_PATH = run_dir / "no_kill_switch"
         with (
@@ -274,7 +284,11 @@ async def _run(
     ledger_dir: Path,
 ) -> None:
     trader = AutoTrader(
-        broker, ledger_dir, live=True, limits=config.limits, clock=lambda: dt.datetime.now(KST)
+        broker,
+        ledger_dir,
+        live=True,
+        limits=config.policy.limits,
+        clock=lambda: dt.datetime.now(KST),
     )
     gen = SignalGenerator(SignalConfig(min_confidence=0.0))
     pending: dict[dt.datetime, list[EntryCandidate]] = {}
@@ -307,6 +321,7 @@ async def _run(
                     db_client,
                     gen,
                     expires_at,
+                    selection=config.policy.selection,
                 )
             except Exception:
                 logger.exception("replay: entry filter failed", ticker=e.ticker)
@@ -340,7 +355,11 @@ async def _run(
             batch = pending.pop(payload, [])
             if not batch:
                 continue
-            for signal in rank_batch([(c.signal, c.surprise, c.score) for c in batch]):
+            ranked = rank_batch(
+                [(c.signal, c.surprise, c.score) for c in batch],
+                key=config.policy.selection.rank_key,
+            )
+            for signal in ranked:
                 n = len(logs)
                 try:
                     await trader.enter(signal)

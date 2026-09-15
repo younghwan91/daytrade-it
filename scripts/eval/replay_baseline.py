@@ -97,7 +97,6 @@ def main() -> None:
     )
     from daytrade_it.application.replay.events import load_events  # noqa: PLC0415
     from daytrade_it.application.replay.prev_close import FrozenPrevCloseDB  # noqa: PLC0415
-    from daytrade_it.application.trading.auto_trader import TradingLimits  # noqa: PLC0415
     from daytrade_it.infrastructure.external.quant_airflow_db_client import (  # noqa: PLC0415
         QuantAirflowDBClient,
     )
@@ -112,7 +111,7 @@ def main() -> None:
     _export_quant_airflow_env()
     db = QuantAirflowDBClient()
     stocks = db.get_stock_master()
-    cfg = DayConfig(limits=TradingLimits(), max_pre_entry_move=Decimal("0.03"))
+    cfg = DayConfig()  # NewsPolicy() = the live policy
     OUT.mkdir(parents=True, exist_ok=True)
     total_errors = 0
     failed_days: list[str] = []
