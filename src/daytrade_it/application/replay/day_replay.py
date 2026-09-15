@@ -48,6 +48,21 @@ _ERROR_LEVELS = {"error", "critical"}
 _SKIP_EVENTS = {"auto_trader: entry skipped", "entry_filter: extended, no entry"}
 
 
+def _enter_outcome(new_logs: list[dict], ticker: str, decision: dict) -> None:
+    """Fill `decision` from the log rows `trader.enter` emitted for `ticker`."""
+    for r in new_logs:
+        if r.get("ticker") != ticker:
+            continue
+        ev = r.get("event")
+        if ev == "auto_trader: ENTRY SUBMITTED":
+            decision.update(outcome="entered", limit=r.get("limit"))
+            return
+        if ev == "auto_trader: entry skipped":
+            decision.update(outcome="skipped", reason=r.get("reason"))
+            return
+    decision.update(outcome="enter_failed")
+
+
 @dataclass(frozen=True)
 class DayConfig:
     limits: TradingLimits
@@ -65,6 +80,10 @@ class DayResult:
     skips: list[dict] = field(default_factory=list)
     fills: list[dict] = field(default_factory=list)
     errors: list[dict] = field(default_factory=list)
+    #: One row per judged pair, in decide order: ticker, decide_at, outcome
+    #: (not_tradable | filter_failed | no_signal | extended | entered | skipped
+    #: | enter_failed) plus pre_entry_move / reason / limit where known.
+    decisions: list[dict] = field(default_factory=list)
 
 
 def snapshot_dart(src: Path, day: dt.date, dst: Path) -> Path:
@@ -122,6 +141,7 @@ def replay_day(
     if clock_holder is not None:
         clock_holder["now"] = lambda: dt.datetime.now(KST)
     timeline = _timeline(day, events, config)
+    decisions: list[dict] = []
     try:
         entry_filter.MAX_PRE_ENTRY_MOVE = config.max_pre_entry_move
         tools._DART_DB_PATH = snapshot
@@ -132,6 +152,8 @@ def replay_day(
         ):
             asyncio.run(
                 _run(
+                    logs,
+                    decisions,
                     timeline,
                     traveller,
                     broker,
@@ -156,10 +178,18 @@ def replay_day(
         if r.get("event") in _SKIP_EVENTS
     ]
     errors = [r for r in logs if r.get("log_level") in _ERROR_LEVELS]
-    return DayResult(ledger=ledger, skips=skips, fills=list(broker.fills), errors=errors)
+    return DayResult(
+        ledger=ledger,
+        skips=skips,
+        fills=list(broker.fills),
+        errors=errors,
+        decisions=decisions,
+    )
 
 
 async def _run(
+    logs: list[dict],
+    decisions: list[dict],
     timeline: list[tuple[dt.datetime, int, Any]],
     traveller: Any,
     broker: SimBroker,
@@ -175,6 +205,7 @@ async def _run(
     )
     gen = SignalGenerator(SignalConfig(min_confidence=0.0))
     pending: dict[dt.datetime, list[EntryCandidate]] = {}
+    by_signal: dict[Any, dict] = {}
     for at, kind, payload in timeline:
         traveller.move_to(at)
         if kind == 0:
@@ -184,12 +215,16 @@ async def _run(
                 logger.exception("replay: manage failed")
         elif kind == 1:
             e: ReplayEvent = payload
+            decision: dict = {"ticker": e.ticker, "decide_at": e.decide_at}
+            decisions.append(decision)
             article = to_article(e)
             if not any(
                 t.value == e.ticker
                 for t, _ in tradable_tickers(article, stocks, stale_before, expires_at, at)
             ):
+                decision["outcome"] = "not_tradable"
                 continue
+            n = len(logs)
             try:
                 c = build_entry_candidate(
                     article,
@@ -202,23 +237,41 @@ async def _run(
                 )
             except Exception:
                 logger.exception("replay: entry filter failed", ticker=e.ticker)
+                decision["outcome"] = "filter_failed"
                 continue
             if c is None:
+                ext = [
+                    r
+                    for r in logs[n:]
+                    if r.get("event") == "entry_filter: extended, no entry"
+                    and r.get("ticker") == e.ticker
+                ]
+                if ext:
+                    decision.update(outcome="extended", pre_entry_move=ext[-1]["pre_entry_move"])
+                else:
+                    decision["outcome"] = "no_signal"
                 continue
+            decision["pre_entry_move"] = c.signal.metadata.get("pre_entry_move")
             if config.enter_on_decide:
+                n = len(logs)
                 try:
                     await trader.enter(c.signal)
                 except Exception:
                     logger.exception("replay: enter failed", ticker=e.ticker)
+                _enter_outcome(logs[n:], e.ticker, decision)
             else:
+                decision["outcome"] = "pending"
+                by_signal[c.signal.id] = decision
                 pending.setdefault(e.batch_at, []).append(c)
         else:
             batch = pending.pop(payload, [])
             if not batch:
                 continue
             for signal in rank_batch([(c.signal, c.surprise, c.score) for c in batch]):
+                n = len(logs)
                 try:
                     await trader.enter(signal)
                 except Exception:
                     logger.exception("replay: enter failed", ticker=signal.ticker.value)
+                _enter_outcome(logs[n:], signal.ticker.value, by_signal[signal.id])
     trader.report_leftovers()

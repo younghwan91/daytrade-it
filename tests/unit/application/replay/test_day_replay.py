@@ -218,3 +218,39 @@ def test_enter_on_decide_enters_each_pair_when_judged_unranked(tmp_path: Path) -
     entries = [r for r in res.ledger if r["event"] == "entry_submitted"]
     assert [r["ticker"] for r in entries] == ["000001"]
     assert entries[0]["ts"].startswith("2026-09-15T09:00:35")
+
+
+def test_decisions_record_each_judged_pair_outcome(tmp_path: Path) -> None:
+    res = _cap1_day(tmp_path, enter_on_decide=False)
+    got = [(d["ticker"], d["outcome"], d.get("reason")) for d in res.decisions]
+    assert got == [
+        ("000001", "skipped", "concurrent position cap reached"),
+        ("000002", "entered", None),
+    ]
+    assert res.decisions[1]["decide_at"] == dt.datetime(2026, 9, 15, 9, 0, 40, tzinfo=KST)
+    assert res.decisions[1]["limit"] == "10100"
+
+
+def test_decisions_record_extended_pairs_with_pre_entry_move(tmp_path: Path) -> None:
+    clock_holder: dict = {}
+    bars = {"000001": _bars(10500)}
+    broker = SimBroker(bars, {"000001": Decimal(10000)}, lambda: clock_holder["now"]())
+    stocks = {"000001": StockInfo(code="000001", name="n", market="KOSPI", sector="s")}
+    cfg = DayConfig(
+        limits=TradingLimits(vwap_exit_gap=None, add_on_min_gain=None),
+        max_pre_entry_move=Decimal("0.03"),
+        enter_on_decide=True,
+    )
+    res = replay_day(
+        DAY,
+        [_event("1", "000001", "09:00:35")],
+        broker,
+        _DB(),
+        stocks,
+        dt.datetime(2026, 9, 14, 15, 20, tzinfo=KST),
+        cfg,
+        tmp_path,
+        _dart(tmp_path),
+        clock_holder=clock_holder,
+    )
+    assert [(d["outcome"], d["pre_entry_move"]) for d in res.decisions] == [("extended", "0.05")]
