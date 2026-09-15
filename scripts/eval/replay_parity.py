@@ -344,6 +344,31 @@ def _slot_changed(sim: dict, live: dict) -> bool:
     return (sim["outcome"] == "entered") != (live["outcome"] == "entered")
 
 
+CAP_REASONS = {"concurrent position cap reached", "daily entry cap reached"}
+
+
+def _cap_skipped_side(sim: dict, live: dict) -> str | None:
+    """ "sim" / "live" when one side entered and the other was skipped by a cap."""
+    for skipped, entered, name in ((sim, live, "sim"), (live, sim, "live")):
+        if (
+            entered["outcome"] == "entered"
+            and skipped["outcome"] == "skipped"
+            and skipped.get("reason") in CAP_REASONS
+        ):
+            return name
+    return None
+
+
+def _exited_by(ledger: list[dict], ticker: str, at: dt.datetime) -> bool:
+    return any(
+        r["event"] == "exit_submitted"
+        and r.get("ticker") == ticker
+        and r.get("ts")
+        and _kst(r["ts"]) <= at
+        for r in ledger
+    )
+
+
 def _filter_class(
     bars: dict[str, list[MinuteBar]],
     t: str,
@@ -413,11 +438,12 @@ def divergences(
     - extended vs pass: intra_minute_price if the sim quote and the live price
       fall on opposite sides of `max_move` over the same prev close;
       data_vintage if only swapping kr_quant's prev close for live's crosses it
-    - entered vs skipped (both passed the filter): knock_on if an earlier
-      intra_minute_price / data_vintage divergence changed who held a slot
+    - entered vs cap-skipped (both passed the filter): knock_on only if a
+      strictly earlier intra_minute_price / data_vintage divergence entered a
+      ticker on the cap-skipped side alone and that position was still open
     - add_on: intra_minute_price if add_on_hit at the add-on time flips between
-      the live entry limit and the replay entry limit; exit_qty follows the
-      entry / add-on difference that explains it
+      the live and replay entry limits; exit_qty inherits the entry / add-on
+      cause only if the exit gap equals the bought (entry + add-on) gap
     - anything else, including live judgments with no replay decision: other
     """
     limits = limits or TradingLimits()
@@ -425,7 +451,8 @@ def divergences(
     items = [(s["decide_at"], s, lv) for s, lv in pairs]
     items += [(lv["at"], None, lv) for lv in unmatched_live]
     items.sort(key=lambda x: x[0])
-    roots: list[tuple[dt.datetime, str, str]] = []
+    #: (time, ticker, class, side that entered it) of passing slot-changing roots
+    roots: list[tuple[dt.datetime, str, str, str]] = []
     decision_cls: dict[str, str] = {}
     for at, sim, live in items:
         if sim is None:
@@ -462,22 +489,44 @@ def divergences(
         elif {fl, fs} == {"extended", "pass"}:
             cls, note = _filter_class(bars, t, sim, live, prev_close, max_move)
         elif fl == fs == "pass":
-            root = next((r for r in reversed(roots) if r[0] <= at and r[1] != t), None)
-            if root is None:
+            side = _cap_skipped_side(sim, live)
+            ledger = sim_ledger if side == "sim" else live_ledger
+            root = (
+                None
+                if side is None
+                else next(
+                    (
+                        r
+                        for r in reversed(roots)
+                        if r[0] < at
+                        and r[1] != t
+                        and r[3] == side
+                        and not _exited_by(ledger, r[1], at)
+                    ),
+                    None,
+                )
+            )
+            if side is None:
+                cls, note = "other", "pass-vs-pass mismatch that is not entered vs cap-skipped"
+            elif root is None:
                 cls, note = (
                     "other",
-                    "no earlier intra_minute_price/data_vintage divergence changed slots",
+                    f"{side} cap-skipped but no earlier intra/vintage root entered on {side} "
+                    "and still open",
                 )
             else:
                 cls = KNOCK_ON
-                note = f"slot occupancy changed by {root[1]} ({root[2]}) at {root[0].strftime('%H:%M:%S')}"
+                note = (
+                    f"{side} cap-skipped while holding {root[1]} ({root[2]}, entered only on "
+                    f"{side} at {root[0].strftime('%H:%M:%S')}, not exited)"
+                )
         else:
             cls, note = "other", f"filter outcome live {fl} vs replay {fs}"
         out.append(_decision_row(t, at, _outcome_key(live), _outcome_key(sim), cls, note))
         if cls in PASSING_CLASSES:
             decision_cls.setdefault(t, cls)
             if cls in (INTRA, VINTAGE) and _slot_changed(sim, live):
-                roots.append((at, t, cls))
+                roots.append((at, t, cls, "sim" if sim["outcome"] == "entered" else "live"))
         else:
             decision_cls[t] = "other"
 
@@ -533,6 +582,20 @@ def divergences(
             f"replay entry {se['limit']} -> {hit_sim} (min gain {limits.add_on_min_gain:.0%})",
         )
     for t in sorted(diff["exit"]):
+        held = {
+            side: summ["entry"].get(t, 0) + summ["add_on"].get(t, 0)
+            for side, summ in (("live", s_live), ("sim", s_sim))
+        }
+        exit_gap = s_sim["exit"].get(t, 0) - s_live["exit"].get(t, 0)
+        if exit_gap != held["sim"] - held["live"]:
+            row(
+                "exit_qty",
+                t,
+                "exit",
+                "other",
+                f"exit gap {exit_gap:+d} != bought gap {held['sim'] - held['live']:+d}",
+            )
+            continue
         causes = []
         if t in diff["entry"]:
             causes.append(("entry decision", decision_cls.get(t, "other")))

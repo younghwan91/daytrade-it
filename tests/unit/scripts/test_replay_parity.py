@@ -333,3 +333,71 @@ def test_match_summary_counts_and_returns_unused_live_judgments() -> None:
     unused, counts = match_summary(pairs, live)
     assert [d["ticker"] for d in unused] == ["000001", "000003", "000004"]
     assert counts == {"live": 4, "replay": 1, "matched": 1, "union": 4}
+
+
+def _knock(follow_live: str, follow_sim: str, root_at: dt.datetime, sim_ledger: list[dict]):  # noqa: ANN202
+    bars = {"X": [_bar("09:01", 10200)], "Y": [_bar("09:01", 6850)]}
+    prev = {"X": Decimal(10000), "Y": Decimal(7040)}
+    root = _pair("X", "extended", "entered", "0.04", at=root_at)
+    follow = _pair("Y", follow_live, follow_sim, None)
+    rows = divergences([root, follow], [], sim_ledger, [], bars, prev, max_move=Decimal("0.03"))
+    return [(r["ticker"], r["cls"]) for r in rows if r["kind"] == "decision"]
+
+
+def test_knock_on_requires_cap_skip_not_other_pass_mismatch() -> None:
+    early = AT - dt.timedelta(seconds=8)
+    assert _knock("entered", "enter_failed", early, []) == [
+        ("X", "intra_minute_price"),
+        ("Y", "other"),
+    ]
+
+
+def test_knock_on_requires_strictly_earlier_root() -> None:
+    assert _knock("entered", "skipped", AT, []) == [("X", "intra_minute_price"), ("Y", "other")]
+
+
+def test_knock_on_requires_root_position_still_open_on_the_skipped_side() -> None:
+    early = AT - dt.timedelta(seconds=8)
+    exited = [
+        {
+            "event": "entry_submitted",
+            "ticker": "X",
+            "limit": "10200",
+            "ts": "2026-09-15T09:01:34+09:00",
+        },
+        {
+            "event": "exit_submitted",
+            "ticker": "X",
+            "quantity": 1,
+            "attempt": 0,
+            "ts": "2026-09-15T09:01:40+09:00",
+        },
+    ]
+    assert _knock("entered", "skipped", early, exited) == [
+        ("X", "intra_minute_price"),
+        ("Y", "other"),
+    ]
+    held = [exited[0], {**exited[1], "ts": "2026-09-15T15:00:00+09:00"}]
+    assert _knock("entered", "skipped", early, held) == [
+        ("X", "intra_minute_price"),
+        ("Y", "knock_on"),
+    ]
+
+
+def test_knock_on_requires_root_entered_on_the_side_that_was_cap_skipped() -> None:
+    """Root entered in the replay; here the replay entered and live was cap-skipped -> other."""
+    early = AT - dt.timedelta(seconds=8)
+    assert _knock("skipped", "entered", early, []) == [("X", "intra_minute_price"), ("Y", "other")]
+
+
+def test_exit_qty_inherits_add_on_class_only_when_quantities_reconcile() -> None:
+    live, sim, fills = _add_on_ledgers()
+    bars, prev = {"A": _rising(75600)}, {"A": Decimal(74600)}
+    rows = divergences([], live, sim, fills, bars, prev, limits=TradingLimits())
+    assert ("exit_qty", "intra_minute_price") in {(r["kind"], r["cls"]) for r in rows}
+    sim0 = [r for r in sim if r["event"] != "exit_submitted"]
+    rows = divergences([], live, sim0, fills, bars, prev, limits=TradingLimits())
+    assert {(r["kind"], r["cls"]) for r in rows} == {
+        ("add_on", "intra_minute_price"),
+        ("exit_qty", "other"),
+    }
