@@ -18,6 +18,7 @@ from decimal import Decimal
 from krx_quant_core.market.ticks import tick_size
 
 from daytrade_it.infrastructure.brokers.base import (
+    KST,
     Account,
     BrokerInterface,
     MinuteBar,
@@ -72,7 +73,7 @@ class SimBroker(BrokerInterface):
 
     # -- settlement --------------------------------------------------------
 
-    def _fill(self, oid: str, price: Decimal) -> None:
+    def _fill(self, oid: str, price: Decimal, ts: dt.datetime | None = None) -> None:
         o = self._open.pop(oid)
         t, qty = o["ticker"], o["qty"]
         if o["side"] == OrderSide.BUY:
@@ -85,7 +86,7 @@ class SimBroker(BrokerInterface):
             self._cash += price * qty
         self.fills.append(
             {
-                "ts": self._clock(),
+                "ts": ts if ts is not None else self._clock(),
                 "ticker": t,
                 "side": o["side"].value,
                 "qty": qty,
@@ -102,11 +103,12 @@ class SimBroker(BrokerInterface):
                     continue
                 o["checked"] = b.ts
                 up, down = self._locked(o["ticker"], b)
+                bar_end = (b.ts + dt.timedelta(minutes=1)).replace(tzinfo=KST)
                 if o["side"] == OrderSide.BUY and not up and b.low <= o["limit"]:
-                    self._fill(oid, min(o["limit"], b.open))
+                    self._fill(oid, min(o["limit"], b.open), ts=bar_end)
                     break
                 if o["side"] == OrderSide.SELL and not down and b.high >= o["limit"]:
-                    self._fill(oid, max(o["limit"], b.open))
+                    self._fill(oid, max(o["limit"], b.open), ts=bar_end)
                     break
 
     # -- BrokerInterface ---------------------------------------------------
@@ -162,8 +164,15 @@ class SimBroker(BrokerInterface):
         quote = self.get_quote(order.ticker)
         oid = f"S{next(self._ids):07d}"
         qty = int(order.quantity)
-        if order.side == OrderSide.SELL and self._held.get(order.ticker, 0) < qty:
-            raise BrokerError(f"no holdings to sell: {order.ticker}", broker_name="sim")
+        if order.side == OrderSide.SELL:
+            reserved = sum(
+                o["qty"]
+                for o in self._open.values()
+                if o["ticker"] == order.ticker and o["side"] == OrderSide.SELL
+            )
+            available = self._held.get(order.ticker, 0) - reserved
+            if qty > available:
+                raise BrokerError(f"no holdings to sell: {order.ticker}", broker_name="sim")
         self._open[oid] = {
             "ticker": order.ticker,
             "side": order.side,

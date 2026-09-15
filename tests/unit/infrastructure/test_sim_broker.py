@@ -114,6 +114,35 @@ def test_minute_bars_hide_current_and_future_minutes() -> None:
     assert [x.ts.minute for x in _broker(c).get_minute_bars("000001")] == [0]
 
 
+def test_resting_fill_ts_is_the_fill_bars_end_not_discovery_time() -> None:
+    c = _Clock()
+    b = _broker(c)
+    r = b.place_order(_buy(985))
+    c.now = dt.datetime(2026, 9, 15, 9, 5, 0, tzinfo=KST)  # discovered well after fill bar
+    with pytest.raises(BrokerError):
+        b.get_order_status(r.order_id)  # settled during _sync -> triggers the fill
+    assert b.fills[-1]["ts"] == dt.datetime(2026, 9, 15, 9, 3, 0, tzinfo=KST)
+
+
+def test_second_sell_order_blocked_by_shares_reserved_in_first_open_sell() -> None:
+    c = _Clock()
+    b = _broker(c)
+    b.place_order(_buy(1005))  # marketable buy -> 1 share held
+    b.place_order(_sell(2000))  # resting sell reserves the 1 share
+    with pytest.raises(BrokerError):
+        b.place_order(_sell(990))
+
+
+def test_sell_succeeds_after_cancelling_the_reserving_order() -> None:
+    c = _Clock()
+    b = _broker(c)
+    b.place_order(_buy(1005))
+    r1 = b.place_order(_sell(2000))
+    b.cancel_order(r1.order_id)
+    r2 = b.place_order(_sell(990))
+    assert r2.filled_avg_price == Decimal(1004)
+
+
 def test_limit_up_lock_has_no_ask_and_never_fills_buys() -> None:
     bars = {
         "000002": [_bar("09:00", 1300, 1300, 1300, 1300), _bar("09:01", 1300, 1300, 1300, 1300)]
