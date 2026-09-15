@@ -3,9 +3,11 @@
     uv run python scripts/eval/backfill_toss_company_news.py --since 2026-03-16 [--codes 005930,000911]
 
 엔드포인트는 비공식이다(2026-09-15 확인):
-`GET wts-info-api.tossinvest.com/api/v2/news/companies/{6자리}?number=1..&size=100`, 최신순,
+`GET wts-info-api.tossinvest.com/api/v2/news/companies/{6자리}?number=1..&size=100`, 대략 최신순,
 `result.body[]`에 id(newsId)·title·summary·createdAt(KST, tz 없음)·stockCodes(항상 null)·
-newsType·ticsTitles·source. 관련 종목은 같은 newsId 가 어느 종목 목록에 나오는지로 복원한다
+newsType·ticsTitles·source. 정렬이 느슨하고(2026-09-16 확인: 005930 한 페이지에 역전 45회)
+`lastPage` 도 믿을 수 없다(005930 1페이지가 lastPage=true 인데 2페이지에 100건). 그래서 페이지에
+`--since` 이후 기사가 하나도 없거나 빈 페이지일 때만 멈춘다. 관련 종목은 같은 newsId 가 어느 종목 목록에 나오는지로 복원한다
 (`news_universe_pairs.py`).
 
 **라이브 매매 보호가 최우선** — trader 의 라이브 데몬이 같은 네트워크에서 토스를 폴링한다.
@@ -16,8 +18,8 @@ newsType·ticsTitles·source. 관련 종목은 같은 newsId 가 어느 종목 �
 
 재개: 종목당 `{code}.partial.jsonl`(받은 페이지 누적) + `{code}.state.json`(마지막으로 끝낸 페이지)
 를 두고, 끝나면 newsId 중복을 제거해 `{code}.jsonl` 로 원자적으로 옮긴 뒤 `{code}.done` 을 쓴다.
-`.done` 이 있는 종목은 건너뛴다. 최신순 목록이라 재개 사이에 새 기사가 끼면 페이지 경계가 뒤로
-밀릴 뿐(중복은 제거) 빠지는 기사는 없다.
+`.done` 이 있는 종목은 건너뛴다. 재개 사이에 새 기사가 끼면 페이지 경계가 뒤로 밀려 중복이 생기고
+(중복은 제거), 느슨한 정렬 탓에 페이지 경계의 기사가 드물게 빠질 수 있다.
 
 kr_quant 는 `stocks` 읽기만 한다(read-only 세션). `data/toss_history` 는 건드리지 않는다.
 """
@@ -94,15 +96,19 @@ def backoff_delay(attempt: int, base: float, cap: float) -> float:
 
 
 def page_rows(
-    body: list[dict[str, Any]], since: str, last_page: bool, code: str
+    body: list[dict[str, Any]], since: str, code: str
 ) -> tuple[list[dict[str, Any]], bool]:
-    """Rows on this page created on/after `since`, and whether another page is needed."""
+    """Rows on this page created on/after `since`, and whether another page is needed.
+
+    Toss lists are only roughly newest-first and `lastPage` is unreliable, so paging continues
+    while any row on the page is still >= since; it stops on a fully older or empty page.
+    """
     rows = []
     for a in body:
         if a["createdAt"][:10] >= since:
             src = a.get("source") or {}
             rows.append({**{k: a.get(k) for k in KEEP}, "source": src.get("code"), "code": code})
-    more = bool(body) and not last_page and body[-1]["createdAt"][:10] >= since
+    more = bool(rows)
     return rows, more
 
 
@@ -215,9 +221,7 @@ class Collector:
                 log.warning("%s page %d: HTTP %d, skipping code", code, page + 1, r.status_code)
                 return "failed", 0
             result = (r.json() or {}).get("result") or {}
-            rows, more = page_rows(
-                result.get("body") or [], self.since, bool(result.get("lastPage")), code
-            )
+            rows, more = page_rows(result.get("body") or [], self.since, code)
             with partial.open("a") as f:
                 for row in rows:
                     f.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -253,6 +257,18 @@ class Collector:
         return len(seen)
 
 
+def setup_logging() -> None:
+    """Plain line-buffered log lines (the app import installs a JSON root handler on stdout)."""
+    sys.stdout.reconfigure(line_buffering=True)  # type: ignore[union-attr]
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+        stream=sys.stdout,
+        force=True,
+    )
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+
+
 def universe_codes() -> list[str]:
     import psycopg2
 
@@ -271,7 +287,7 @@ def main() -> int:
     ap.add_argument("--sleep", type=float, default=1.2)
     ap.add_argument("--max-pages", type=int, default=300)
     a = ap.parse_args()
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    setup_logging()
     a.out_dir.mkdir(parents=True, exist_ok=True)
     codes = a.codes.split(",") if a.codes else universe_codes()
     col = Collector(a.out_dir, a.since, a.sleep, a.max_pages)

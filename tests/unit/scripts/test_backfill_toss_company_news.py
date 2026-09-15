@@ -94,23 +94,29 @@ def _art(news_id, created):
 
 def test_page_rows_keeps_since_and_newer_and_signals_more():
     body = [_art("a", "2026-09-15T10:00:00"), _art("b", "2026-03-16T00:00:01")]
-    rows, more = bf.page_rows(body, since="2026-03-16", last_page=False, code="005930")
+    rows, more = bf.page_rows(body, since="2026-03-16", code="005930")
     assert [r["id"] for r in rows] == ["a", "b"]
     assert rows[0]["source"] == "X" and rows[0]["code"] == "005930"
-    assert more  # oldest row still >= since and not the last page
+    assert more
 
 
-def test_page_rows_stops_when_page_crosses_since():
-    body = [_art("a", "2026-03-17T10:00:00"), _art("b", "2026-03-15T23:59:59")]
-    rows, more = bf.page_rows(body, since="2026-03-16", last_page=False, code="005930")
-    assert [r["id"] for r in rows] == ["a"]
-    assert not more
+def test_page_rows_keeps_paging_when_order_is_loose():
+    # Toss lists are only roughly newest-first (verified 2026-09-16: ~45 inversions per page of
+    # 005930), so an old last row must not stop paging while any row is still >= since.
+    body = [
+        _art("a", "2026-03-15T10:00:00"),
+        _art("b", "2026-03-17T00:00:00"),
+        _art("c", "2026-03-10T00:00:00"),
+    ]
+    rows, more = bf.page_rows(body, since="2026-03-16", code="005930")
+    assert [r["id"] for r in rows] == ["b"]
+    assert more
 
 
-def test_page_rows_stops_on_empty_or_last_page():
-    assert bf.page_rows([], since="2026-03-16", last_page=False, code="1") == ([], False)
-    rows, more = bf.page_rows([_art("a", "2026-09-01T00:00:00")], "2026-03-16", True, "1")
-    assert len(rows) == 1 and not more
+def test_page_rows_stops_only_when_whole_page_is_older_or_empty():
+    body = [_art("a", "2026-03-15T23:59:59"), _art("b", "2026-03-01T00:00:00")]
+    assert bf.page_rows(body, since="2026-03-16", code="1") == ([], False)
+    assert bf.page_rows([], since="2026-03-16", code="1") == ([], False)
 
 
 # --- live key -------------------------------------------------------------------------
