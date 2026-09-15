@@ -315,3 +315,21 @@ def test_dry_run_makes_no_http_calls(tmp_path: Path) -> None:
     )
     assert summary["sample"] == 5
     assert summary["estimate"]["usd"] > 0
+
+
+def test_resume_aborts_when_remaining_chunks_exceed_current_budget(tmp_path: Path) -> None:
+    pairs = [_pair(i) for i in range(4)]
+    api = CrashOnSecondCreate()
+    with pytest.raises(httpx.ConnectError):
+        _judge(tmp_path, api, chunk=2).run(pairs, sample=4, stratify=["month"], seed=1)
+    state = json.loads((tmp_path / "state.json").read_text())
+    assert state["run"]["budget_usd"] == 100.0 and state["run"]["estimate"]["usd"] > 0
+    api.crash = False
+    logs: list[str] = []
+    j = _judge(tmp_path, api, chunk=2, budget=0.0001)
+    j.log = logs.append
+    with pytest.raises(BudgetExceeded):
+        j.run(pairs, sample=4, stratify=["month"], seed=1)
+    assert len(api.created) == 1  # remaining chunk not submitted
+    assert any("original estimate" in m for m in logs)
+    assert any("remaining" in m for m in logs)

@@ -422,6 +422,7 @@ class BatchJudge:
 
     def _finish(self, run: dict, by_key: dict[str, dict], summary: dict) -> dict:
         submitted = {b["chunk"] for b in self._load_state()["batches"]}
+        remaining: list[tuple[int, list[str], list[dict]]] = []
         for i, chunk_keys in enumerate(run["chunks"]):
             if i in submitted:
                 continue
@@ -431,6 +432,25 @@ class BatchJudge:
                     f"{len(missing)} stored sample key(s) not in --pairs, e.g. {missing[0]}"
                 )
             reqs = [build_request(by_key[k], run["model"]) for k in chunk_keys]
+            remaining.append((i, chunk_keys, reqs))
+        if remaining:
+            est = estimate_cost(
+                [r for *_, reqs in remaining for r in reqs],
+                self.chars_per_token,
+                self.est_output_tokens,
+            )
+            self.log(
+                f"run original estimate ${run['estimate']['usd']:.2f} under budget "
+                f"${run['budget_usd']:.2f}; remaining {len(remaining)}/{len(run['chunks'])} "
+                f"chunk(s) estimate ${est['usd']:.2f} vs current budget ${self.budget_usd:.2f}"
+            )
+            summary["remaining_estimate"] = est
+            # a resume spends real money too: check the unsubmitted part against today's budget
+            if est["usd"] > self.budget_usd:
+                raise BudgetExceeded(
+                    f"remaining estimate ${est['usd']:.2f} > budget ${self.budget_usd:.2f}"
+                )
+        for i, chunk_keys, reqs in remaining:
             self.submit(reqs, {custom_id_of(k): k for k in chunk_keys}, i)
             summary["submitted"] += 1
         for entry in [b for b in self._load_state()["batches"] if not b["processed"]]:
