@@ -164,8 +164,8 @@ def _kst(ts: str) -> dt.datetime:
 def live_decisions(rows: list[dict], day: dt.date, exclude_orders: set[str]) -> list[dict]:
     """One row per live `judged` log line on `day`, with its outcome from later rows.
 
-    extended / persisted rows attach, first in first out, to that ticker's
-    judgments of the last 10 s still awaiting a filter result; ENTRY SUBMITTED /
+    extended / persisted rows attach to that ticker's
+    latest judgment of the last 10 s still awaiting a filter result; ENTRY SUBMITTED /
     entry skipped rows to the earliest judgment of that ticker still holding an
     unentered signal. A second judgment of the same (ticker, title) within 60 s
     is the duplicate daemon's: it takes a filter row but makes no decision row.
@@ -176,8 +176,8 @@ def live_decisions(rows: list[dict], day: dt.date, exclude_orders: set[str]) -> 
 
     def take(t: str, ts: dt.datetime) -> dict | None:
         q = [x for x in awaiting.get(t, []) if ts - x[0] <= dt.timedelta(seconds=10)]
-        awaiting[t] = q[1:]
-        return q[0][1] if q else None
+        awaiting[t] = q[:-1]
+        return q[-1][1] if q else None
 
     def earliest(t: str, outcome: str) -> dict | None:
         return next((d for d in out if d["ticker"] == t and d["outcome"] == outcome), None)
@@ -248,7 +248,8 @@ def _round_tick(price: Decimal) -> Decimal:
 
 
 def reproducible_from_open(live_price: Decimal, bar_open: Decimal) -> bool:
-    return _round_tick(live_price) == bar_open
+    """Within half a tick: live may quote the bid/ask mid around the same ask."""
+    return abs(live_price - bar_open) <= tick_size(bar_open) / 2
 
 
 def _outcome_key(d: dict) -> str:
@@ -311,7 +312,9 @@ def _move_class(
     bars: dict[str, list[MinuteBar]], t: str, move: Decimal, at: dt.datetime, kr_prev: Decimal
 ) -> tuple[str, str]:
     o = _sim_quote(bars, t, at)
-    near = o if o is not None else kr_prev * (1 + move)
+    if o is None:
+        return _price_class(bars, t, kr_prev * (1 + move), at, "pre_entry_move x kr prev")
+    near = o
     found = live_price_and_prev(move, near, kr_prev)
     if found is None:
         return _price_class(

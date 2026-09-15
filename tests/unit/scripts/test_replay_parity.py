@@ -185,3 +185,36 @@ def test_divergence_with_no_bar_yet_is_intra_minute() -> None:
     )
     assert [r["cls"] for r in rows] == ["intra_minute_price"]
     assert "no bar" in rows[0]["note"]
+
+
+def test_filter_row_belongs_to_the_latest_judgment_of_that_ticker() -> None:
+    """A ticker: a no-signal judgment, then a second article's signal 6 s later."""
+    rows = [
+        _row("10:51:17", "news_signal_poller: judged", ticker="000316", title="a"),
+        _row("10:51:23", "news_signal_poller: judged", ticker="000316", title="b"),
+        _row("10:51:24", "news_signal_poller: ACTIONABLE SIGNAL PERSISTED", ticker="000316"),
+        _row("10:51:25", "auto_trader: entry skipped", ticker="000316", reason="cap"),
+    ]
+    got = live_decisions(rows, DAY, exclude_orders=set())
+    assert [(d["title"], d["outcome"]) for d in got] == [("a", "no_signal"), ("b", "skipped")]
+
+
+def test_reproducible_allows_bid_ask_mid_half_tick_below_open() -> None:
+    assert reproducible_from_open(Decimal(35675), Decimal(35700))
+    assert reproducible_from_open(Decimal(35675), Decimal("35675.0"))
+    assert not reproducible_from_open(Decimal(35650), Decimal(35700))
+
+
+def test_no_bar_takes_precedence_over_prev_close_vintage() -> None:
+    at = dt.datetime(2026, 9, 15, 9, 1, 49, tzinfo=KST)
+    live = {
+        "ticker": "A",
+        "at": at,
+        "outcome": "extended",
+        "pre_entry_move": "0.2922794117647058823529411765",
+    }
+    sim = {"ticker": "A", "decide_at": at, "outcome": "no_signal"}
+    rows = divergences(
+        [(sim, live)], [], [], [], {"A": [_bar("09:02", 3515)]}, {"A": Decimal(2900)}
+    )
+    assert [r["cls"] for r in rows] == ["intra_minute_price"]
