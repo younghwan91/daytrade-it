@@ -120,6 +120,8 @@ def _validate(policy: NewsPolicy) -> None:
     bad = set(sel.subjects) - set(SUBJECT_LEVELS)
     if bad:
         raise ValueError(f"selection.subjects: unknown {sorted(bad)}")
+    if sel.rank_key == "bandit" and sel.bandit_model is None:
+        raise ValueError("selection.rank_key: 'bandit' requires selection.bandit_model")
     if sel.bandit_model is not None:
         if not Path(sel.bandit_model).is_file():
             raise ValueError(f"selection.bandit_model: no such file {sel.bandit_model!r}")

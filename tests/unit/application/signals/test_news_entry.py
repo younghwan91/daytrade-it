@@ -265,26 +265,49 @@ def test_selection_prior_evening_article_is_premarket() -> None:
 # --- bandit (spec 2026-09-16-bandit-entry-design.md) ---------------------------
 
 import numpy as np  # noqa: E402
+import pytest  # noqa: E402
 
+from daytrade_it.application.signals import news_entry  # noqa: E402
 from daytrade_it.application.trading.bandit import FEATURES, fit  # noqa: E402
 from daytrade_it.infrastructure.brokers.base import MinuteBar  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _fresh_market_cache() -> None:
+    news_entry._MARKET_CACHE.clear()
+
+
 class _BanditBroker(_Broker):
-    def __init__(self, last: str, fail_bars: bool = False) -> None:
+    def __init__(
+        self, last: str, fail_bars: bool = False, n_bars: int = 30, mkt_last: str | None = "30000"
+    ) -> None:
         super().__init__(last)
         self.fail_bars = fail_bars
+        self.n_bars = n_bars
+        self.mkt_last = mkt_last
         self.quotes: list[str] = []
 
     def get_quote(self, ticker: str) -> Quote:
         self.quotes.append(ticker)
+        if ticker == "069500":
+            if self.mkt_last is None:
+                return Quote(ticker=ticker, bid=Decimal(0), ask=Decimal(0), last_price=None)
+            p = Decimal(self.mkt_last)
+            return Quote(ticker=ticker, bid=p, ask=p, last_price=p)
         return super().get_quote(ticker)
 
     def get_minute_bars(self, ticker: str, day=None) -> list[MinuteBar]:  # noqa: ANN001
         if self.fail_bars:
             raise RuntimeError("chart feed down")
         c = Decimal("10000")
-        return [MinuteBar(dt.datetime(2026, 9, 15, 9, m), c, c, c, c, 10) for m in range(30)]
+        return [
+            MinuteBar(dt.datetime(2026, 9, 15, 9, m), c, c, c, c, 10) for m in range(self.n_bars)
+        ]
+
+
+class _NoMktDB(_DB):
+    def get_adjusted_daily_bars(self, ticker, *, start=None, end=None):  # noqa: ANN001, ANN201
+        return [] if ticker.value == "069500" else super().get_adjusted_daily_bars(ticker)
 
 
 def _pre_move_model(tmp_path, min_prob: float = 0.6):  # noqa: ANN001, ANN202
@@ -299,7 +322,7 @@ def _pre_move_model(tmp_path, min_prob: float = 0.6):  # noqa: ANN001, ANN202
     return str(path)
 
 
-def _build_bandit(last: str, model: str, broker=None):  # noqa: ANN001, ANN202
+def _build_bandit(last: str, model: str, broker=None, db=None):  # noqa: ANN001, ANN202
     gen = SignalGenerator(SignalConfig(min_confidence=0.0))
     broker = broker or _BanditBroker(last)
     with time_machine.travel(NOW, tick=False):
@@ -308,7 +331,7 @@ def _build_bandit(last: str, model: str, broker=None):  # noqa: ANN001, ANN202
             Ticker(value="005930"),
             BULL,
             broker,
-            _DB(),
+            db or _DB(),
             gen,
             EXPIRES,
             selection=SelectionConfig(bandit_model=model),
@@ -358,3 +381,22 @@ def test_rank_batch_bandit_orders_by_m_then_surprise_then_score() -> None:
         "000003",
         "000001",
     ]
+
+
+def test_bandit_missing_market_data_or_bars_fails_closed(tmp_path) -> None:  # noqa: ANN001
+    model = _pre_move_model(tmp_path)
+    assert _build_bandit("10200", model) is not None
+    news_entry._MARKET_CACHE.clear()
+    assert _build_bandit("10200", model, _BanditBroker("10200", mkt_last=None)) is None
+    news_entry._MARKET_CACHE.clear()
+    assert _build_bandit("10200", model, db=_NoMktDB()) is None
+    news_entry._MARKET_CACHE.clear()
+    assert _build_bandit("10200", model, _BanditBroker("10200", n_bars=4)) is None
+
+
+def test_bandit_market_quote_fetched_once_per_minute(tmp_path) -> None:  # noqa: ANN001
+    model = _pre_move_model(tmp_path)
+    broker = _BanditBroker("10200")
+    for _ in range(3):
+        assert _build_bandit("10200", model, broker) is not None
+    assert broker.quotes.count("069500") == 1

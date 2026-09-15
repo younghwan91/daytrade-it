@@ -145,3 +145,10 @@ def test_bandit_model_missing_file_raises(tmp_path: Path) -> None:
     path.write_text(json.dumps({"selection": {"bandit_model": "nope.json"}}))
     with pytest.raises(ValueError):
         load_policy(path)
+
+
+def test_rank_key_bandit_requires_bandit_model(tmp_path: Path) -> None:
+    path = tmp_path / "p.json"
+    path.write_text(json.dumps({"selection": {"rank_key": "bandit"}}))
+    with pytest.raises(ValueError):
+        load_policy(path)

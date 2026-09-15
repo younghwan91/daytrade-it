@@ -197,6 +197,43 @@ def build_entry_candidate(
     return EntryCandidate(composite, int(features.surprise), float(sentiment.score))
 
 
+#: minute (naive KST) → (069500 price, 069500 prior close); one entry, one fetch per poll minute.
+_MARKET_CACHE: dict[dt.datetime, tuple[Decimal | None, Decimal | None]] = {}
+
+
+def _market_snapshot(
+    broker: BrokerInterface, db_client: QuantAirflowDBClient, now: dt.datetime
+) -> tuple[Decimal | None, Decimal | None]:
+    """(069500 price, prior close), fetched once per minute and shared by a batch.
+
+    A failed or empty fetch is cached as None for that minute too, so a broker
+    outage costs one call per poll, not one per candidate (Kiwoom token is shared).
+    """
+    minute = now.astimezone(KST).replace(tzinfo=None, second=0, microsecond=0)
+    cached = _MARKET_CACHE.get(minute)
+    if cached is not None:
+        return cached
+    price: Decimal | None = None
+    prev_close: Decimal | None = None
+    try:
+        quote = broker.get_quote(_MARKET_TICKER)
+        last = quote.last_price or quote.mid_price
+        price = last if last and last > 0 else None
+        today = now.astimezone(KST).date()
+        daily = db_client.get_adjusted_daily_bars(
+            Ticker(value=_MARKET_TICKER),
+            start=today - dt.timedelta(days=_MARKET_LOOKBACK_DAYS),
+            end=today - dt.timedelta(days=1),
+        )
+        if daily and daily[-1].close:
+            prev_close = Decimal(str(daily[-1].close))
+    except Exception as exc:
+        logger.warning("news_entry: market snapshot failed", error=f"{type(exc).__name__}: {exc}")
+    _MARKET_CACHE.clear()
+    _MARKET_CACHE[minute] = (price, prev_close)
+    return price, prev_close
+
+
 def _bandit_verdict(
     article: NewsArticle,
     ticker: Ticker,
@@ -207,27 +244,31 @@ def _bandit_verdict(
     model_path: str,
     pre_entry_move: float,
 ) -> dict[str, float] | None:
-    """{"bandit_m", "bandit_p"} if the bandit enters, else None (skip or failure).
+    """{"bandit_m", "bandit_p"} if the bandit enters, else None.
 
-    Fail-closed: any model-load or data-fetch error skips the candidate.
+    Fail-closed: a model-load or bar-fetch error, a missing 069500 price or
+    prior close, or fewer than 5 completed bars skips the candidate (logged).
     """
     from daytrade_it.application.trading import bandit
+
+    def skip(reason: str, **extra: object) -> None:
+        logger.info("news_entry: bandit skip", ticker=ticker.value, reason=reason, **extra)
 
     try:
         model = bandit.load_model(model_path)
         decided_at = dt.datetime.now(KST)
         bars = broker.get_minute_bars(ticker.value)
-        mkt_quote = broker.get_quote(_MARKET_TICKER)
-        mkt_price = mkt_quote.last_price or mkt_quote.mid_price
-        today = dt.date.today()
-        mkt_daily = db_client.get_adjusted_daily_bars(
-            Ticker(value=_MARKET_TICKER),
-            start=today - dt.timedelta(days=_MARKET_LOOKBACK_DAYS),
-            end=today - dt.timedelta(days=1),
-        )
-        mkt_prev_close = (
-            Decimal(str(mkt_daily[-1].close)) if mkt_daily and mkt_daily[-1].close else None
-        )
+    except Exception as exc:
+        skip("error", error=f"{type(exc).__name__}: {exc}")
+        return None
+    mkt_price, mkt_prev_close = _market_snapshot(broker, db_client, decided_at)
+    if mkt_price is None or mkt_prev_close is None or mkt_prev_close <= 0:
+        skip("market data unavailable")
+        return None
+    if len(bandit.completed_bars(bars, decided_at)) < bandit.RET_BARS:
+        skip("insufficient bars")
+        return None
+    try:
         x = bandit.features_for(
             features,
             pre_entry_move,
@@ -235,18 +276,14 @@ def _bandit_verdict(
             expires_at,
             decided_at,
             bars,
-            mkt_price if mkt_price and mkt_price > 0 else None,
+            mkt_price,
             mkt_prev_close,
         )
         enter, m, p = bandit.decide(model, x)
     except Exception as exc:
-        logger.warning(
-            "news_entry: bandit failed, skip",
-            ticker=ticker.value,
-            error=f"{type(exc).__name__}: {exc}",
-        )
+        skip("error", error=f"{type(exc).__name__}: {exc}")
         return None
     if not enter:
-        logger.info("news_entry: bandit skip", ticker=ticker.value, m=m, p=p)
+        skip("decision", m=m, p=p)
         return None
     return {"bandit_m": m, "bandit_p": p}

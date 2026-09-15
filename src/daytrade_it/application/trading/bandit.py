@@ -9,6 +9,15 @@ and the posterior predictive is Student-t with df = 2a, location xᵀw and
 scale² = (b/a)(1 + xᵀVx). `decide` enters iff P(r > 0) ≥ min_prob and
 E[r] ≥ min_edge.
 
+Constant training columns (std < 1e-6) are masked: their std is stored as
++inf (JSON null), so their standardized value is always 0 and a live value
+the model never saw varies nothing.
+
+Live wiring fails closed: when the bandit is on, `news_entry` skips a
+candidate if the 069500 quote or its prior close is unavailable or fewer than
+5 completed regular-session bars exist. `features_for` itself keeps the 0.0
+fallbacks (documented below) for offline dataset building only.
+
 The live selection (`news_entry.build_entry_candidate`) and the replay engine
 call the same `features_for` / `decide`, so a replayed model runs live as is.
 """
@@ -44,9 +53,20 @@ FEATURES: tuple[str, ...] = (
 )
 
 _OPEN = dt.time(9, 0)
-_STD_FLOOR = 1e-9
+_MASK_STD = 1e-6
 _INTERCEPT_PRIOR = 1e-3
 _RET_BARS = 5
+
+
+RET_BARS = _RET_BARS
+
+
+def completed_bars(bars: list[MinuteBar], decided_at: dt.datetime) -> list[MinuteBar]:
+    """Regular-session bars (≥ 09:00) whose minute ended before `decided_at` (naive = KST)."""
+    if decided_at.tzinfo is None:
+        decided_at = decided_at.replace(tzinfo=KST)
+    minute = decided_at.astimezone(KST).replace(tzinfo=None, second=0, microsecond=0)
+    return [b for b in bars if b.ts.time() >= _OPEN and b.ts < minute]
 
 
 def features_for(
@@ -75,8 +95,7 @@ def features_for(
     open_at = dt.datetime.combine(decided_kst.date(), _OPEN, tzinfo=KST)
     minutes = max(0.0, (decided_kst - open_at).total_seconds() / 60.0)
 
-    minute = decided_kst.replace(tzinfo=None, second=0, microsecond=0)
-    done = [b for b in bars if b.ts.time() >= _OPEN and b.ts < minute]
+    done = completed_bars(bars, decided_kst)
     ret_5m = 0.0
     if len(done) >= _RET_BARS:
         first, last = done[-_RET_BARS].close, done[-1].close
@@ -186,7 +205,7 @@ class BanditModel:
             {
                 "feature_names": list(self.feature_names),
                 "means": self.means.tolist(),
-                "stds": self.stds.tolist(),
+                "stds": [None if not math.isfinite(v) else v for v in self.stds.tolist()],
                 "w": self.w.tolist(),
                 "V": self.V.tolist(),
                 "a": self.a,
@@ -206,7 +225,7 @@ class BanditModel:
         model = cls(
             feature_names=names,
             means=np.asarray(raw["means"], dtype=float),
-            stds=np.asarray(raw["stds"], dtype=float),
+            stds=np.asarray([math.inf if v is None else v for v in raw["stds"]], dtype=float),
             w=np.asarray(raw["w"], dtype=float),
             V=np.asarray(raw["V"], dtype=float),
             a=float(raw["a"]),
@@ -217,7 +236,12 @@ class BanditModel:
             trained_days=tuple(raw.get("trained_days", ())),
         )
         shapes = (model.means.shape, model.stds.shape, model.w.shape, model.V.shape)
-        if shapes != ((k,), (k,), (k + 1,), (k + 1, k + 1)) or model.a <= 0 or model.b <= 0:
+        if (
+            shapes != ((k,), (k,), (k + 1,), (k + 1, k + 1))
+            or model.a <= 0
+            or model.b <= 0
+            or not np.all(model.stds > 0)
+        ):
             raise ValueError("bandit model: inconsistent shapes or non-positive a/b")
         return model
 
@@ -242,15 +266,20 @@ def fit(
 ) -> BanditModel:
     """Conjugate NIG posterior from rows `X` (columns = `feature_names`) and rewards `y`.
 
-    Columns are standardized with the train mean/std (floor 1e-9) unless
-    `means`/`stds` are given (e.g. to reproduce a sequential `update`).
+    Columns are standardized with the train mean/std unless `means`/`stds`
+    are given (e.g. to reproduce a sequential `update`). A column with train
+    std < 1e-6 is masked (std = +inf → always 0).
     """
     X = np.asarray(X, dtype=float)
     y = np.asarray(y, dtype=float)
     if X.ndim != 2 or X.shape[1] != len(feature_names) or y.shape != (X.shape[0],):
         raise ValueError("fit: X must be (n, len(feature_names)) and y (n,)")
     means = X.mean(axis=0) if means is None else np.asarray(means, dtype=float)
-    stds = np.maximum(X.std(axis=0), _STD_FLOOR) if stds is None else np.asarray(stds, dtype=float)
+    if stds is None:
+        stds = X.std(axis=0)
+        stds = np.where(stds < _MASK_STD, math.inf, stds)
+    else:
+        stds = np.asarray(stds, dtype=float)
     Z = _design(X, means, stds)
     k = Z.shape[1]
     prec0 = np.diag([lam * _INTERCEPT_PRIOR] + [lam] * (k - 1))
@@ -306,16 +335,17 @@ def decide(model: BanditModel, x: dict[str, float]) -> tuple[bool, float, float]
     return (p >= model.min_prob and m >= model.min_edge), m, p
 
 
-_CACHE: dict[str, tuple[int, BanditModel]] = {}
+_CACHE: dict[str, tuple[tuple[int, int], BanditModel]] = {}
 
 
 def load_model(path: str) -> BanditModel:
-    """The model file at `path`, parsed once per (path, mtime)."""
-    mtime = os.stat(path).st_mtime_ns
+    """The model file at `path`, parsed once per (path, mtime_ns, size)."""
+    st = os.stat(path)
+    stamp = (st.st_mtime_ns, st.st_size)
     cached = _CACHE.get(path)
-    if cached is not None and cached[0] == mtime:
+    if cached is not None and cached[0] == stamp:
         return cached[1]
     with open(path, encoding="utf-8") as f:
         model = BanditModel.from_json(f.read())
-    _CACHE[path] = (mtime, model)
+    _CACHE[path] = (stamp, model)
     return model

@@ -205,3 +205,40 @@ def test_load_model_caches_by_path_and_mtime(tmp_path) -> None:  # noqa: ANN001
     os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 10**9))
     b = bandit.load_model(str(path))
     assert b is not a and b.lam == 30.0
+
+
+def test_constant_training_column_is_masked_not_blown_up(tmp_path) -> None:  # noqa: ANN001
+    X, y = _synthetic(300, 6)
+    X[:, FEATURES.index("mkt_move")] = 0.0
+    model = fit(X, y, lam=1.0)
+    base = _row(1.0)
+    live = {**base, "mkt_move": 0.004}
+    assert model.predict(live) == pytest.approx(model.predict(base))
+    assert model.predict(base)[1] > 0.9
+    raw = json.loads(model.to_json())
+    assert raw["stds"][FEATURES.index("mkt_move")] is None
+    back = BanditModel.from_json(model.to_json())
+    assert back.predict(live) == pytest.approx(model.predict(base))
+    # sequential update keeps the mask
+    assert update(back, X[:10], y[:10]).predict(live) == pytest.approx(
+        update(back, X[:10], y[:10]).predict(base)
+    )
+
+
+def test_completed_bars_excludes_current_minute_and_preopen() -> None:
+    decided = dt.datetime(2026, 9, 15, 9, 3, 10, tzinfo=KST)
+    bars = [_bar(8, 59, "1")] + [_bar(9, m, "1") for m in range(4)]
+    assert [b.ts.minute for b in bandit.completed_bars(bars, decided)] == [0, 1, 2]
+
+
+def test_load_model_cache_key_includes_size(tmp_path, monkeypatch) -> None:  # noqa: ANN001
+    X, y = _synthetic(50, 7)
+    path = tmp_path / "m.json"
+    path.write_text(fit(X, y, lam=1.0).to_json())
+    a = bandit.load_model(str(path))
+    mtime = path.stat().st_mtime_ns
+    import os
+
+    path.write_text(fit(X, y, lam=100.0).to_json() + " " * 7)
+    os.utime(path, ns=(mtime, mtime))  # same mtime, different size
+    assert bandit.load_model(str(path)) is not a
