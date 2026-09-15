@@ -5,7 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "scripts" / "eval"))
 
-from build_replay_events import parse_poll_line  # noqa: E402
+from build_replay_events import parse_poll_line, to_v4_rows  # noqa: E402
 
 from daytrade_it.infrastructure.brokers.base import KST
 
@@ -30,3 +30,22 @@ def test_parse_poll_line_ignores_non_json_lines() -> None:
 def test_parse_poll_line_ignores_json_missing_timestamp() -> None:
     line = '{"event": "Toss news poll complete"}'
     assert parse_poll_line(line) is None
+
+
+def test_to_v4_rows_excludes_pairs_without_a_v4_shadow_judgment() -> None:
+    rows = [
+        {"key": "a|005930", "v2": {"score": 0.5}, "v4_shadow": {"score": 0.8}},
+        {"key": "b|000660", "v2": {"score": -0.2}, "v4_shadow": None},
+    ]
+    kept, excluded = to_v4_rows(rows)
+    assert excluded == 1
+    assert len(kept) == 1
+    assert kept[0]["key"] == "a|005930"
+    assert kept[0]["v2"] == {"score": 0.8}  # v4_shadow judgment substituted in as "v2"
+
+
+def test_to_v4_rows_leaves_original_rows_unmodified() -> None:
+    original = {"key": "a|005930", "v2": {"score": 0.5}, "v4_shadow": {"score": 0.8}}
+    rows = [original]
+    to_v4_rows(rows)
+    assert original["v2"] == {"score": 0.5}

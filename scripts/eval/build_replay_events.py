@@ -13,7 +13,12 @@
 - `--check-days`: judge kr_quant pairs for these days into the cache ONLY
   (no event files written) -- used for the reproducibility check against
   archive judgments (see task-5-brief.md Step 3).
-Run on trader, then copy `data/eval/replay_events/` to simnode.
+- `--features v2|v4` (default v2): v4 builds events from each archive row's
+  `v4_shadow` judgment instead of `v2`, into `data/eval/replay_events_v4/`.
+  Rows without a `v4_shadow` are excluded (count printed). kr_quant days have
+  no v4 judgment and are skipped entirely in v4 mode (task-8: stage-1 prompt
+  comparison, v2 vs v4, zero extra LLM cost).
+Run on trader, then copy `data/eval/replay_events/` (or `_v4/`) to simnode.
 """
 
 from __future__ import annotations
@@ -48,7 +53,27 @@ from daytrade_it.shared.errors.exceptions import ExternalAPIError
 ARCHIVE = Path("data/news_judgments")
 DAEMON_LOG = Path("data/news_signal_daemon.log")
 OUT = Path("data/eval/replay_events")
+OUT_V4 = Path("data/eval/replay_events_v4")
 CACHE = Path("data/eval/cache/replay_v2.jsonl")
+
+
+def to_v4_rows(rows: list[dict]) -> tuple[list[dict], int]:
+    """Archive rows with `v2` swapped for `v4_shadow` (task-8: stage-1 prompt comparison).
+
+    A pair the shadow judge never scored (`v4_shadow` missing/None) has no
+    features to build a v4 event from and is excluded; the caller reports how
+    many. `events_from_archive` only reads the `v2` key, so building v4 event
+    files needs no change there -- just feeding it rows where `v2` already
+    holds the v4_shadow judgment.
+    """
+    kept = []
+    excluded = 0
+    for r in rows:
+        if not r.get("v4_shadow"):
+            excluded += 1
+            continue
+        kept.append({**r, "v2": r["v4_shadow"]})
+    return kept, excluded
 
 
 def parse_poll_line(line: str) -> dt.datetime | None:
@@ -210,16 +235,38 @@ def main() -> None:
         help="Judge kr_quant pairs for these days into the cache only -- no event files written "
         "(reproducibility check against archive judgments; R4).",
     )
+    ap.add_argument(
+        "--features",
+        choices=["v2", "v4"],
+        default="v2",
+        help="v4 builds events from each archive row's v4_shadow judgment instead of v2, "
+        "written to data/eval/replay_events_v4/. Rows without a v4_shadow are excluded "
+        "(count printed). kr_quant days have no v4 judgment and are skipped in v4 mode.",
+    )
     args = ap.parse_args()
+    out_dir = OUT_V4 if args.features == "v4" else OUT
     stocks = QuantAirflowDBClient().get_stock_master()
     archive_days = sorted(dt.date.fromisoformat(p.stem) for p in ARCHIVE.glob("*.jsonl"))
     all_rows: list[dict] = []
     for day in archive_days:
         rows = [json.loads(line) for line in (ARCHIVE / f"{day}.jsonl").open()]
         all_rows += rows
-        events = events_from_archive(rows, poll_times(day), stocks)
-        dump_events(OUT / f"{day}.jsonl", events)
+        day_rows = rows
+        if args.features == "v4":
+            day_rows, excluded = to_v4_rows(rows)
+            if excluded:
+                print(f"{day}: excluded {excluded} pair(s) without a v4_shadow judgment")
+        events = events_from_archive(day_rows, poll_times(day), stocks)
+        dump_events(out_dir / f"{day}.jsonl", events)
         print(day, "archive events", len(events))
+
+    if args.features == "v4":
+        # No shadow judgment exists for kr_quant days (v4_shadow is only recorded by the
+        # live daemon's archive rows) -- skip check-days/kr-quant-days entirely.
+        if args.check_days or args.kr_quant_days:
+            print("--features v4: skipping --check-days/--kr-quant-days (no v4 judgment source)")
+        return
+
     delay, gap = median_detect_delay(all_rows), judge_gap(all_rows)
     poll_every = dt.timedelta(seconds=get_settings().krx_news.toss_poll_interval_seconds)
     db = QuantAirflowDBClient()
@@ -242,7 +289,7 @@ def main() -> None:
         pairs = load_kr_quant_pairs(db, day, stocks)
         judged = asyncio.run(judge(pairs, stocks))
         events = build_kr_quant_events(pairs, judged, stocks, day, delay, poll_every, gap)
-        dump_events(OUT / f"{day}.jsonl", events)
+        dump_events(out_dir / f"{day}.jsonl", events)
         print(day, "kr_quant events", len(events))
 
     # kr_quant_days for meta.json is derived from what's actually on disk, not just this

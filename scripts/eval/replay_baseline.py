@@ -105,6 +105,13 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dart", type=Path, default=DART)
     ap.add_argument("--work-root", type=Path, default=WORK)
+    ap.add_argument(
+        "--events",
+        type=Path,
+        default=EVENTS,
+        help="Events directory (default data/eval/replay_events; task-8 passes "
+        "data/eval/replay_events_v4 to replay the v4-shadow-judged days).",
+    )
     args = ap.parse_args()
 
     require_backtest_host()
@@ -116,7 +123,7 @@ def main() -> None:
     total_errors = 0
     failed_days: list[str] = []
     grand = Decimal(0)
-    for path in sorted(EVENTS.glob("2026-*.jsonl")):
+    for path in sorted(args.events.glob("2026-*.jsonl")):
         day = dt.date.fromisoformat(path.stem)
         events = load_events(path)
         bad = [e.ticker for e in events if not VALID_TICKER.match(e.ticker)]
@@ -177,7 +184,8 @@ def main() -> None:
             )
         )
     print(
-        f"total net={grand:,.0f} over {len(sorted(EVENTS.glob('2026-*.jsonl'))) - len(failed_days)} days"
+        f"total net={grand:,.0f} over "
+        f"{len(sorted(args.events.glob('2026-*.jsonl'))) - len(failed_days)} days"
     )
     if failed_days:
         print(f"ERROR: data failures on {failed_days}", file=sys.stderr)
