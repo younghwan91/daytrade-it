@@ -2,9 +2,16 @@
 
     uv run python scripts/eval/replay_parity.py --days 2026-09-14,2026-09-15   # simnode
 
-Pass = same tickers and quantities for entries, add-ons and exits; buy fill
-price within ±0.5% per ticker (live fills from Kiwoom ka10076 matched the
-ledger limits); no errors logged during the replay.
+Exact comparison (printed): same tickers and quantities for entries, add-ons
+and exits; buy fill price within ±0.5% per ticker.
+
+Verdict (controller ruling R9): every judged pair whose outcome differs between
+the live daemon log and the replay, and every ticker-level difference (add-on,
+exit quantity, entry, fill > ±0.5%), is listed and classified:
+``intra_minute_price`` when the live price behind it (ledger limit, or
+pre_entry_move x prev close) is not the open of that minute -- the replay
+quotes the open and never looks inside the current bar -- else ``other``.
+PASS = no ``other`` difference and no errors logged during the replay.
 """
 
 from __future__ import annotations
@@ -13,11 +20,12 @@ import argparse
 import datetime as dt
 import json
 import os
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 import psycopg2
+from krx_quant_core.market.ticks import tick_size
 
 from daytrade_it.application.replay.day_replay import DayConfig, replay_day
 from daytrade_it.application.replay.events import load_events
@@ -33,6 +41,9 @@ LIVE_LEDGER = Path("data/auto_trader")
 #: scalp-it's dart.db; simnode's copy may lag trader's (pass --dart).
 DART = Path("../scalp-it/data/dart.db")
 WORK = Path("data/eval/replay_work")
+#: Copy of trader's data/news_signal_daemon.log (the live daemon's JSON log).
+LIVE_LOG = Path("data/eval/news_signal_daemon_trader_0915.log")
+INTRA = "intra_minute_price"
 MAX_FILL_DEV = 0.005
 
 LIVE_CONFIGS = {
@@ -146,22 +157,230 @@ def fill_deviations(live: list[dict], fills: list[dict]) -> list[tuple[str, str,
     return out
 
 
+def _kst(ts: str) -> dt.datetime:
+    return dt.datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(KST)
+
+
+def live_decisions(rows: list[dict], day: dt.date, exclude_orders: set[str]) -> list[dict]:
+    """One row per live `judged` log line on `day`, with its outcome from later rows.
+
+    extended / persisted rows attach to the latest undecided judgment of that
+    ticker; ENTRY SUBMITTED / entry skipped rows to the earliest judgment of
+    that ticker still holding an unentered signal. Orders in
+    `exclude_orders` (the duplicate daemon's) are ignored.
+    """
+    out: list[dict] = []
+
+    def latest(t: str, outcome: str) -> dict | None:
+        return next(
+            (d for d in reversed(out) if d["ticker"] == t and d["outcome"] == outcome), None
+        )
+
+    def earliest(t: str, outcome: str) -> dict | None:
+        return next((d for d in out if d["ticker"] == t and d["outcome"] == outcome), None)
+
+    for r in rows:
+        if "timestamp" not in r or "event" not in r:
+            continue
+        ts = _kst(r["timestamp"])
+        if ts.date() != day:
+            continue
+        ev, t = r["event"], r.get("ticker")
+        if ev == "news_signal_poller: judged":
+            out.append({"ticker": t, "at": ts, "outcome": "no_signal"})
+        elif ev == "entry_filter: extended, no entry":
+            if (d := latest(t, "no_signal")) is not None:
+                d.update(outcome="extended", pre_entry_move=r.get("pre_entry_move"))
+        elif ev == "news_signal_poller: ACTIONABLE SIGNAL PERSISTED":
+            if (d := latest(t, "no_signal")) is not None:
+                d.update(outcome="signal", pre_entry_move=r.get("pre_entry_move"))
+        elif ev == "auto_trader: ENTRY SUBMITTED":
+            if r.get("order_id") in exclude_orders:
+                continue
+            if (d := earliest(t, "signal")) is not None:
+                d.update(outcome="entered", limit=r.get("limit"), entered_at=ts)
+        elif ev == "auto_trader: entry skipped" and (d := earliest(t, "signal")) is not None:
+            d.update(outcome="skipped", reason=r.get("reason"))
+    return out
+
+
+def match_decisions(
+    sim: list[dict], live: list[dict], within: dt.timedelta
+) -> list[tuple[dict, dict | None]]:
+    """Each replay decision with the nearest unused live judgment of the same ticker."""
+    used: set[int] = set()
+    out: list[tuple[dict, dict | None]] = []
+    for s in sim:
+        best = None
+        for i, d in enumerate(live):
+            if i in used or d["ticker"] != s["ticker"]:
+                continue
+            gap = abs(d["at"] - s["decide_at"])
+            if gap <= within and (best is None or gap < best[0]):
+                best = (gap, i)
+        if best is None:
+            out.append((s, None))
+        else:
+            used.add(best[1])
+            out.append((s, live[best[1]]))
+    return out
+
+
+def _round_tick(price: Decimal) -> Decimal:
+    tick = tick_size(price)
+    return (price / tick).quantize(Decimal(1), rounding=ROUND_HALF_UP) * tick
+
+
+def reproducible_from_open(live_price: Decimal, bar_open: Decimal) -> bool:
+    return _round_tick(live_price) == bar_open
+
+
+def _outcome_key(d: dict) -> str:
+    return f"skipped:{d.get('reason')}" if d["outcome"] == "skipped" else d["outcome"]
+
+
+def _open_at(bars: dict[str, list[MinuteBar]], t: str, at: dt.datetime) -> Decimal | None:
+    minute = at.astimezone(KST).replace(tzinfo=None, second=0, microsecond=0)
+    return next((b.open for b in bars.get(t, []) if b.ts == minute), None)
+
+
+def _price_class(
+    bars: dict[str, list[MinuteBar]], t: str, price: Decimal, at: dt.datetime, src: str
+) -> tuple[str, str]:
+    o = _open_at(bars, t, at)
+    if o is None:
+        return "other", f"live {src} {price}: no bar at {at.time()}"
+    note = f"live {src} {price:.1f} @{at.strftime('%H:%M:%S')} vs open {o}"
+    if _round_tick(price) - price > Decimal("0.01") or price - _round_tick(price) > Decimal("0.01"):
+        note += " (implied price off tick grid: prev-close vintage?)"
+    return (INTRA if not reproducible_from_open(price, o) else "other"), note
+
+
+def divergences(
+    pairs: list[tuple[dict, dict | None]],
+    live_ledger: list[dict],
+    sim_ledger: list[dict],
+    sim_fills: list[dict],
+    bars: dict[str, list[MinuteBar]],
+    prev_close: dict[str, Decimal],
+) -> list[dict]:
+    """Decision- and ticker-level live/replay differences, each classified."""
+    out: list[dict] = []
+    decision_cls: dict[str, str] = {}
+    for sim, live in pairs:
+        t = sim["ticker"]
+        if live is None:
+            out.append(
+                {
+                    "kind": "decision",
+                    "ticker": t,
+                    "at": sim["decide_at"],
+                    "live": "no live judgment within window",
+                    "sim": _outcome_key(sim),
+                    "cls": "other",
+                    "note": "",
+                }
+            )
+            continue
+        if _outcome_key(sim) == _outcome_key(live):
+            continue
+        cls, note = "other", "no live price for this pair"
+        if live["outcome"] == "entered" and live.get("limit"):
+            cls, note = _price_class(bars, t, Decimal(live["limit"]), live["entered_at"], "limit")
+        elif live.get("pre_entry_move") and t in prev_close:
+            price = prev_close[t] * (1 + Decimal(live["pre_entry_move"]))
+            cls, note = _price_class(bars, t, price, live["at"], "pre_entry_move x prev_close")
+        out.append(
+            {
+                "kind": "decision",
+                "ticker": t,
+                "at": sim["decide_at"],
+                "live": _outcome_key(live),
+                "sim": _outcome_key(sim),
+                "cls": cls,
+                "note": note,
+            }
+        )
+        if decision_cls.get(t) != INTRA:
+            decision_cls[t] = cls
+
+    live_entry = {}
+    for r in live_ledger:
+        if r["event"] == "entry_submitted" and r["ticker"] not in live_entry:
+            live_entry[r["ticker"]] = r
+
+    def ticker_cls(t: str) -> tuple[str, str]:
+        if decision_cls.get(t) == INTRA:
+            return INTRA, "follows the intra-minute decision difference on this ticker"
+        r = live_entry.get(t)
+        if r is None or not r.get("ts"):
+            return "other", "no live entry price"
+        return _price_class(bars, t, Decimal(r["limit"]), _kst(r["ts"]), "entry limit")
+
+    s_live, s_sim = summarize(live_ledger), summarize(sim_ledger)
+    for kind, label in (("entry", "entry"), ("add_on", "add_on"), ("exit", "exit_qty")):
+        for t in sorted(set(s_live[kind]) | set(s_sim[kind])):
+            lq, sq = s_live[kind].get(t, 0), s_sim[kind].get(t, 0)
+            if lq == sq or (kind == "entry" and t in decision_cls):
+                continue
+            cls, note = ticker_cls(t)
+            out.append(
+                {
+                    "kind": label,
+                    "ticker": t,
+                    "at": None,
+                    "live": lq,
+                    "sim": sq,
+                    "cls": cls,
+                    "note": note,
+                }
+            )
+    for kind, t, limit, price, dev in fill_deviations(live_ledger, sim_fills):
+        if abs(dev) > MAX_FILL_DEV:
+            r = next(x for x in live_ledger if x["ticker"] == t and x.get("limit") == limit)
+            cls, note = (
+                _price_class(bars, t, Decimal(limit), _kst(r["ts"]), f"{kind} limit")
+                if r.get("ts")
+                else ("other", "no live ts")
+            )
+            out.append(
+                {
+                    "kind": "fill",
+                    "ticker": t,
+                    "at": None,
+                    "live": limit,
+                    "sim": f"{price} ({dev:+.3%})",
+                    "cls": cls,
+                    "note": note,
+                }
+            )
+    return out
+
+
 def main() -> None:
     require_backtest_host()
     ap = argparse.ArgumentParser()
     ap.add_argument("--days", required=True)
     ap.add_argument("--dart", type=Path, default=DART)
+    ap.add_argument("--live-log", type=Path, default=LIVE_LOG)
     args = ap.parse_args()
     _export_quant_airflow_env()
     db = QuantAirflowDBClient()
     stocks = db.get_stock_master()
     ok_all = True
+    log_rows = []
+    for line in args.live_log.open():
+        try:
+            log_rows.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
     for d in args.days.split(","):
         day = dt.date.fromisoformat(d)
         events = load_events(EVENTS / f"{day}.jsonl")
         codes = sorted({e.ticker for e in events})
         bars = load_session_bars(codes, day)
-        broker = SimBroker(bars, prev_closes(codes, day), lambda: dt.datetime.now(KST))
+        prev = prev_closes(codes, day)
+        broker = SimBroker(bars, prev, lambda: dt.datetime.now(KST))
         stale_before = dt.datetime.combine(
             db.get_adjusted_daily_bars(
                 Ticker(value="005930"),
@@ -190,11 +409,30 @@ def main() -> None:
         devs = fill_deviations(live, res.fills)
         bad_devs = [x for x in devs if abs(x[4]) > MAX_FILL_DEV]
         same = s_live == s_sim
-        ok = same and not bad_devs and not res.errors
+        exact = same and not bad_devs
+        live_dec = live_decisions(log_rows, day, DUPLICATE_DAEMON_ORDERS.get(day, set()))
+        pairs = match_decisions(res.decisions, live_dec, within=dt.timedelta(seconds=5))
+        divs = divergences(pairs, live, res.ledger, res.fills, bars, prev)
+        n_dec = sum(1 for x in divs if x["kind"] == "decision")
+        n_other = sum(1 for x in divs if x["cls"] != INTRA)
+        ok = n_other == 0 and not res.errors
         ok_all &= ok
         print(
-            f"== {day} parity {'PASS' if ok else 'FAIL'}  ({len(events)} events, {sum(map(len, bars.values()))} bars)"
+            f"== {day} parity {'PASS' if ok else 'FAIL'}  ({len(events)} events, "
+            f"{sum(map(len, bars.values()))} bars)"
         )
+        print(
+            f"  decision divergences {n_dec}/{len(res.decisions)} judged pairs; "
+            f"ticker-level {len(divs) - n_dec}; other={n_other}; errors={len(res.errors)}; "
+            f"exact comparison {'MATCH' if exact else 'DIFF'}"
+        )
+        for x in divs:
+            at = x["at"].strftime("%H:%M:%S") if x["at"] else "--------"
+            print(
+                f"  DIV {x['kind']:8} {x['ticker']} {at} live={x['live']} sim={x['sim']} "
+                f"[{x['cls']}] {x['note']}"
+            )
+        print("  -- exact comparison --")
         print(f"  event tickers without bars: {sorted(c for c, b in bars.items() if not b)}")
         for kind in ("entry", "add_on", "exit"):
             mark = "ok " if s_live[kind] == s_sim[kind] else "DIFF"
@@ -225,6 +463,8 @@ def main() -> None:
                     "skips": res.skips,
                     "fills": res.fills,
                     "errors": res.errors,
+                    "decisions": res.decisions,
+                    "divergences": divs,
                 },
                 default=str,
                 ensure_ascii=False,
