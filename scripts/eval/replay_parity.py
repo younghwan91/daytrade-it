@@ -30,6 +30,7 @@ from daytrade_it.shared.runtime_host import require_backtest_host
 
 EVENTS = Path("data/eval/replay_events")
 LIVE_LEDGER = Path("data/auto_trader")
+#: scalp-it's dart.db; simnode's copy may lag trader's (pass --dart).
 DART = Path("../scalp-it/data/dart.db")
 WORK = Path("data/eval/replay_work")
 MAX_FILL_DEV = 0.005
@@ -146,6 +147,7 @@ def main() -> None:
     require_backtest_host()
     ap = argparse.ArgumentParser()
     ap.add_argument("--days", required=True)
+    ap.add_argument("--dart", type=Path, default=DART)
     args = ap.parse_args()
     _export_quant_airflow_env()
     db = QuantAirflowDBClient()
@@ -167,7 +169,15 @@ def main() -> None:
             tzinfo=KST,
         )
         res = replay_day(
-            day, events, broker, db, stocks, stale_before, LIVE_CONFIGS[day], WORK / str(day), DART
+            day,
+            events,
+            broker,
+            db,
+            stocks,
+            stale_before,
+            LIVE_CONFIGS[day],
+            WORK / str(day),
+            args.dart,
         )
         raw_live = [
             json.loads(line) for line in (LIVE_LEDGER / f"{day}.jsonl").open() if line.strip()
@@ -182,6 +192,7 @@ def main() -> None:
         print(
             f"== {day} parity {'PASS' if ok else 'FAIL'}  ({len(events)} events, {sum(map(len, bars.values()))} bars)"
         )
+        print(f"  event tickers without bars: {sorted(c for c, b in bars.items() if not b)}")
         for kind in ("entry", "add_on", "exit"):
             mark = "ok " if s_live[kind] == s_sim[kind] else "DIFF"
             print(f"  {mark} {kind:6} live={s_live[kind]} sim={s_sim[kind]}")
