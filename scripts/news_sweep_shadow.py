@@ -541,7 +541,15 @@ class ShadowRunner:
             logger.warning("news_sweep_shadow: unusable item", news_id=queued.item.get("id"))
             return
         now = self.now()
-        known = tradable_tickers(article, self.stocks, self.stale_before, self.expires_at, now)
+        members = set(self.schedule.universe)
+        # S13: only related codes that are in today's universe (the backtest pool, C3).
+        known = [
+            (ticker, stock)
+            for ticker, stock in tradable_tickers(
+                article, self.stocks, self.stale_before, self.expires_at, now
+            )
+            if ticker.value in members
+        ]
         self.judgments.set_context(article.id, queued.seen_at)
         for ticker, stock in known:
             key = pair_key(article, ticker)

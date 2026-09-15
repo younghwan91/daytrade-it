@@ -590,3 +590,22 @@ async def test_universe_pairs_judged_with_empty_category_and_shared_visit_seen_a
     # Both articles came from one visit: they share that visit's timestamp.
     page_ts = _rows(tmp_path / "news_sweep" / f"{DAY}.jsonl")[0]["ts"]
     assert [r["sweep_seen_at"] for r in rows] == [page_ts, page_ts]
+
+
+async def test_judge_keeps_only_related_codes_in_todays_universe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # F1 (S13): 000660 is a known stock and in the detail's companyCodes, but not in the universe.
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "/companies/" in request.url.path:
+            return httpx.Response(200, json={"result": {"body": [ITEM]}})
+        kr = {"id": "yna_AKR1", "companyCodes": ["005930", "000660"]}
+        return httpx.Response(200, json={"result": {"kr": kr}})
+
+    claude = FakeClaude()
+    runner = _runner(tmp_path, monkeypatch, handler, claude=claude, max_requests=2)
+    runner.schedule = shadow.SweepSchedule(["005930", "035420"], DAY)
+    await runner.run()
+    assert claude.calls == [("005930", False)]
+    rows = _rows(tmp_path / "news_judgments_universe" / f"{DAY}.jsonl")
+    assert [r["ticker"] for r in rows] == ["005930"]
