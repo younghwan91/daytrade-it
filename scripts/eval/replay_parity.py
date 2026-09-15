@@ -167,8 +167,6 @@ def load_session_bars(codes: list[str], day: dt.date) -> dict[str, list[MinuteBa
                     volume=int(v),
                 )
             )
-    return out
-
     check_session_hours(out)
     return out
 
@@ -958,7 +956,9 @@ def prepare_day(
     for f in frozen.flags:
         print(f"    PREV_CLOSE_FLAG {f}")
     check_prev_close_coverage(frozen)
-    broker = SimBroker(bars, frozen.prices, lambda: dt.datetime.now(KST))
+    broker = SimBroker(
+        bars, frozen.prices, lambda: dt.datetime.now(KST), limit_base=frozen.krx_prices
+    )
     stale_before = dt.datetime.combine(frozen.prev_session, dt.time(15, 20), tzinfo=KST)
     return bars, frozen, broker, stale_before
 

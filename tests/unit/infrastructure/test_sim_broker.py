@@ -247,3 +247,15 @@ def test_open_below_the_limit_is_not_locked_even_if_bar_is_flat() -> None:
     bars = {"000002": [_bar("09:01", 1200, 1200, 1200, 1200)]}
     b = SimBroker(bars, {"000002": Decimal(1000)}, _Clock())
     assert b.get_quote("000002").ask == Decimal(1200)
+
+
+def test_limit_lock_uses_limit_base_not_prev_close() -> None:
+    # NXT close 2900 but KRX close 2705: upper limit is ~3515 (2705 * 1.3), not 3770.
+    bars = {
+        "000009": [_bar("09:00", 3515, 3515, 3515, 3515), _bar("09:01", 3515, 3515, 3515, 3515)]
+    }
+    c = _Clock()
+    b = SimBroker(bars, {"000009": Decimal(2900)}, c, limit_base={"000009": Decimal(2705)})
+    assert b.get_quote("000009").ask == 0
+    b2 = SimBroker(bars, {"000009": Decimal(2900)}, c)
+    assert b2.get_quote("000009").ask == 3515

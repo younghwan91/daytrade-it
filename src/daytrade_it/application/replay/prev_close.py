@@ -45,6 +45,11 @@ class FrozenPrevCloses:
         return {c: p for c, (p, _) in self.closes.items()}
 
     @property
+    def krx_prices(self) -> dict[str, Decimal]:
+        """R18: the KRX regular-session close (price-limit base), not the unified close."""
+        return {c: p for c, (p, _) in self.krx.items()}
+
+    @property
     def prev_session(self) -> dt.date:
         return max(d for _, d in self.closes.values())
 

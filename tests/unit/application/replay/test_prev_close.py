@@ -66,3 +66,13 @@ def test_prev_session_is_the_latest_close_date() -> None:
     )
     assert f.prev_session == PREV
     assert f.prices == {"a": Decimal(1), "b": Decimal(2)}
+
+
+def test_krx_prices_is_the_regular_session_close_not_the_unified_close() -> None:
+    """R18: price-limit base must be the KRX close, distinct from the unified close."""
+    f = FrozenPrevCloses(
+        day=DAY,
+        closes={"424870": (Decimal(2900), PREV)},
+        krx={"424870": (Decimal(2705), PREV)},
+    )
+    assert f.krx_prices == {"424870": Decimal(2705)}

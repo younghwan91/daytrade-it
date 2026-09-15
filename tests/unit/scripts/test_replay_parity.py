@@ -627,3 +627,52 @@ def test_day_fails_when_over_5pct_of_event_tickers_lack_a_frozen_prev_close() ->
         check_prev_close_coverage(
             FrozenPrevCloses(day=DAY, closes=closes, missing=["999998", "999999"])
         )
+
+
+def test_load_session_bars_runs_the_session_hours_guard(monkeypatch) -> None:
+    """R19: load_session_bars must call check_session_hours before returning, so a
+    bar before 08:00 KST (timezone mix-up) raises instead of being silently kept."""
+    import pytest  # noqa: PLC0415
+    import replay_parity  # noqa: PLC0415
+
+    from daytrade_it.application.replay.day_replay import ReplayDataError  # noqa: PLC0415
+
+    class _FakeCursor:
+        def __init__(self, rows: list[tuple]) -> None:
+            self._rows = rows
+            self._sql = ""
+
+        def execute(self, sql: str, params: object = None) -> None:
+            self._sql = sql
+
+        def fetchone(self) -> tuple:
+            return ("timestamp without time zone",)
+
+        def fetchall(self) -> list[tuple]:
+            return self._rows
+
+        def __enter__(self) -> "_FakeCursor":
+            return self
+
+        def __exit__(self, *exc: object) -> bool:
+            return False
+
+    class _FakeConn:
+        def __init__(self, cur: _FakeCursor) -> None:
+            self._cur = cur
+
+        def cursor(self) -> _FakeCursor:
+            return self._cur
+
+        def __enter__(self) -> "_FakeConn":
+            return self
+
+        def __exit__(self, *exc: object) -> bool:
+            return False
+
+    bad_ts = dt.datetime(2026, 9, 15, 7, 59)
+    rows = [("000001", bad_ts, 100, 100, 100, 100, 1)]
+    monkeypatch.setattr(replay_parity, "_conn", lambda: _FakeConn(_FakeCursor(rows)))
+
+    with pytest.raises(ReplayDataError, match="000001"):
+        replay_parity.load_session_bars(["000001"], DAY)

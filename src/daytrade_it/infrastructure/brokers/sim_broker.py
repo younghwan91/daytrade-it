@@ -48,11 +48,13 @@ class SimBroker(BrokerInterface):
         prev_close: dict[str, Decimal],
         clock: Callable[[], dt.datetime],
         cash: Decimal = Decimal("1100000"),
+        limit_base: dict[str, Decimal] | None = None,
     ) -> None:
         self._bars = {t: sorted(b, key=lambda x: x.ts) for t, b in bars.items()}
         self._ts = {t: [b.ts for b in bs] for t, bs in self._bars.items()}
         self._by_minute = {t: {b.ts: b for b in bs} for t, bs in self._bars.items()}
         self._prev_close = prev_close
+        self._limit_base = limit_base or {}
         self._clock = clock
         self._cash = cash
         self._held: dict[str, int] = {}
@@ -76,7 +78,7 @@ class SimBroker(BrokerInterface):
         return self._bars.get(ticker, [])[: bisect.bisect_left(self._ts.get(ticker, []), minute)]
 
     def _limits(self, ticker: str) -> tuple[Decimal, Decimal] | None:
-        prev = self._prev_close.get(ticker)
+        prev = self._limit_base.get(ticker) or self._prev_close.get(ticker)
         if not prev:
             return None
         up = Decimal(str(limit_up_price(float(prev))))
