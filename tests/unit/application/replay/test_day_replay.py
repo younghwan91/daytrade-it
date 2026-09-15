@@ -117,3 +117,60 @@ def test_replay_enters_ranked_batch_respects_cap_and_flattens(tmp_path: Path) ->
     assert any(s["reason"] == "concurrent position cap reached" for s in res.skips)
     assert all(r["ts"].startswith("2026-09-15") for r in res.ledger)
     assert [f["side"] for f in res.fills].count("sell") == 2
+
+
+def _run_day(tmp_path: Path, broker: SimBroker, clock_holder: dict):  # noqa: ANN202
+    stocks = {
+        t: StockInfo(code=t, name=t, market="KOSPI", sector="s") for t in ("000001", "000002")
+    }
+    events = [_event("1", "000001", "09:00:35"), _event("2", "000002", "09:00:35")]
+    cfg = DayConfig(
+        limits=TradingLimits(max_open_positions=2, vwap_exit_gap=None, add_on_min_gain=None),
+        max_pre_entry_move=Decimal("0.03"),
+    )
+    return replay_day(
+        DAY,
+        events,
+        broker,
+        _DB(),
+        stocks,
+        dt.datetime(2026, 9, 14, 15, 20, tzinfo=KST),
+        cfg,
+        tmp_path / "work",
+        tmp_path / "dart.db" if (tmp_path / "dart.db").exists() else _dart(tmp_path),
+        clock_holder=clock_holder,
+    )
+
+
+def _fresh_broker(cls: type[SimBroker] = SimBroker) -> tuple[SimBroker, dict]:
+    clock_holder: dict = {}
+    bars = {"000001": _bars(10100), "000002": _bars(10100)}
+    broker = cls(bars, {t: Decimal(10000) for t in bars}, lambda: clock_holder["now"]())
+    return broker, clock_holder
+
+
+def test_rerunning_same_day_into_same_work_dir_is_identical(tmp_path: Path) -> None:
+    first = _run_day(tmp_path, *_fresh_broker())
+    second = _run_day(tmp_path, *_fresh_broker())
+
+    def tickers(res, event):  # noqa: ANN001, ANN202
+        return [r["ticker"] for r in res.ledger if r["event"] == event]
+
+    assert tickers(first, "entry_submitted")
+    assert tickers(second, "entry_submitted") == tickers(first, "entry_submitted")
+    assert tickers(second, "exit_submitted") == tickers(first, "exit_submitted")
+    assert len(second.ledger) == len(first.ledger)
+    assert [f["side"] for f in second.fills] == [f["side"] for f in first.fills]
+    assert second.skips == first.skips
+
+
+class _BrokenPositions(SimBroker):
+    def get_positions(self):  # noqa: ANN201
+        raise RuntimeError("positions endpoint down")
+
+
+def test_swallowed_errors_surface_in_result(tmp_path: Path) -> None:
+    res = _run_day(tmp_path, *_fresh_broker(_BrokenPositions))
+    assert res.errors
+    assert not [r for r in res.ledger if r["event"] == "entry_submitted"]
+    assert any("positions endpoint down" in e.get("exception", "") for e in res.errors)

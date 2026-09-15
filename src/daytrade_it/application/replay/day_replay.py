@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 import time_machine
+from structlog.processors import format_exc_info
 from structlog.testing import capture_logs
 
 from daytrade_it.application.replay.events import ReplayEvent, features_of, to_article
@@ -43,6 +44,7 @@ logger = get_logger(__name__)
 
 FIRST_POLL = dt.time(9, 0, 30)
 SESSION_CLOSE = dt.time(15, 20)
+_ERROR_LEVELS = {"error", "critical"}
 _SKIP_EVENTS = {"auto_trader: entry skipped", "entry_filter: extended, no entry"}
 
 
@@ -59,6 +61,7 @@ class DayResult:
     ledger: list[dict] = field(default_factory=list)
     skips: list[dict] = field(default_factory=list)
     fills: list[dict] = field(default_factory=list)
+    errors: list[dict] = field(default_factory=list)
 
 
 def snapshot_dart(src: Path, day: dt.date, dst: Path) -> Path:
@@ -108,6 +111,8 @@ def replay_day(
 ) -> DayResult:
     work_dir.mkdir(parents=True, exist_ok=True)
     ledger_dir = work_dir / "ledger"
+    path = ledger_dir / f"{day.isoformat()}.jsonl"
+    path.unlink(missing_ok=True)  # AutoTrader reloads an existing day's ledger; start clean
     expires_at = dt.datetime.combine(day, SESSION_CLOSE, tzinfo=KST)
     saved = (entry_filter.MAX_PRE_ENTRY_MOVE, tools._DART_DB_PATH, tools._KILL_SWITCH_PATH)
     snapshot = snapshot_dart(dart_db, day, work_dir / "dart_snapshot.db")
@@ -118,7 +123,10 @@ def replay_day(
         entry_filter.MAX_PRE_ENTRY_MOVE = config.max_pre_entry_move
         tools._DART_DB_PATH = snapshot
         tools._KILL_SWITCH_PATH = work_dir / "no_kill_switch"
-        with time_machine.travel(timeline[0][0], tick=False) as traveller, capture_logs() as logs:
+        with (
+            time_machine.travel(timeline[0][0], tick=False) as traveller,
+            capture_logs(processors=[format_exc_info]) as logs,
+        ):
             asyncio.run(
                 _run(
                     timeline,
@@ -134,7 +142,6 @@ def replay_day(
             )
     finally:
         entry_filter.MAX_PRE_ENTRY_MOVE, tools._DART_DB_PATH, tools._KILL_SWITCH_PATH = saved
-    path = ledger_dir / f"{day.isoformat()}.jsonl"
     ledger = (
         [json.loads(line) for line in path.read_text().splitlines() if line]
         if path.exists()
@@ -145,7 +152,8 @@ def replay_day(
         for r in logs
         if r.get("event") in _SKIP_EVENTS
     ]
-    return DayResult(ledger=ledger, skips=skips, fills=list(broker.fills))
+    errors = [r for r in logs if r.get("log_level") in _ERROR_LEVELS]
+    return DayResult(ledger=ledger, skips=skips, fills=list(broker.fills), errors=errors)
 
 
 async def _run(
