@@ -17,7 +17,7 @@ from build_universe_events import (  # noqa: E402
     day_pairs,
     load_articles,
     load_c1,
-    measure_judge_lag,
+    measure_per_pair,
     pair_rows,
     parse_days,
     prepare_day,
@@ -162,17 +162,39 @@ def test_pair_rows_carry_c4_fields(c1: Path) -> None:
     assert r["session"] == "pre_market"
 
 
-def test_measure_judge_lag_is_median_first_judgment_after_poll() -> None:
+def test_measure_per_pair_is_median_gap_between_consecutive_judgments_in_a_poll() -> None:
     polls = [
         dt.datetime(2026, 9, 15, 9, 0, 0, tzinfo=KST),
         dt.datetime(2026, 9, 15, 9, 3, 0, tzinfo=KST),
     ]
     rows = [
         {"judged_at": "2026-09-15T09:00:04+09:00"},
-        {"judged_at": "2026-09-15T09:00:09+09:00"},  # queued behind first -- not a lag sample
+        # 5s after the first judgment of the same poll: a per-pair sample.
+        {"judged_at": "2026-09-15T09:00:09+09:00"},
+        # alone in its poll -- no gap, not a sample.
         {"judged_at": "2026-09-15T09:03:06+09:00"},
     ]
-    assert measure_judge_lag(rows, polls) == dt.timedelta(seconds=5)
+    assert measure_per_pair(rows, polls) == dt.timedelta(seconds=5)
+
+
+def test_measure_per_pair_is_the_median_over_every_bucket_gap() -> None:
+    polls = [dt.datetime(2026, 9, 15, 9, 0, 0, tzinfo=KST)]
+    rows = [
+        {"judged_at": "2026-09-15T09:00:02+09:00"},
+        {"judged_at": "2026-09-15T09:00:04+09:00"},  # gap 2s
+        {"judged_at": "2026-09-15T09:00:14+09:00"},  # gap 10s
+    ]
+    assert measure_per_pair(rows, polls) == dt.timedelta(seconds=6)
+
+
+def test_measure_per_pair_raises_without_any_two_judgments_in_one_poll() -> None:
+    polls = [
+        dt.datetime(2026, 9, 15, 9, 0, 0, tzinfo=KST),
+        dt.datetime(2026, 9, 15, 9, 3, 0, tzinfo=KST),
+    ]
+    rows = [{"judged_at": "2026-09-15T09:00:04+09:00"}, {"judged_at": "2026-09-15T09:03:06+09:00"}]
+    with pytest.raises(ValueError, match="no two judgments"):
+        measure_per_pair(rows, polls)
 
 
 def test_parse_days_list_and_range() -> None:
@@ -186,7 +208,9 @@ def test_parse_days_list_and_range() -> None:
     ]
 
 
-def test_all_pairs_of_an_article_share_the_first_related_discovery(tmp_path: Path) -> None:
+def test_all_pairs_of_an_article_are_discovered_together_but_queue_one_at_a_time(
+    tmp_path: Path,
+) -> None:
     root = tmp_path / "u"
     row = _row("multi", "2026-09-15T10:00:00.5")
     _write_c1(root, "005930", [row])  # pages on even seconds -> would see it 10:00:02
@@ -195,11 +219,42 @@ def test_all_pairs_of_an_article_share_the_first_related_discovery(tmp_path: Pat
     pairs = day_pairs(load_articles(root), D, PREV, universe)
     assert {p["code"] for p in pairs} == {"005930", "000660"}
     first = dt.datetime(2026, 9, 15, 10, 0, 3, tzinfo=KST)
+    # both pairs are discovered together (F3: the article's one detail call
+    # resolves every related code) ...
     assert [p["discovered_at"] for p in pairs] == [first, first]
+    per_pair = dt.timedelta(seconds=3)
     events, _ = build_day_events(
-        pairs, STOCKS, {p["key"]: [{"v2": FEATS}] for p in pairs}, dt.timedelta(seconds=3)
+        pairs, STOCKS, {p["key"]: [{"v2": FEATS}] for p in pairs}, per_pair
     )
-    assert {e.decide_at for e in events} == {first + dt.timedelta(seconds=3)}
+    # ... but the single judge worker still judges them one at a time: staggered
+    # decide_at, 3s apart, both sharing the last pair's finish + 1s as batch_at
+    # (they were entered together as one candidate batch).
+    by_code = {e.ticker: e for e in events}
+    assert by_code["000660"].decide_at == first + per_pair  # "000660" sorts first by key
+    assert by_code["005930"].decide_at == first + 2 * per_pair
+    assert {e.batch_at for e in events} == {first + 2 * per_pair + dt.timedelta(seconds=1)}
+
+
+def test_build_day_events_backlog_carries_across_articles(tmp_path: Path) -> None:
+    # Two 1-pair articles discovered 2s apart; per_pair=7s makes the second one
+    # queue behind the first instead of being judged at its own discovery time.
+    root = tmp_path / "u"
+    _write_c1(root, "005930", [_row("n1", "2026-09-15T07:00:00")])
+    _write_c1(root, "000660", [_row("n3", "2026-09-14T16:00:00")])
+    universe = ["005930", "000660"]
+    pairs = day_pairs(load_articles(root), D, PREV, universe)
+    by_id = {p["news_id"]: p for p in pairs}
+    assert by_id["n1"]["discovered_at"] == dt.datetime(2026, 9, 15, 8, 0, 2, tzinfo=KST)
+    assert by_id["n3"]["discovered_at"] == dt.datetime(2026, 9, 15, 8, 0, 4, tzinfo=KST)
+    per_pair = dt.timedelta(seconds=7)
+    cache = {p["key"]: [{"v2": FEATS}] for p in pairs}
+    events, excluded = build_day_events(pairs, STOCKS, cache, per_pair)
+    assert excluded == 0
+    by_code = {e.ticker: e for e in events}
+    n1_finish = by_id["n1"]["discovered_at"] + per_pair
+    assert by_code["005930"].decide_at == n1_finish
+    # n3 arrives (08:00:04) before n1's worker is free (08:00:09) -> backlog carries.
+    assert by_code["000660"].decide_at == n1_finish + per_pair
 
 
 def test_bucketed_day_pairs_match_full_scan(c1: Path) -> None:

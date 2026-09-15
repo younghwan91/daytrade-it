@@ -14,6 +14,7 @@ from daytrade_it.application.news.universe import (
     UNIVERSE_SIZE,
     SweepCursor,
     SweepRequest,
+    judge_queue,
     judgment_input_hash,
     live_article_id,
     related_codes,
@@ -209,3 +210,47 @@ def test_judgment_input_hash_covers_model_system_and_user() -> None:
     # unambiguous framing: moving text across the boundary changes the hash
     assert judgment_input_hash("m", "ab", "c") != judgment_input_hash("m", "a", "bc")
     assert h != hashlib.sha256(b"msysuser").hexdigest()
+
+
+# --- judge_queue (A-plan fix: model the live single judge worker as a queue) -----
+
+T0 = dt.datetime(2026, 9, 15, 8, 0, tzinfo=KST)
+SEC = dt.timedelta(seconds=1)
+
+
+class TestJudgeQueue:
+    def test_single_article_pairs_finish_one_per_pair_after_the_other(self) -> None:
+        finishes = judge_queue([("a", T0, 3)], per_pair=2 * SEC)
+        assert finishes == {"a": [T0 + 2 * SEC, T0 + 4 * SEC, T0 + 6 * SEC]}
+
+    def test_burst_of_three_articles_queues_behind_each_other(self) -> None:
+        # a: 2 pairs, b: 1 pair, c: 2 pairs, all discovered at the same instant.
+        items = [("a", T0, 2), ("b", T0, 1), ("c", T0, 2)]
+        finishes = judge_queue(items, per_pair=2 * SEC)
+        assert finishes["a"] == [T0 + 2 * SEC, T0 + 4 * SEC]
+        # b starts only once a's worker is free (T0 + 4s), not at its own discovery.
+        assert finishes["b"] == [T0 + 6 * SEC]
+        # c starts once b is done (T0 + 6s).
+        assert finishes["c"] == [T0 + 8 * SEC, T0 + 10 * SEC]
+
+    def test_gap_larger_than_backlog_resets_start(self) -> None:
+        items = [("a", T0, 2), ("b", T0 + 100 * SEC, 1)]
+        finishes = judge_queue(items, per_pair=2 * SEC)
+        assert finishes["a"] == [T0 + 2 * SEC, T0 + 4 * SEC]
+        # b's own discovery (T0+100s) is long after a's queue drained (T0+4s):
+        # no backlog to carry, so b starts at its own discovery time.
+        assert finishes["b"] == [T0 + 100 * SEC + 2 * SEC]
+
+    def test_per_pair_scales_the_finish_times(self) -> None:
+        fast = judge_queue([("a", T0, 2)], per_pair=SEC)
+        slow = judge_queue([("a", T0, 2)], per_pair=5 * SEC)
+        assert fast["a"] == [T0 + SEC, T0 + 2 * SEC]
+        assert slow["a"] == [T0 + 5 * SEC, T0 + 10 * SEC]
+
+    def test_zero_pairs_article_is_a_no_op(self) -> None:
+        items = [("a", T0, 0), ("b", T0, 1)]
+        finishes = judge_queue(items, per_pair=2 * SEC)
+        assert finishes == {"a": [], "b": [T0 + 2 * SEC]}
+
+    def test_empty_input(self) -> None:
+        assert judge_queue([], per_pair=SEC) == {}

@@ -11,18 +11,24 @@ For trading day d:
   `daily_bars_adjusted.trade_value`, read-only);
 - pairs = (article, code) with createdAt in [prev 15:20, d 15:20) and code in
   (related codes from the C1 backfill files) ∩ universe;
-- decide_at = the article's discovery time in `simulate_sweep` (the live sweep
-  runner's exact request order: universe order, paging, one detail call per new
-  article, 1 request/s from 08:00 until 15:20) + judge_lag -- the same for every
-  pair of the article (live sweep judges all pairs at discovery),
-  batch_at = decide_at + 1s; features = judgment cache v2 (missing -> excluded,
-  count printed).
+- decide_at = the finish time of that pair in `judge_queue`, replaying the
+  live sweep's single judge worker over every day's articles in discovery
+  order (`simulate_sweep`: universe order, paging, one detail call per new
+  article, 1 request/s from 08:00 until 15:20). An article's pairs are all
+  enqueued together at its discovery time (live sweep resolves every related
+  code at the same detail call) and judged one at a time, `per_pair` each; a
+  backlog (the worker still busy when the next article arrives -- routine
+  after the 08:00 overnight burst) carries forward instead of being modeled
+  as instantaneous. batch_at = the finish of the article's last pair + 1s.
+  features = judgment cache v2 (missing -> excluded, count printed).
 
-judge_lag: `--judge-lag-s` if given; otherwise measured from the live archive
-(`data/news_judgments` + daemon log): per poll, first judged_at minus the
-"Toss news poll complete" time -- one article's detect-to-judgment latency
-without queueing (the sweep finds articles one code at a time). If no archive
-is available the fallback is 60 s (noted in output).
+per_pair: `--per-pair-seconds` if given; otherwise measured from the live
+archive (`data/news_judgments` + daemon log): median gap between consecutive
+judged_at within a poll -- the single worker's per-pair judging time (the
+old code instead measured poll-to-first-judgment latency, ~2.57s in that
+archive; this measures the same rows and polls but the gap between judgments,
+not the lag to the first one). If no archive is available the fallback is 4s
+(the reviewer's overnight-burst estimate; noted in output).
 
 Category: the per-code Toss feed has no dashboard category, so events and
 pairs carry the C1 row's `category` if present, else None (the prompt renders
@@ -43,6 +49,7 @@ from pathlib import Path
 from judge_batch import cache_row_valid
 
 from daytrade_it.application.news.universe import (
+    judge_queue,
     live_article_id,
     related_codes,
     select_universe,
@@ -61,7 +68,9 @@ DAEMON_LOG = Path("data/news_signal_daemon.log")
 SWEEP_START = dt.time(8, 0)
 CUTOFF = dt.time(15, 20)
 OPEN = dt.time(9, 0)
-FALLBACK_JUDGE_LAG = dt.timedelta(seconds=60)
+#: Reviewer's overnight-burst estimate (800 articles x ~4s/article) when no live
+#: archive is available to measure the single judge worker's per-pair time.
+FALLBACK_PER_PAIR = dt.timedelta(seconds=4)
 
 
 def _parse_created(value: str) -> dt.datetime:
@@ -284,52 +293,88 @@ def day_pairs(
     return out
 
 
+def article_queue_items(pairs: list[dict]) -> tuple[list[str], dict[str, list[dict]]]:
+    """`pairs` grouped by article, in discovery order (`judge_queue`'s `items` shape).
+
+    `pairs` is already sorted by (discovered_at, key); grouping preserves that
+    order, and every pair of an article shares its `discovered_at` (F3), so
+    the first occurrence of an article fixes its place in the queue.
+    """
+    order: list[str] = []
+    by_article: dict[str, list[dict]] = {}
+    for p in pairs:
+        aid = p["article_id"]
+        if aid not in by_article:
+            order.append(aid)
+        by_article.setdefault(aid, []).append(p)
+    return order, by_article
+
+
 def build_day_events(
     pairs: list[dict],
     stocks: dict,
     cache: dict[str, list[dict]],
-    judge_lag: dt.timedelta,
+    per_pair: dt.timedelta,
     model: str = DEFAULT_MODEL,
     stats: dict | None = None,
 ) -> tuple[list[ReplayEvent], int]:
     """Events for pairs with a cached judgment of their current input (`cache_row_valid`).
 
-    Pairs without a valid row are excluded (counted); `stats["stale_cache"]`
+    decide_at replays the live sweep's single judge worker (`judge_queue`)
+    over the day's articles in discovery order: an article's pairs are all
+    enqueued at its discovery time and judged one at a time, `per_pair` each,
+    so a backlog from an earlier article carries forward. batch_at is the
+    finish of the article's last pair + 1s (its pairs were all discovered --
+    and would be entered as one candidate batch -- together).
+
+    Pairs without a valid cached row are excluded (counted); `stats["stale_cache"]`
     counts those that had only rows for a different input.
+    `stats["max_backlog_s"]` is the largest (decide_at - discovered_at) of the
+    day, over every pair (excluded ones too -- it measures queueing, not cache
+    coverage).
     """
     events = []
     excluded = stale = 0
+    max_backlog = 0.0
     rows = {r["key"]: r for r in pair_rows(pairs, stocks)}
-    for p in pairs:
-        candidates = cache.get(p["key"], [])
-        valid = next((r for r in candidates if cache_row_valid(r, rows[p["key"]], model)), None)
-        if valid is None:
-            excluded += 1
-            stale += bool(candidates)
-            continue
-        features = valid["v2"]
-        s = stocks.get(p["code"])
-        decide = p["discovered_at"] + judge_lag
-        events.append(
-            ReplayEvent(
-                key=p["key"],
-                article_id=p["article_id"],
-                ticker=p["code"],
-                name=s.name if s else p["code"],
-                market=s.market if s else None,
-                sector=s.sector if s else None,
-                title=p["title"],
-                category=p["category"],
-                published_at=p["published_at"],
-                decide_at=decide,
-                batch_at=decide + dt.timedelta(seconds=1),
-                features=features,
-                source="universe",
+    order, by_article = article_queue_items(pairs)
+    items = [(aid, by_article[aid][0]["discovered_at"], len(by_article[aid])) for aid in order]
+    finishes = judge_queue(items, per_pair)
+    for aid in order:
+        article_pairs = by_article[aid]
+        times = finishes[aid]
+        batch_at = times[-1] + dt.timedelta(seconds=1)
+        for p, decide in zip(article_pairs, times, strict=True):
+            max_backlog = max(max_backlog, (decide - p["discovered_at"]).total_seconds())
+            candidates = cache.get(p["key"], [])
+            valid = next((r for r in candidates if cache_row_valid(r, rows[p["key"]], model)), None)
+            if valid is None:
+                excluded += 1
+                stale += bool(candidates)
+                continue
+            features = valid["v2"]
+            s = stocks.get(p["code"])
+            events.append(
+                ReplayEvent(
+                    key=p["key"],
+                    article_id=p["article_id"],
+                    ticker=p["code"],
+                    name=s.name if s else p["code"],
+                    market=s.market if s else None,
+                    sector=s.sector if s else None,
+                    title=p["title"],
+                    category=p["category"],
+                    published_at=p["published_at"],
+                    decide_at=decide,
+                    batch_at=batch_at,
+                    features=features,
+                    source="universe",
+                )
             )
-        )
     events.sort(key=lambda e: (e.decide_at, e.key))
     if stats is not None:
         stats["stale_cache"] = stats.get("stale_cache", 0) + stale
+        stats["max_backlog_s"] = max_backlog
     return events, excluded
 
 
@@ -363,19 +408,30 @@ def pair_rows(pairs: list[dict], stocks: dict) -> list[dict]:
     return rows
 
 
-def measure_judge_lag(rows: Iterable[dict], polls: list[dt.datetime]) -> dt.timedelta:
-    """Median over polls of (first judged_at after the poll) - poll time."""
+def measure_per_pair(rows: Iterable[dict], polls: list[dt.datetime]) -> dt.timedelta:
+    """Median gap between consecutive judged_at within a poll -- the single worker's per-pair time.
+
+    Rows are bucketed by the poll they were judged after (same bucketing the
+    old poll-to-first-judgment measurement used); within each bucket the
+    judged_at values are sorted and the gaps between consecutive ones are
+    samples of how long the single judge worker spends per pair (a bucket
+    with fewer than 2 rows contributes no sample). The median over every
+    bucket's gaps is returned.
+    """
     polls = sorted(polls)
-    first: dict[int, dt.datetime] = {}
+    buckets: dict[int, list[dt.datetime]] = {}
     for r in rows:
         ts = dt.datetime.fromisoformat(r["judged_at"])
         i = bisect.bisect_right(polls, ts) - 1
-        if i >= 0 and (i not in first or ts < first[i]):
-            first[i] = ts
-    lags = [(ts - polls[i]).total_seconds() for i, ts in first.items()]
-    if not lags:
-        raise ValueError("no judgments after any poll")
-    return dt.timedelta(seconds=statistics.median(lags))
+        if i >= 0:
+            buckets.setdefault(i, []).append(ts)
+    gaps: list[float] = []
+    for times in buckets.values():
+        times.sort()
+        gaps.extend((b - a).total_seconds() for a, b in zip(times, times[1:], strict=False))
+    if not gaps:
+        raise ValueError("no two judgments within the same poll")
+    return dt.timedelta(seconds=statistics.median(gaps))
 
 
 def parse_days(spec: str, trading_days: list[dt.date]) -> list[dt.date]:
@@ -399,7 +455,7 @@ def load_cache(path: Path) -> dict[str, list[dict]]:
     return out
 
 
-def archive_judge_lag() -> dt.timedelta | None:
+def archive_per_pair() -> dt.timedelta | None:
     from build_replay_events import poll_times  # same log parsing as stage-0 events
 
     rows = []
@@ -410,7 +466,7 @@ def archive_judge_lag() -> dt.timedelta | None:
         rows += [json.loads(line) for line in path.open() if line.strip()]
         polls += poll_times(dt.date.fromisoformat(path.stem))
     try:
-        return measure_judge_lag(rows, polls)
+        return measure_per_pair(rows, polls)
     except ValueError:
         return None
 
@@ -483,7 +539,13 @@ def main() -> None:
     ap.add_argument("--c1-dir", type=Path, default=C1_DIR)
     ap.add_argument("--cache", type=Path, default=CACHE)
     ap.add_argument("--out", type=Path, default=OUT)
-    ap.add_argument("--judge-lag-s", type=float, default=None)
+    ap.add_argument(
+        "--per-pair-seconds",
+        type=float,
+        default=None,
+        help="single judge worker's per-pair judging time (default: measured from the "
+        "live archive, or 4s fallback)",
+    )
     ap.add_argument(
         "--pairs-out", type=Path, default=None, help="write C4 pairs file instead of events"
     )
@@ -538,22 +600,23 @@ def main() -> None:
         print(f"wrote {len(seen)} pairs -> {args.pairs_out}")
         return
 
-    if args.judge_lag_s is not None:
-        lag = dt.timedelta(seconds=args.judge_lag_s)
-    elif (measured := archive_judge_lag()) is not None:
-        lag = measured
-        print(f"judge_lag measured from live archive: {lag.total_seconds():.2f}s")
+    if args.per_pair_seconds is not None:
+        per_pair = dt.timedelta(seconds=args.per_pair_seconds)
+    elif (measured := archive_per_pair()) is not None:
+        per_pair = measured
+        print(f"per_pair measured from live archive: {per_pair.total_seconds():.2f}s")
     else:
-        lag = FALLBACK_JUDGE_LAG
+        per_pair = FALLBACK_PER_PAIR
         print(
-            f"NOTE: no live archive to measure judge_lag -- using fallback {lag.total_seconds():.0f}s"
+            f"NOTE: no live archive to measure per_pair -- using fallback "
+            f"{per_pair.total_seconds():.0f}s"
         )
 
     cache = load_cache(args.cache)
     done_days = []
     for day, pairs in plans():
         stats: dict = {}
-        events, excluded = build_day_events(pairs, stocks, cache, lag, args.model, stats)
+        events, excluded = build_day_events(pairs, stocks, cache, per_pair, args.model, stats)
         dump_events(args.out / f"{day}.jsonl", events)
         done_days.append(day)
         print(
@@ -564,11 +627,13 @@ def main() -> None:
             excluded,
             "of which stale cache rows",
             stats["stale_cache"],
+            "max backlog",
+            f"{stats.get('max_backlog_s', 0.0):.0f}s",
         )
     args.out.mkdir(parents=True, exist_ok=True)
     (args.out / "meta.json").write_text(
         json.dumps(
-            {"judge_lag_s": lag.total_seconds(), "days": [str(d) for d in done_days]}, indent=1
+            {"per_pair_s": per_pair.total_seconds(), "days": [str(d) for d in done_days]}, indent=1
         )
     )
 

@@ -26,6 +26,7 @@ from daytrade_it.application.news.judging import JudgmentLog, judgment_record  #
 from daytrade_it.application.news.universe import (  # noqa: E402
     PAGE_SIZE,
     SweepRequest,
+    judge_queue,
     live_article_id,
     page_items,
     simulate_sweep,
@@ -708,3 +709,59 @@ async def test_live_request_sequence_equals_simulator(
     rows = _rows(tmp_path / "news_judgments_universe" / f"{DAY}.jsonl")
     seen = {r["article_id"]: r["sweep_seen_at"] for r in rows}
     assert seen[live_article_id("h1")] == found["h1"].isoformat()
+
+
+# --- A-plan fix: judge_queue models the single judge worker -----------------
+
+
+async def test_judged_order_matches_judge_queue_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The runner has exactly one `judge_worker` task consuming one `asyncio.Queue`
+    (`ShadowRunner.queue`/`judge_worker` in news_sweep_shadow.py): articles are
+    dequeued FIFO in discovery order, and `_judge` judges every one of an
+    article's known pairs, one at a time, before the worker asks for the next
+    article -- exactly the batching `judge_queue` (application/news/universe.py)
+    assumes ("an article's pairs are all enqueued together ... and judged in
+    that order"). This asserts that resulting *order*.
+
+    It does not assert the archived `judged_at` timestamps equal
+    `judge_queue`'s finish times: those come from `dt.datetime.now(KST)` inside
+    `judgment_record` (application/news/judging.py), a real wall-clock call
+    the runner's injectable `self.now` does not reach (`self.now` only drives
+    scheduling/HTTP timing here), so a fixed virtual per-pair delay can't be
+    observed in the archive without changing judging.py, which is out of
+    scope for this fix.
+    """
+    # Two articles, both first seen on 005930's page (page order fixes discovery
+    # order), each related to both universe codes -> 2 pairs apiece, judged
+    # one article fully before the next (judge_queue's batching).
+    first = {**ITEM, "id": "burst_1"}
+    second = {**ITEM, "id": "burst_2", "createdAt": "2026-09-17T08:31:03"}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "/companies/" in request.url.path:
+            return httpx.Response(200, json={"result": {"body": [first, second]}})
+        news_id = request.url.path.rsplit("/", 1)[-1]
+        kr = {"id": news_id, "companyCodes": ["005930", "000660"]}
+        return httpx.Response(200, json={"result": {"kr": kr}})
+
+    claude = FakeClaude()
+    runner = _runner(tmp_path, monkeypatch, handler, claude=claude, max_requests=4)
+    await runner.run()
+
+    rows = _rows(tmp_path / "news_judgments_universe" / f"{DAY}.jsonl")
+    got = [(r["article_id"], r["ticker"]) for r in rows]
+    aid1, aid2 = live_article_id("burst_1"), live_article_id("burst_2")
+    # burst_1's two pairs are contiguous (discovered/queued first), then burst_2's.
+    assert got == [(aid1, "005930"), (aid1, "000660"), (aid2, "005930"), (aid2, "000660")]
+
+    # judge_queue, given the same discovery order and pair counts, agrees: it
+    # never interleaves an article's pairs with another's, so the finish-time
+    # order it assigns matches the archive's judged order article-for-article.
+    finishes = judge_queue(
+        [(aid1, at(10, 0), 2), (aid2, at(10, 0, 1), 2)], per_pair=dt.timedelta(seconds=3)
+    )
+    ordered_articles = list(finishes)
+    assert ordered_articles == [aid1, aid2]
+    assert [len(finishes[a]) for a in ordered_articles] == [2, 2]

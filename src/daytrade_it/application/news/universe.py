@@ -224,6 +224,34 @@ def judgment_input_hash(model: str, system: str, user: str) -> str:
     return h.hexdigest()
 
 
+def judge_queue(
+    items: list[tuple[str, dt.datetime, int]], per_pair: dt.timedelta
+) -> dict[str, list[dt.datetime]]:
+    """Finish time of every (article, code) pair, replaying the live sweep's one judge worker.
+
+    `items` is (news_id, discovered_at, n_pairs) in discovery order (ties
+    broken by input order -- this never re-sorts). The live runner judges
+    pairs one at a time with a single worker in discovery order (F3/F4); an
+    article's pairs are all enqueued together at its `discovered_at` (the
+    detail call that found it also resolved its related codes) and judged in
+    that order, each pair costing `per_pair`. So pair i (0-based) of an
+    article finishes at `start + (i + 1) * per_pair`, where
+    `start = max(discovered_at, previous article's last finish)` -- a backlog
+    (the worker still busy when a later article arrives) carries forward
+    instead of resetting; once the worker catches up (`discovered_at` after
+    the previous finish), `start` resets to `discovered_at`.
+    """
+    finishes: dict[str, list[dt.datetime]] = {}
+    prev_finish: dt.datetime | None = None
+    for news_id, discovered_at, n_pairs in items:
+        start = discovered_at if prev_finish is None else max(discovered_at, prev_finish)
+        times = [start + (i + 1) * per_pair for i in range(n_pairs)]
+        finishes[news_id] = times
+        if times:
+            prev_finish = times[-1]
+    return finishes
+
+
 def related_codes(rows_by_id: dict[str, set[str]]) -> dict[str, tuple[str, ...]]:
     """Article id -> sorted tuple of codes it appeared under across the sweep.
 
