@@ -11,7 +11,7 @@
   `parse_features` (fixed-schema validation). Nothing is copied.
 - Pairs already in the cache (`data/eval/cache/universe_v2.jsonl`, rows
   `{"key", "v2"}` with v2 = asdict(features) + "score") are skipped; so are
-  pairs that already failed `MAX_ATTEMPTS` times (errors file).
+  pairs that already failed in `MAX_ATTEMPTS` (3) distinct batches (errors file).
 - Stratified sample: proportional allocation over the `--stratify` fields
   (largest remainder), seeded shuffle within each stratum -- deterministic for
   a given (pairs set, sample, seed) regardless of file order.
@@ -21,10 +21,12 @@
   measured ~150) at $5/M, times the 50% Batch discount. Abort if over
   `--budget-usd`. `--calibrate N` measures chars/token on N sampled requests
   with the free count_tokens endpoint first (not in --dry-run).
-- Resumable: batch ids + custom_id->key maps go to the state file right after
-  each create. If the state has unprocessed batches, a run only finishes those
-  (poll with backoff, fetch results_url JSONL, write cache/errors) and submits
-  nothing new.
+- Resumable, no double spend: the chosen sample (keys, chunking, seed, args)
+  is saved to the state file before the first submit; each batch id is appended
+  to `<state>.batches.log` as soon as the create call returns, then recorded in
+  the state. A rerun of an incomplete run submits only chunks without a batch
+  and collects unprocessed batches (poll with backoff, results_url JSONL). A
+  completed run blocks drawing a fresh sample unless `--new-run`.
 - Raw httpx (no `anthropic` SDK in this project), key from ANTHROPIC_API_KEY or
   ../quant-airflow/.env like the live daemon.
 """
@@ -61,7 +63,7 @@ STATE = Path("data/eval/cache/universe_batch_state.json")
 INPUT_USD_PER_M = 1.0  # Haiku 4.5
 OUTPUT_USD_PER_M = 5.0
 BATCH_DISCOUNT = 0.5
-MAX_ATTEMPTS = 2  # first try + one retry
+MAX_ATTEMPTS = 3  # same as live score_article (_MAX_RETRIES + 1)
 CHUNK = 10_000  # requests per batch (API limit 100k / 256 MB)
 
 
@@ -187,7 +189,12 @@ class BatchJudge:
     def failure_counts(self) -> Counter[str]:
         if not self.errors.exists():
             return Counter()
-        return Counter(json.loads(line)["key"] for line in self.errors.open() if line.strip())
+        seen = {
+            (r["key"], r.get("batch_id"))
+            for line in self.errors.open()
+            if line.strip() and (r := json.loads(line))
+        }
+        return Counter(key for key, _ in seen)
 
     def _append(self, path: Path, row: dict) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -224,19 +231,30 @@ class BatchJudge:
             self._http("POST", f"{API}/v1/messages/count_tokens", json=body).json()["input_tokens"]
         )
 
-    def submit(self, requests: list[dict], keys: dict[str, str]) -> str:
+    @property
+    def batches_log(self) -> Path:
+        return self.state.with_suffix(".batches.log")
+
+    def submit(self, requests: list[dict], keys: dict[str, str], chunk: int) -> str:
         batch = self._http("POST", f"{API}/v1/messages/batches", json={"requests": requests}).json()
+        now = dt.datetime.now(dt.UTC).isoformat()
+        # the batch is billable from here: log its id before anything else can fail
+        self._append(
+            self.batches_log,
+            {"id": batch["id"], "chunk": chunk, "requests": len(requests), "submitted_at": now},
+        )
         state = self._load_state()
         state["batches"].append(
             {
                 "id": batch["id"],
+                "chunk": chunk,
                 "custom_ids": {r["custom_id"]: keys[r["custom_id"]] for r in requests},
-                "submitted_at": dt.datetime.now(dt.UTC).isoformat(),
+                "submitted_at": now,
                 "processed": False,
             }
         )
         self._save_state(state)
-        self.log(f"submitted batch {batch['id']} ({len(requests)} requests)")
+        self.log(f"submitted batch {batch['id']} chunk {chunk} ({len(requests)} requests)")
         return batch["id"]
 
     def wait(self, batch_id: str, first: float = 30.0, cap: float = 600.0) -> dict:
@@ -324,22 +342,29 @@ class BatchJudge:
         seed: int,
         dry_run: bool = False,
         calibrate: int = 0,
+        new_run: bool = False,
     ) -> dict:
+        """Draw + persist a sample, submit its chunks, collect. Reruns continue the stored run.
+
+        State `run` holds the chosen keys and chunking (written before the first
+        submit). A rerun with an incomplete run submits only chunks that have no
+        batch yet and collects unprocessed batches -- the CLI's sample/seed are
+        ignored then. A completed run blocks a fresh sample unless `new_run`.
+        """
         summary: dict = {"resumed": 0, "submitted": 0, "succeeded": 0, "failed": 0}
-        pending = [b for b in self._load_state()["batches"] if not b["processed"]]
-        if pending:
-            summary["pending"] = len(pending)
+        state = self._load_state()
+        run = state.get("run")
+        if run and not run.get("completed"):
             if dry_run:
-                self.log(
-                    f"{len(pending)} unprocessed batch(es) in {self.state} -- a real run resumes them"
-                )
+                self.log(f"incomplete run in {self.state} -- a real run resumes it")
+                summary["pending_run"] = True
                 return summary
-            self.log(f"resuming {len(pending)} unprocessed batch(es); nothing new is submitted")
-            for entry in pending:
-                ok, bad = self.collect(entry)
-                summary["succeeded"] += ok
-                summary["failed"] += bad
-            summary["resumed"] = len(pending)
+            summary["resumed"] = 1
+            self.log(f"resuming stored run (seed {run['seed']}, {len(run['keys'])} keys)")
+            return self._finish(run, {p["key"]: p for p in pairs}, summary)
+        if run and not new_run:
+            self.log(f"completed run in {self.state}; pass --new-run to draw a fresh sample")
+            summary["refused"] = True
             return summary
 
         done = self.cached_keys()
@@ -373,14 +398,48 @@ class BatchJudge:
             return summary
         if est["usd"] > self.budget_usd:
             raise BudgetExceeded(f"estimate ${est['usd']:.2f} > budget ${self.budget_usd:.2f}")
-        keys = {custom_id_of(p["key"]): p["key"] for p in chosen}
-        for i in range(0, len(requests), self.chunk):
-            self.submit(requests[i : i + self.chunk], keys)
+        if not chosen:
+            self.log("nothing to judge")
+            return summary
+        keys = [p["key"] for p in chosen]
+        run = {
+            "seed": seed,
+            "sample": sample,
+            "stratify": stratify,
+            "model": self.model,
+            "estimate": est,
+            "budget_usd": self.budget_usd,
+            "keys": keys,
+            "chunks": [keys[i : i + self.chunk] for i in range(0, len(keys), self.chunk)],
+            "created_at": dt.datetime.now(dt.UTC).isoformat(),
+            "completed": False,
+        }
+        history = state.get("history", [])
+        if state.get("run"):
+            history.append({"run": state["run"], "batches": state["batches"]})
+        self._save_state({"run": run, "batches": [], "history": history})
+        return self._finish(run, unique, summary)
+
+    def _finish(self, run: dict, by_key: dict[str, dict], summary: dict) -> dict:
+        submitted = {b["chunk"] for b in self._load_state()["batches"]}
+        for i, chunk_keys in enumerate(run["chunks"]):
+            if i in submitted:
+                continue
+            missing = [k for k in chunk_keys if k not in by_key]
+            if missing:
+                raise KeyError(
+                    f"{len(missing)} stored sample key(s) not in --pairs, e.g. {missing[0]}"
+                )
+            reqs = [build_request(by_key[k], run["model"]) for k in chunk_keys]
+            self.submit(reqs, {custom_id_of(k): k for k in chunk_keys}, i)
             summary["submitted"] += 1
         for entry in [b for b in self._load_state()["batches"] if not b["processed"]]:
             ok, bad = self.collect(entry)
             summary["succeeded"] += ok
             summary["failed"] += bad
+        state = self._load_state()
+        state["run"]["completed"] = True
+        self._save_state(state)
         return summary
 
 
@@ -411,6 +470,11 @@ def main() -> None:
     ap.add_argument("--calibrate", type=int, default=0, help="count_tokens on N sampled requests")
     ap.add_argument("--chunk", type=int, default=CHUNK)
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument(
+        "--new-run",
+        action="store_true",
+        help="draw a fresh sample even though the state file holds a completed run",
+    )
     args = ap.parse_args()
     if not args.model.startswith("claude-haiku-4-5"):
         sys.exit(f"model must be Haiku 4.5 (plan Global Constraints), got {args.model}")
@@ -437,6 +501,7 @@ def main() -> None:
                 seed=args.seed,
                 dry_run=args.dry_run,
                 calibrate=args.calibrate,
+                new_run=args.new_run,
             )
         except BudgetExceeded as exc:
             sys.exit(f"ABORT: {exc}")

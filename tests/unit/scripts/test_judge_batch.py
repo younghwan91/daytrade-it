@@ -100,7 +100,8 @@ def test_estimate_cost_is_batch_discounted_haiku_price() -> None:
 class FakeAPI:
     """Minimal Message Batches API: create -> in_progress once -> ended."""
 
-    def __init__(self, result_for=None) -> None:
+    def __init__(self, result_for=None, prefix: str = "b") -> None:
+        self.prefix = prefix
         self.created: list[dict] = []
         self.polls = 0
         self.result_for = result_for or (lambda _cid: {"type": "succeeded", "message": _msg(FEATS)})
@@ -113,7 +114,11 @@ class FakeAPI:
             body = json.loads(request.content)
             self.created.append(body)
             return httpx.Response(
-                200, json={"id": f"b{len(self.created)}", "processing_status": "in_progress"}
+                200,
+                json={
+                    "id": f"{self.prefix}{len(self.created)}",
+                    "processing_status": "in_progress",
+                },
             )
         if (
             request.method == "GET"
@@ -135,7 +140,7 @@ class FakeAPI:
             )
         if path.endswith("/results"):
             bid = path.split("/")[-2]
-            reqs = self.created[int(bid[1:]) - 1]["requests"]
+            reqs = self.created[int(bid[len(self.prefix) :]) - 1]["requests"]
             lines = [
                 json.dumps({"custom_id": r["custom_id"], "result": self.result_for(r["custom_id"])})
                 for r in reqs
@@ -152,7 +157,7 @@ def _msg(payload: dict | str) -> dict:
     }
 
 
-def _judge(tmp_path: Path, api: FakeAPI, budget: float = 100.0) -> BatchJudge:
+def _judge(tmp_path: Path, api: FakeAPI, budget: float = 100.0, chunk: int = 10_000) -> BatchJudge:
     client = httpx.Client(transport=httpx.MockTransport(api), base_url="https://api.anthropic.com")
     return BatchJudge(
         client=client,
@@ -162,6 +167,7 @@ def _judge(tmp_path: Path, api: FakeAPI, budget: float = 100.0) -> BatchJudge:
         errors=tmp_path / "errors.jsonl",
         state=tmp_path / "state.json",
         budget_usd=budget,
+        chunk=chunk,
         sleep=lambda _s: None,
     )
 
@@ -213,26 +219,76 @@ def test_results_errored_and_schema_failures_go_to_errors_file(tmp_path: Path) -
     assert (summary["succeeded"], summary["failed"]) == (1, 2)
     errs = [json.loads(line) for line in (tmp_path / "errors.jsonl").open()]
     assert {e["reason"] for e in errs} == {"errored", "schema"}
-    # one retry allowed: a second run resubmits both; a third run submits nothing
-    _judge(tmp_path, FakeAPI(result_for)).run(pairs, sample=10, stratify=["month"], seed=1)
-    api3 = FakeAPI(result_for)
-    _judge(tmp_path, api3).run(pairs, sample=10, stratify=["month"], seed=1)
-    assert api3.created == []
+    # MAX_ATTEMPTS=3 (live score_article tries 3 times): two more explicit runs
+    # resubmit both, a fourth submits nothing
+    for n in range(2):
+        api_n = FakeAPI(result_for, prefix=f"r{n}b")
+        _judge(tmp_path, api_n).run(pairs, sample=10, stratify=["month"], seed=1, new_run=True)
+        assert len(api_n.created[0]["requests"]) == 2
+    api4 = FakeAPI(result_for, prefix="r4b")
+    _judge(tmp_path, api4).run(pairs, sample=10, stratify=["month"], seed=1, new_run=True)
+    assert api4.created == []
 
 
-def test_resume_polls_pending_batch_without_resubmitting(tmp_path: Path) -> None:
-    pairs = [_pair(i) for i in range(2)]
-    api = FakeAPI()
-    j = _judge(tmp_path, api)
-    # simulate a crash right after submission
-    reqs = [build_request(p, model="claude-haiku-4-5") for p in pairs]
-    j.submit(reqs, {r["custom_id"]: p["key"] for r, p in zip(reqs, pairs, strict=True)})
+def test_failure_counts_dedupe_by_key_and_batch(tmp_path: Path) -> None:
+    rows = [
+        {"key": "a|1", "reason": "schema", "batch_id": "b1"},
+        {"key": "a|1", "reason": "schema", "batch_id": "b1"},
+        {"key": "a|1", "reason": "errored", "batch_id": "b2"},
+    ]
+    (tmp_path / "errors.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    assert _judge(tmp_path, FakeAPI()).failure_counts()["a|1"] == 2
+
+
+class CrashOnSecondCreate(FakeAPI):
+    def __init__(self) -> None:
+        super().__init__()
+        self.crash = True
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        if self.crash and request.method == "POST" and len(self.created) == 1:
+            raise httpx.ConnectError("boom")
+        return super().__call__(request)
+
+
+def test_crash_after_first_chunk_rerun_submits_only_the_rest_of_the_same_sample(
+    tmp_path: Path,
+) -> None:
+    pairs = [_pair(i) for i in range(4)]
+    api = CrashOnSecondCreate()
+    with pytest.raises(httpx.ConnectError):
+        _judge(tmp_path, api, chunk=2).run(pairs, sample=4, stratify=["month"], seed=1)
     assert len(api.created) == 1
-    summary = _judge(tmp_path, api).run(pairs + [_pair(9)], sample=10, stratify=["month"], seed=1)
-    assert len(api.created) == 1  # resumed, nothing new submitted
-    assert summary["resumed"] == 1 and summary["succeeded"] == 2
+    state = json.loads((tmp_path / "state.json").read_text())
+    assert state["run"]["keys"] == sorted(p["key"] for p in pairs)
+    log = [json.loads(line) for line in (tmp_path / "state.batches.log").open()]
+    assert [r["id"] for r in log] == ["b1"]
+    first = {r["custom_id"] for r in api.created[0]["requests"]}
+
+    api.crash = False
+    # a different seed/sample on rerun must not matter: the stored sample wins
+    summary = _judge(tmp_path, api, chunk=2).run(
+        pairs + [_pair(9)], sample=1, stratify=["month"], seed=99
+    )
+    assert len(api.created) == 2
+    second = {r["custom_id"] for r in api.created[1]["requests"]}
+    assert first.isdisjoint(second) and len(second) == 2
+    assert summary["succeeded"] == 4
     keys = {json.loads(line)["key"] for line in (tmp_path / "cache.jsonl").open()}
     assert keys == {p["key"] for p in pairs}
+
+
+def test_completed_run_refuses_fresh_sample_without_new_run(tmp_path: Path) -> None:
+    pairs = [_pair(i) for i in range(4)]
+    api = FakeAPI()
+    _judge(tmp_path, api).run(pairs, sample=2, stratify=["month"], seed=1)
+    assert len(api.created) == 1
+    summary = _judge(tmp_path, api).run(pairs, sample=2, stratify=["month"], seed=2)
+    assert len(api.created) == 1
+    assert summary["refused"] is True
+    _judge(tmp_path, api).run(pairs, sample=2, stratify=["month"], seed=2, new_run=True)
+    assert len(api.created) == 2
+    assert len(api.created[1]["requests"]) == 2
 
 
 def test_dry_run_makes_no_http_calls(tmp_path: Path) -> None:
