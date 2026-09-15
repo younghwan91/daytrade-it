@@ -2,15 +2,19 @@
 
 `load_day` builds a day's inputs once from kr_quant (`replay_parity.prepare_day`)
 and pickles them under `data/eval/cache/days/`; later calls read the pickle, so
-a trial costs only the replay. `day_net` runs one policy over one day with a
+a trial costs only the replay. The pickle's name carries a hash of its inputs
+(the events file, the frozen prev-close file and the day's minute-bar row
+count), so a re-exported day or a re-frozen close can never feed a stale cache. `day_net` runs one policy over one day with a
 fresh `SimBroker` and its own run directory, so trials never share state.
 """
 
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import os
 import pickle
+import shutil
 import sys
 import uuid
 from dataclasses import dataclass
@@ -52,17 +56,60 @@ def _build_day(day: dt.date) -> DayData:
     return DayData(day=day, events=events, bars=bars, frozen=frozen, stale_before=stale_before)
 
 
-def load_day(day: dt.date, cache_dir: Path = CACHE) -> DayData:
-    """The day's inputs, built and pickled on first use, read from the pickle after."""
-    path = cache_dir / f"{day}.pkl"
+def _bars_row_count(day: dt.date, events_path: Path) -> int:
+    """kr_quant minute_bars rows on `day` for the events' tickers (part of the cache key)."""
+    from replay_parity import _conn  # noqa: PLC0415
+
+    codes = sorted({e.ticker for e in load_events(events_path) if VALID_TICKER.match(e.ticker)})
+    with _conn() as c, c.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM minute_bars WHERE code = ANY(%s) AND ts >= %s AND ts < %s",
+            (codes, day, day + dt.timedelta(days=1)),
+        )
+        (n,) = cur.fetchone()
+    return int(n)
+
+
+def _input_key(day: dt.date, events_dir: Path, prev_close_dir: Path) -> str:
+    events_path = events_dir / f"{day}.jsonl"
+    prev = prev_close_dir / f"{day}.json"
+    h = hashlib.sha256()
+    h.update(events_path.read_bytes())
+    h.update(b"\0prev\0")
+    h.update(prev.read_bytes() if prev.exists() else b"<none>")
+    h.update(f"\0bars\0{_bars_row_count(day, events_path)}".encode())
+    return h.hexdigest()[:16]
+
+
+def load_day(
+    day: dt.date,
+    cache_dir: Path = CACHE,
+    events_dir: Path | None = None,
+    prev_close_dir: Path | None = None,
+) -> DayData:
+    """The day's inputs: read from the pickle whose input hash matches, else built.
+
+    The key is taken again after a build, because the first build freezes the
+    prev-close file; older pickles of the day are removed.
+    """
+    if events_dir is None or prev_close_dir is None:
+        from replay_parity import EVENTS, PREV_CLOSE  # noqa: PLC0415
+
+        events_dir = events_dir or EVENTS
+        prev_close_dir = prev_close_dir or PREV_CLOSE
+    path = cache_dir / f"{day}-{_input_key(day, events_dir, prev_close_dir)}.pkl"
     if path.exists():
         with path.open("rb") as fh:
             return pickle.load(fh)  # noqa: S301 -- our own cache file
     data = _build_day(day)
+    path = cache_dir / f"{day}-{_input_key(day, events_dir, prev_close_dir)}.pkl"
     cache_dir.mkdir(parents=True, exist_ok=True)
     tmp = cache_dir / f".{path.name}.{uuid.uuid4().hex}.tmp"
     tmp.write_bytes(pickle.dumps(data, protocol=pickle.HIGHEST_PROTOCOL))
     os.replace(tmp, path)
+    for old in cache_dir.glob(f"{day}-*.pkl"):
+        if old != path:
+            old.unlink(missing_ok=True)
     return data
 
 
@@ -72,11 +119,13 @@ def day_net(
     stocks: dict[str, StockInfo],
     dart: Path,
     work_root: Path,
+    keep_run_dir: bool = False,
 ) -> dict:
     """Net P&L of `policy` on one day (costs included, leftovers at the last regular close).
 
     `errors` counts error logs during the replay; `net` is reported as computed
-    either way, so the caller decides whether an errored day counts.
+    either way, so the caller decides whether an errored day counts. The run
+    directory is removed afterwards unless `keep_run_dir` (thousands of trials).
     """
     broker = SimBroker(
         data.bars,
@@ -95,6 +144,8 @@ def day_net(
         work_root,
         dart,
     )
+    if not keep_run_dir and res.run_dir is not None:
+        shutil.rmtree(res.run_dir, ignore_errors=True)
     pnl = trade_pnl(res.fills, res.positions, last_regular_close(data.bars))
     nets = [r["net"] for r in pnl]
     return {

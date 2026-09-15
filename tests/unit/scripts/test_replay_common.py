@@ -113,17 +113,62 @@ def test_day_net_differs_by_policy_and_is_deterministic(tmp_path: Path) -> None:
     assert s["worst_trade"] == s["net"] and s["losers"] == 1
 
 
-def test_load_day_builds_once_then_reads_the_pickle(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+def _cache_env(tmp: Path, monkeypatch, rows: list[int] | None = None):  # noqa: ANN001, ANN202
+    """Fake builder + input files under `tmp`; returns (calls, events_dir, prev_dir, cache)."""
     calls: list[dt.date] = []
     data = _data()
+    events_dir, prev_dir, cache = tmp / "events", tmp / "prev", tmp / "cache"
+    events_dir.mkdir()
+    prev_dir.mkdir()
+    (events_dir / f"{DAY}.jsonl").write_text('{"a": 1}\n')
+    counts = rows if rows is not None else [100]
 
     def fake_build(day: dt.date) -> DayData:
         calls.append(day)
+        # The first build freezes the prev-close file, as prepare_day does.
+        (prev_dir / f"{day}.json").write_text('{"closes": 1}')
         return data
 
     monkeypatch.setattr(replay_common, "_build_day", fake_build)
-    first = load_day(DAY, cache_dir=tmp_path)
-    second = load_day(DAY, cache_dir=tmp_path)
+    monkeypatch.setattr(replay_common, "_bars_row_count", lambda _day, _events: counts[0])
+    return calls, events_dir, prev_dir, cache
+
+
+def test_load_day_builds_once_then_reads_the_pickle(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    calls, events_dir, prev_dir, cache = _cache_env(tmp_path, monkeypatch)
+    kw = {"cache_dir": cache, "events_dir": events_dir, "prev_close_dir": prev_dir}
+    first = load_day(DAY, **kw)
+    second = load_day(DAY, **kw)
     assert calls == [DAY]
-    assert second == first
-    assert pickle.loads((tmp_path / f"{DAY}.pkl").read_bytes()) == data
+    assert second == first == _data()
+    (pkl,) = cache.glob(f"{DAY}-*.pkl")
+    assert pickle.loads(pkl.read_bytes()) == _data()
+
+
+def test_load_day_cache_misses_when_an_input_changes(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    rows = [100]
+    calls, events_dir, prev_dir, cache = _cache_env(tmp_path, monkeypatch, rows)
+    kw = {"cache_dir": cache, "events_dir": events_dir, "prev_close_dir": prev_dir}
+    load_day(DAY, **kw)
+    load_day(DAY, **kw)
+    assert len(calls) == 1
+
+    (events_dir / f"{DAY}.jsonl").write_text('{"a": 2}\n')  # events re-exported
+    load_day(DAY, **kw)
+    assert len(calls) == 2
+
+    (prev_dir / f"{DAY}.json").write_text('{"closes": 2}')  # prev closes re-frozen
+    load_day(DAY, **kw)
+    assert len(calls) == 3
+
+    rows[0] = 101  # kr_quant gained a bar
+    load_day(DAY, **kw)
+    assert len(calls) == 4
+    load_day(DAY, **kw)
+    assert len(calls) == 4
+
+
+def test_day_net_removes_its_run_dir(tmp_path: Path) -> None:
+    work = tmp_path / "work"
+    day_net(_data(), NewsPolicy(limits=BASE), STOCKS, _dart(tmp_path), work)
+    assert not list(work.glob(f"{DAY}-*"))
