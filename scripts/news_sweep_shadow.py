@@ -278,6 +278,11 @@ def build_article(item: dict, detail: dict[str, Any] | None) -> NewsArticle:
     for code in codes:
         with contextlib.suppress(ValueError):
             tickers.append(Ticker(value=str(code)))
+    # Sorted ascending by code (not API order): C3's `related_codes` sorts an
+    # article's codes too (`tuple(sorted(codes))`), so `judge_queue`'s model
+    # of "an article's pairs judged one at a time, in order" refers to the
+    # same order on both sides (A-plan fix follow-up).
+    tickers.sort(key=lambda t: t.value)
     # Mirrors `toss_news_client.map_toss_article_to_domain`, so the judged body
     # (`summary or content`) is summary, else content[:500], else title.
     text = item.get("contentText") or ""

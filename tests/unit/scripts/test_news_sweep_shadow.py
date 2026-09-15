@@ -205,9 +205,13 @@ ITEM = {
 
 
 def test_build_article_uses_live_key_and_detail_company_codes() -> None:
+    # companyCodes arrives in Toss API order; tickers come out sorted ascending
+    # by code so C3's `related_codes` (`tuple(sorted(codes))`) judges an
+    # article's pairs in the same order the live runner does (judge_queue's
+    # "an article's pairs judged one at a time, in order" refers to one order).
     article = shadow.build_article(ITEM, {"companyCodes": ["005930", "000660"]})
     assert str(article.id) == live_article_id("yna_AKR1")
-    assert [t.value for t in article.tickers] == ["005930", "000660"]
+    assert [t.value for t in article.tickers] == ["000660", "005930"]
     assert article.published_at == at(8, 31, 2)
     assert article.category == ""
     assert article.summary == "요약"
@@ -723,10 +727,16 @@ async def test_judged_order_matches_judge_queue_model(
     article's known pairs, one at a time, before the worker asks for the next
     article -- exactly the batching `judge_queue` (application/news/universe.py)
     assumes ("an article's pairs are all enqueued together ... and judged in
-    that order"). This asserts that resulting *order*.
+    that order"). `companyCodes` arrives in Toss API order (005930 before
+    000660 here), but `build_article` sorts tickers ascending by code, the
+    same order C3's `related_codes` uses (`tuple(sorted(codes))`) -- without
+    that, C3 and the live runner would judge_queue two different orderings of
+    the same article's pairs. This asserts the resulting per-pair order *and*
+    that it lines up index-for-index with `judge_queue`'s per-pair finish
+    times.
 
-    It does not assert the archived `judged_at` timestamps equal
-    `judge_queue`'s finish times: those come from `dt.datetime.now(KST)` inside
+    It does not assert the archived `judged_at` timestamps equal those finish
+    times: `judged_at` comes from `dt.datetime.now(KST)` inside
     `judgment_record` (application/news/judging.py), a real wall-clock call
     the runner's injectable `self.now` does not reach (`self.now` only drives
     scheduling/HTTP timing here), so a fixed virtual per-pair delay can't be
@@ -743,6 +753,7 @@ async def test_judged_order_matches_judge_queue_model(
         if "/companies/" in request.url.path:
             return httpx.Response(200, json={"result": {"body": [first, second]}})
         news_id = request.url.path.rsplit("/", 1)[-1]
+        # API order is 005930 first; build_article must still judge 000660 first.
         kr = {"id": news_id, "companyCodes": ["005930", "000660"]}
         return httpx.Response(200, json={"result": {"kr": kr}})
 
@@ -753,15 +764,27 @@ async def test_judged_order_matches_judge_queue_model(
     rows = _rows(tmp_path / "news_judgments_universe" / f"{DAY}.jsonl")
     got = [(r["article_id"], r["ticker"]) for r in rows]
     aid1, aid2 = live_article_id("burst_1"), live_article_id("burst_2")
-    # burst_1's two pairs are contiguous (discovered/queued first), then burst_2's.
-    assert got == [(aid1, "005930"), (aid1, "000660"), (aid2, "005930"), (aid2, "000660")]
+    # burst_1's two pairs are contiguous (discovered/queued first) and code-sorted
+    # (000660 before 005930, not API order), then burst_2's, same way.
+    assert got == [(aid1, "000660"), (aid1, "005930"), (aid2, "000660"), (aid2, "005930")]
 
-    # judge_queue, given the same discovery order and pair counts, agrees: it
-    # never interleaves an article's pairs with another's, so the finish-time
-    # order it assigns matches the archive's judged order article-for-article.
-    finishes = judge_queue(
-        [(aid1, at(10, 0), 2), (aid2, at(10, 0, 1), 2)], per_pair=dt.timedelta(seconds=3)
-    )
-    ordered_articles = list(finishes)
-    assert ordered_articles == [aid1, aid2]
-    assert [len(finishes[a]) for a in ordered_articles] == [2, 2]
+    # judge_queue, given the same discovery order and pair counts, agrees on
+    # both the article order and each article's per-pair finish times; zipped
+    # against `got`'s per-article pair sequence, pair k of an article (its
+    # k-th code ascending) gets judge_queue's k-th finish time for it.
+    per_pair = dt.timedelta(seconds=3)
+    discovered = {aid1: at(10, 0), aid2: at(10, 0, 1)}
+    finishes = judge_queue([(aid1, discovered[aid1], 2), (aid2, discovered[aid2], 2)], per_pair)
+    assert list(finishes) == [aid1, aid2]  # article order unchanged
+    assert finishes[aid1] == [at(10, 0) + per_pair, at(10, 0) + 2 * per_pair]
+    # aid2 queues behind aid1 (discovered before aid1's worker is free) -> its
+    # finishes carry aid1's backlog forward instead of starting from its own
+    # discovery time.
+    assert finishes[aid2] == [at(10, 0) + 3 * per_pair, at(10, 0) + 4 * per_pair]
+
+    by_article: dict[str, list[str]] = {}
+    for aid, ticker in got:
+        by_article.setdefault(aid, []).append(ticker)
+    for aid in (aid1, aid2):
+        assert by_article[aid] == sorted(by_article[aid]) == ["000660", "005930"]
+        assert len(by_article[aid]) == len(finishes[aid]) == 2
