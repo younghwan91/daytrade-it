@@ -38,7 +38,12 @@ from urllib.parse import unquote, urlparse
 import psycopg2
 from krx_quant_core.market.ticks import tick_size
 
-from daytrade_it.application.replay.day_replay import DayConfig, ReplayDataError, replay_day
+from daytrade_it.application.replay.day_replay import (
+    MAX_MISSING_BARS,
+    DayConfig,
+    ReplayDataError,
+    replay_day,
+)
 from daytrade_it.application.replay.events import load_events
 from daytrade_it.application.replay.prev_close import (
     FrozenPrevCloseDB,
@@ -900,6 +905,20 @@ def exit_divergences(
     return out
 
 
+def check_prev_close_coverage(frozen: FrozenPrevCloses) -> None:
+    """Fail the day if > 5% of event tickers have no prior-session regular bar.
+
+    Without it the no-chase filter finds no prior close and silently drops the
+    pair, so the replay would trade a different universe than live did.
+    """
+    n = len(frozen.closes) + len(frozen.missing)
+    if n and len(frozen.missing) / n > MAX_MISSING_BARS:
+        raise ReplayDataError(
+            f"{len(frozen.missing)}/{n} event tickers have no prior-session regular minute "
+            f"bar for a frozen prev close (> {MAX_MISSING_BARS:.0%}): {frozen.missing}"
+        )
+
+
 def prepare_day(
     day: dt.date, events: list
 ) -> tuple[dict[str, list[MinuteBar]], FrozenPrevCloses, SimBroker, dt.datetime]:
@@ -914,6 +933,7 @@ def prepare_day(
     )
     for f in frozen.flags:
         print(f"    PREV_CLOSE_FLAG {f}")
+    check_prev_close_coverage(frozen)
     broker = SimBroker(bars, frozen.prices, lambda: dt.datetime.now(KST))
     stale_before = dt.datetime.combine(frozen.prev_session, dt.time(15, 20), tzinfo=KST)
     return bars, frozen, broker, stale_before

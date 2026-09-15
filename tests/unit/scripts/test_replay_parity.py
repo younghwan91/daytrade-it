@@ -587,3 +587,18 @@ def test_sell_fill_over_half_percent_is_intra_minute_only_if_live_bid_is_off_the
     live, sim = _exit_ledgers("10700", "10700", "09:30:00", "09:30:00", "10990")
     rows = exit_divergences(live, sim, far, {"A": _flat(11000)}, TradingLimits())
     assert [(r["kind"], r["cls"]) for r in rows] == [("sell_fill", "other")]
+
+
+def test_day_fails_when_over_5pct_of_event_tickers_lack_a_frozen_prev_close() -> None:
+    import pytest  # noqa: PLC0415
+    from replay_parity import check_prev_close_coverage  # noqa: PLC0415
+
+    from daytrade_it.application.replay.day_replay import ReplayDataError  # noqa: PLC0415
+    from daytrade_it.application.replay.prev_close import FrozenPrevCloses  # noqa: PLC0415
+
+    closes = {f"{i:06d}": (Decimal(1000), dt.date(2026, 9, 14)) for i in range(20)}
+    check_prev_close_coverage(FrozenPrevCloses(day=DAY, closes=closes, missing=["999999"]))
+    with pytest.raises(ReplayDataError, match="999998"):
+        check_prev_close_coverage(
+            FrozenPrevCloses(day=DAY, closes=closes, missing=["999998", "999999"])
+        )
