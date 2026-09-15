@@ -160,3 +160,8 @@ exclude_lines = [
     "raise NotImplementedError",
     "if TYPE_CHECKING:",
 ]
+
+[dependency-groups]
+dev = [
+    "time-machine>=3.5.1",
+]

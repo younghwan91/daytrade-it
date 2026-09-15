@@ -49,7 +49,7 @@ import httpx
 from kiwoom_client import KiwoomAPI
 from sqlalchemy import select
 
-from daytrade_it.application.signals.entry_filter import generate_no_chase_confirmation
+from daytrade_it.application.signals.news_entry import build_entry_candidate, tradable_tickers
 from daytrade_it.application.trading.auto_trader import AutoTrader, rank_batch
 from daytrade_it.domain.entities.news import NewsArticle
 from daytrade_it.domain.services.signal_generator import SignalConfig, SignalGenerator
@@ -57,7 +57,6 @@ from daytrade_it.domain.value_objects import Ticker
 from daytrade_it.infrastructure.brokers.base import KST, BrokerInterface
 from daytrade_it.infrastructure.brokers.kiwoom_broker import KiwoomBroker
 from daytrade_it.infrastructure.external.anthropic_client import (
-    PROMPT_VERSION,
     AnthropicClient,
     ArticleFeatures,
 )
@@ -225,44 +224,16 @@ async def process_pair(
             "v4_shadow": {**asdict(shadow), "score": shadow.score()} if shadow else None,
         },
     )
-    # Entries are BUY-only: KRX retail can't short, and no SELL-side rule
-    # was evaluated (dev had n=6 bearish main-subject pairs).
-    if not sentiment.is_bullish:
-        return
-
-    news_signal = gen.generate_from_news(
-        article.model_copy(update={"tickers": [ticker]}), sentiment
-    )
-    if news_signal is None:
-        return
-
     try:
-        entry_signal = generate_no_chase_confirmation(ticker, broker, db_client, expires_at)
+        candidate = build_entry_candidate(
+            article, ticker, features, broker, db_client, gen, expires_at
+        )
     except Exception:
         logger.exception("news_signal_poller: entry filter failed", ticker=ticker.value)
         return
-    if entry_signal is None:
+    if candidate is None:
         return
-
-    composite = gen.combine_signals([news_signal, entry_signal])
-    if composite is None:
-        return
-    composite = composite.model_copy(
-        update={
-            "news_article_id": article.id,
-            "expires_at": expires_at,
-            "metadata": {
-                **composite.metadata,
-                "prompt_version": PROMPT_VERSION,
-                "article_title": article.title[:200],
-                "subject": features.subject,
-                "material_type": features.material_type,
-                "surprise": features.surprise,
-                "news_score": sentiment.score,
-                "pre_entry_move": entry_signal.metadata["pre_entry_move"],
-            },
-        }
-    )
+    composite = candidate.signal
 
     try:
         async with UnitOfWork(db) as uow:
@@ -279,14 +250,14 @@ async def process_pair(
         name=stock.name,
         direction=composite.direction.value,
         news_score=round(sentiment.score, 3),
-        pre_entry_move=entry_signal.metadata["pre_entry_move"],
+        pre_entry_move=composite.metadata["pre_entry_move"],
         article_title=article.title,
     )
 
     if trader is not None:
         if pending is not None:
             # Entered after the whole poll is judged, in rank_batch order.
-            pending.append((saved, int(features.surprise), float(sentiment.score)))
+            pending.append((saved, candidate.surprise, candidate.score))
             return
         try:
             await trader.enter(saved)
@@ -314,14 +285,7 @@ async def process_article(
     expires_at: dt.datetime,
     **deps: object,
 ) -> None:
-    # Published before the previous session closed: that session already
-    # had the chance to trade it, and the eval never measured such articles
-    # (every labeled pair traded on its first session after publication).
-    if article.published_at < stale_before:
-        return
-    if dt.datetime.now(KST) >= expires_at:
-        return
-    known = [(t, stocks[t.value]) for t in article.tickers if t.value in stocks]
+    known = tradable_tickers(article, stocks, stale_before, expires_at, dt.datetime.now(KST))
     if not known:
         return
 
