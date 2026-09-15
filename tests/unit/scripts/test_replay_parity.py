@@ -11,9 +11,11 @@ from replay_parity import (  # noqa: E402
     divergences,
     live_decisions,
     match_decisions,
+    match_summary,
     reproducible_from_open,
 )
 
+from daytrade_it.application.trading.auto_trader import TradingLimits
 from daytrade_it.infrastructure.brokers.base import KST, MinuteBar
 
 DAY = dt.date(2026, 9, 15)
@@ -83,50 +85,6 @@ def test_reproducible_from_open_rounds_implied_price_to_tick() -> None:
     assert not reproducible_from_open(Decimal(71000), Decimal(70800))
 
 
-def test_divergences_classify_price_not_reproducible_from_open_as_intra_minute() -> None:
-    at = dt.datetime(2026, 9, 15, 9, 1, 42, tzinfo=KST)
-    live = [
-        {"ticker": "A", "at": at, "outcome": "extended", "pre_entry_move": "0.03"},
-        {"ticker": "B", "at": at, "outcome": "extended", "pre_entry_move": "0.03"},
-        {"ticker": "C", "at": at, "outcome": "no_signal"},
-    ]
-    sim = [
-        {"ticker": "A", "decide_at": at, "outcome": "entered", "limit": "10200"},
-        {"ticker": "B", "decide_at": at, "outcome": "entered", "limit": "10300"},
-        {"ticker": "C", "decide_at": at, "outcome": "extended", "pre_entry_move": "0.05"},
-    ]
-    bars = {"A": [_bar("09:01", 10200)], "B": [_bar("09:01", 10300)], "C": [_bar("09:01", 10500)]}
-    prev = {"A": Decimal(10000), "B": Decimal(10000), "C": Decimal(10000)}
-    rows = divergences(list(zip(sim, live, strict=True)), [], [], [], bars, prev)
-    got = {(r["ticker"], r["cls"]) for r in rows}
-    # A: live 10300 vs open 10200 -> intra; B: live 10300 == open -> other; C: no live price.
-    assert got == {("A", "intra_minute_price"), ("B", "other"), ("C", "other")}
-
-
-def test_divergences_add_on_and_exit_follow_entry_price_reproducibility() -> None:
-    live_ledger = [
-        {
-            "event": "entry_submitted",
-            "ticker": "A",
-            "limit": "74900",
-            "ts": "2026-09-15T09:01:58+09:00",
-        },
-        {"event": "exit_submitted", "ticker": "A", "quantity": 1, "attempt": 0},
-    ]
-    sim_ledger = [
-        {"event": "entry_submitted", "ticker": "A", "limit": "74800"},
-        {"event": "add_on_submitted", "ticker": "A", "limit": "75600"},
-        {"event": "exit_submitted", "ticker": "A", "quantity": 2, "attempt": 0},
-    ]
-    fills = [{"ticker": "A", "side": "buy", "price": Decimal(74800)}]
-    bars = {"A": [_bar("09:01", 74800)]}
-    rows = divergences([], live_ledger, sim_ledger, fills, bars, {"A": Decimal(74600)})
-    assert {(r["kind"], r["cls"]) for r in rows} == {
-        ("add_on", "intra_minute_price"),
-        ("exit_qty", "intra_minute_price"),
-    }
-
-
 def test_divergences_fill_over_half_percent_with_baseline_rows_in_ledger() -> None:
     live_ledger = [
         {"event": "baseline", "positions": {}},
@@ -155,35 +113,6 @@ def test_live_decisions_merge_duplicate_daemon_judgments_of_same_article() -> No
     ]
     got = live_decisions(rows, DAY, exclude_orders={"2"})
     assert [d["outcome"] for d in got] == ["entered", "no_signal"]
-
-
-def test_divergence_from_prev_close_vintage_is_data_vintage() -> None:
-    """Live move +2.080% fits price 331250 over prev 324500 only."""
-    at = dt.datetime(2026, 9, 15, 9, 0, 35, tzinfo=KST)
-    live = {
-        "ticker": "A",
-        "at": at,
-        "outcome": "extended",
-        "pre_entry_move": "0.02080123266563944530046224961",
-    }
-    sim = {"ticker": "A", "decide_at": at, "outcome": "no_signal"}
-    # live: prev 324500 -> price 331250 (2.08%); kr_quant prev 321500, sim open 331250.
-    rows = divergences(
-        [(sim, live)], [], [], [], {"A": [_bar("09:00", 331250)]}, {"A": Decimal(321500)}
-    )
-    assert [r["cls"] for r in rows] == ["data_vintage"]
-    assert "live prev 324500 vs kr_quant 321500" in rows[0]["note"]
-
-
-def test_prev_close_within_a_tenth_of_a_percent_is_not_data_vintage() -> None:
-    """Live prev 100000 vs kr_quant 100050 (0.05%): same close, price decides the class."""
-    at = dt.datetime(2026, 9, 15, 9, 0, 35, tzinfo=KST)
-    live = {"ticker": "A", "at": at, "outcome": "extended", "pre_entry_move": "0.031"}
-    sim = {"ticker": "A", "decide_at": at, "outcome": "no_signal"}
-    rows = divergences(
-        [(sim, live)], [], [], [], {"A": [_bar("09:00", 102000)]}, {"A": Decimal(100050)}
-    )
-    assert [r["cls"] for r in rows] == ["intra_minute_price"]
 
 
 def test_divergence_with_no_bar_yet_is_intra_minute() -> None:
@@ -229,3 +158,178 @@ def test_no_bar_takes_precedence_over_prev_close_vintage() -> None:
         [(sim, live)], [], [], [], {"A": [_bar("09:02", 3515)]}, {"A": Decimal(2900)}
     )
     assert [r["cls"] for r in rows] == ["intra_minute_price"]
+
+
+AT = dt.datetime(2026, 9, 15, 9, 1, 42, tzinfo=KST)
+
+
+def _pair(t: str, live_outcome: str, sim_outcome: str, move: str | None, at: dt.datetime = AT):
+    live = {"ticker": t, "at": at, "outcome": live_outcome}
+    if move is not None:
+        live["pre_entry_move"] = move
+    if live_outcome == "skipped":
+        live["reason"] = "concurrent position cap reached"
+    sim = {"ticker": t, "decide_at": at, "outcome": sim_outcome}
+    if sim_outcome == "skipped":
+        sim["reason"] = "concurrent position cap reached"
+    return sim, live
+
+
+def test_filter_divergence_is_intra_minute_only_when_prices_straddle_the_cap() -> None:
+    # A: live 10400 (+4%) extended, sim quote 10200 (+2%) entered -> crosses the 3% cap.
+    # B: live 10500 (+5%) extended, sim quote 10450 (+4.5%) entered -> no crossing explains it.
+    bars = {"A": [_bar("09:01", 10200)], "B": [_bar("09:01", 10450)]}
+    prev = {"A": Decimal(10000), "B": Decimal(10000)}
+    pairs = [_pair("A", "extended", "entered", "0.04"), _pair("B", "extended", "entered", "0.05")]
+    rows = divergences(pairs, [], [], [], bars, prev, max_move=Decimal("0.03"))
+    assert {(r["ticker"], r["cls"]) for r in rows} == {("A", "intra_minute_price"), ("B", "other")}
+    assert "+2.00%" in rows[0]["note"] and "+4.00%" in rows[0]["note"]
+
+
+def test_pre_entry_move_without_tick_grid_solution_is_other() -> None:
+    pairs = [_pair("A", "extended", "entered", "0.0412345678901")]
+    rows = divergences(
+        pairs,
+        [],
+        [],
+        [],
+        {"A": [_bar("09:01", 10200)]},
+        {"A": Decimal(10000)},
+        max_move=Decimal("0.03"),
+    )
+    assert [(r["cls"], r["note"]) for r in rows] == [
+        ("other", "pre_entry_move has no tick-grid solution")
+    ]
+
+
+def test_divergence_from_prev_close_vintage_is_data_vintage() -> None:
+    """+2.08% over live prev 324500 passed; +3.03% over kr_quant 321500."""
+    pairs = [_pair("A", "skipped", "extended", "0.02080123266563944530046224961")]
+    rows = divergences(
+        pairs,
+        [],
+        [],
+        [],
+        {"A": [_bar("09:01", 331250)]},
+        {"A": Decimal(321500)},
+        max_move=Decimal("0.03"),
+    )
+    assert [r["cls"] for r in rows] == ["data_vintage"]
+    assert "live prev 324500" in rows[0]["note"]
+
+
+def test_prev_close_within_a_tenth_of_a_percent_is_not_data_vintage() -> None:
+    """Live prev 100000 vs kr_quant 100050 (0.05%): the price crossing decides."""
+    pairs = [_pair("A", "extended", "entered", "0.031")]
+    rows = divergences(
+        pairs,
+        [],
+        [],
+        [],
+        {"A": [_bar("09:01", 102000)]},
+        {"A": Decimal(100050)},
+        max_move=Decimal("0.03"),
+    )
+    assert [r["cls"] for r in rows] == ["intra_minute_price"]
+
+
+def test_slot_divergence_is_knock_on_only_after_an_earlier_passing_divergence() -> None:
+    """Root X entered in replay (intra), so follow-on Y hit the cap there."""
+    early = AT - dt.timedelta(seconds=8)
+    bars = {"X": [_bar("09:01", 10200)], "Y": [_bar("09:01", 6850)]}
+    prev = {"X": Decimal(10000), "Y": Decimal(7040)}
+    root = _pair("X", "extended", "entered", "0.04", at=early)
+    follow = _pair("Y", "entered", "skipped", None)
+    rows = divergences([root, follow], [], [], [], bars, prev, max_move=Decimal("0.03"))
+    assert [(r["ticker"], r["cls"]) for r in rows] == [
+        ("X", "intra_minute_price"),
+        ("Y", "knock_on"),
+    ]
+    assert "X" in rows[1]["note"]
+    alone = divergences([follow], [], [], [], bars, prev, max_move=Decimal("0.03"))
+    assert [r["cls"] for r in alone] == ["other"]
+
+
+def test_unmatched_live_judgment_is_other_divergence() -> None:
+    live = {"ticker": "Z", "at": AT, "outcome": "extended", "pre_entry_move": "0.05"}
+    rows = divergences([], [], [], [], {}, {}, unmatched_live=[live])
+    assert [(r["kind"], r["ticker"], r["cls"]) for r in rows] == [("decision", "Z", "other")]
+
+
+def _rising(last_close: int) -> list[MinuteBar]:
+    out, t = [], dt.datetime(2026, 9, 15, 9, 0)
+    for i in range(30):
+        c = Decimal(74000 + (last_close - 74000) * i // 29)
+        out.append(MinuteBar(ts=t, open=c, high=c, low=c, close=c, volume=100))
+        t += dt.timedelta(minutes=1)
+    return out
+
+
+def _add_on_ledgers() -> tuple[list[dict], list[dict], list[dict]]:
+    live = [
+        {
+            "event": "entry_submitted",
+            "ticker": "A",
+            "limit": "74900",
+            "ts": "2026-09-15T09:01:58+09:00",
+        },
+        {"event": "exit_submitted", "ticker": "A", "quantity": 1, "attempt": 0},
+    ]
+    sim = [
+        {
+            "event": "entry_submitted",
+            "ticker": "A",
+            "limit": "74800",
+            "ts": "2026-09-15T09:01:51+09:00",
+        },
+        {
+            "event": "add_on_submitted",
+            "ticker": "A",
+            "limit": "75600",
+            "ts": "2026-09-15T09:30:00+09:00",
+        },
+        {"event": "exit_submitted", "ticker": "A", "quantity": 2, "attempt": 0},
+    ]
+    fills = [{"ticker": "A", "side": "buy", "price": Decimal(74800)}]
+    return live, sim, fills
+
+
+def test_add_on_divergence_is_intra_minute_when_entry_limit_flips_the_trigger() -> None:
+    """close 75600 is +1.07% over 74800 but +0.93% over 74900."""
+    live, sim, fills = _add_on_ledgers()
+    rows = divergences(
+        [],
+        live,
+        sim,
+        fills,
+        {"A": _rising(75600)},
+        {"A": Decimal(74600)},
+        limits=TradingLimits(),
+    )
+    assert {(r["kind"], r["cls"]) for r in rows} == {
+        ("add_on", "intra_minute_price"),
+        ("exit_qty", "intra_minute_price"),
+    }
+
+
+def test_add_on_divergence_without_trigger_flip_is_other() -> None:
+    live, sim, fills = _add_on_ledgers()
+    rows = divergences(
+        [],
+        live,
+        sim,
+        fills,
+        {"A": _rising(76500)},
+        {"A": Decimal(74600)},
+        limits=TradingLimits(),
+    )
+    assert {(r["kind"], r["cls"]) for r in rows} == {("add_on", "other"), ("exit_qty", "other")}
+
+
+def test_match_summary_counts_and_returns_unused_live_judgments() -> None:
+    live = live_decisions(ROWS, DAY, exclude_orders=set())
+    sim = [{"ticker": "000002", "decide_at": dt.datetime(2026, 9, 15, 9, 1, 41, tzinfo=KST)}]
+    pairs = match_decisions(sim, live, within=dt.timedelta(seconds=5))
+    unused, counts = match_summary(pairs, live)
+    assert [d["ticker"] for d in unused] == ["000001", "000003", "000004"]
+    assert counts == {"live": 4, "replay": 1, "matched": 1, "union": 4}
