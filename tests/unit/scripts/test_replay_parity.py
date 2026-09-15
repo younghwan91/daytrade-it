@@ -141,3 +141,47 @@ def test_divergences_fill_over_half_percent_with_baseline_rows_in_ledger() -> No
     fills = [{"ticker": "A", "side": "buy", "price": Decimal(11120)}]
     rows = divergences([], live_ledger, sim_ledger, fills, {"A": [_bar("09:00", 11120)]}, {})
     assert [(r["kind"], r["cls"]) for r in rows] == [("fill", "intra_minute_price")]
+
+
+def test_live_decisions_merge_duplicate_daemon_judgments_of_same_article() -> None:
+    rows = [
+        _row("09:00:35", "news_signal_poller: judged", ticker="000921", title="x"),
+        _row("09:00:36", "news_signal_poller: judged", ticker="000921", title="x"),
+        _row("09:00:36", "news_signal_poller: ACTIONABLE SIGNAL PERSISTED", ticker="000921"),
+        _row("09:00:38", "news_signal_poller: ACTIONABLE SIGNAL PERSISTED", ticker="000921"),
+        _row("09:00:39", "news_signal_poller: judged", ticker="000921", title="other article"),
+        _row("09:01:55", "auto_trader: ENTRY SUBMITTED", ticker="000921", order_id="1", limit="1"),
+        _row("09:01:56", "auto_trader: ENTRY SUBMITTED", ticker="000921", order_id="2", limit="1"),
+    ]
+    got = live_decisions(rows, DAY, exclude_orders={"2"})
+    assert [d["outcome"] for d in got] == ["entered", "no_signal"]
+
+
+def test_divergence_from_prev_close_vintage_is_other() -> None:
+    """Live move +2.080% fits price 331250 over prev 324500 only."""
+    at = dt.datetime(2026, 9, 15, 9, 0, 35, tzinfo=KST)
+    live = {
+        "ticker": "A",
+        "at": at,
+        "outcome": "extended",
+        "pre_entry_move": "0.02080123266563944530046224961",
+    }
+    sim = {"ticker": "A", "decide_at": at, "outcome": "no_signal"}
+    # live: prev 324500 -> price 331250 (2.08%); kr_quant prev 321500, sim open 331250.
+    rows = divergences(
+        [(sim, live)], [], [], [], {"A": [_bar("09:00", 331250)]}, {"A": Decimal(321500)}
+    )
+    assert [r["cls"] for r in rows] == ["other"]
+    assert "prev_close_vintage" in rows[0]["note"]
+
+
+def test_divergence_with_no_bar_yet_is_intra_minute() -> None:
+    """Call auction (e.g. VI at the open): live had a quote, minute bars start later."""
+    at = dt.datetime(2026, 9, 15, 9, 1, 35, tzinfo=KST)
+    live = {"ticker": "A", "at": at, "outcome": "extended", "pre_entry_move": "0.1"}
+    sim = {"ticker": "A", "decide_at": at, "outcome": "no_signal"}
+    rows = divergences(
+        [(sim, live)], [], [], [], {"A": [_bar("09:02", 11000)]}, {"A": Decimal(10000)}
+    )
+    assert [r["cls"] for r in rows] == ["intra_minute_price"]
+    assert "no bar" in rows[0]["note"]

@@ -164,17 +164,20 @@ def _kst(ts: str) -> dt.datetime:
 def live_decisions(rows: list[dict], day: dt.date, exclude_orders: set[str]) -> list[dict]:
     """One row per live `judged` log line on `day`, with its outcome from later rows.
 
-    extended / persisted rows attach to the latest undecided judgment of that
-    ticker; ENTRY SUBMITTED / entry skipped rows to the earliest judgment of
-    that ticker still holding an unentered signal. Orders in
-    `exclude_orders` (the duplicate daemon's) are ignored.
+    extended / persisted rows attach, first in first out, to that ticker's
+    judgments of the last 10 s still awaiting a filter result; ENTRY SUBMITTED /
+    entry skipped rows to the earliest judgment of that ticker still holding an
+    unentered signal. A second judgment of the same (ticker, title) within 60 s
+    is the duplicate daemon's: it takes a filter row but makes no decision row.
+    Orders in `exclude_orders` (the duplicate daemon's) are ignored.
     """
     out: list[dict] = []
+    awaiting: dict[str, list[tuple[dt.datetime, dict | None]]] = {}
 
-    def latest(t: str, outcome: str) -> dict | None:
-        return next(
-            (d for d in reversed(out) if d["ticker"] == t and d["outcome"] == outcome), None
-        )
+    def take(t: str, ts: dt.datetime) -> dict | None:
+        q = [x for x in awaiting.get(t, []) if ts - x[0] <= dt.timedelta(seconds=10)]
+        awaiting[t] = q[1:]
+        return q[0][1] if q else None
 
     def earliest(t: str, outcome: str) -> dict | None:
         return next((d for d in out if d["ticker"] == t and d["outcome"] == outcome), None)
@@ -187,12 +190,25 @@ def live_decisions(rows: list[dict], day: dt.date, exclude_orders: set[str]) -> 
             continue
         ev, t = r["event"], r.get("ticker")
         if ev == "news_signal_poller: judged":
-            out.append({"ticker": t, "at": ts, "outcome": "no_signal"})
+            dup = any(
+                d["ticker"] == t
+                and d.get("title") == r.get("title")
+                and ts - d["at"] <= dt.timedelta(seconds=60)
+                for d in out
+            )
+            d = (
+                None
+                if dup
+                else {"ticker": t, "at": ts, "outcome": "no_signal", "title": r.get("title")}
+            )
+            if d is not None:
+                out.append(d)
+            awaiting.setdefault(t, []).append((ts, d))
         elif ev == "entry_filter: extended, no entry":
-            if (d := latest(t, "no_signal")) is not None:
+            if (d := take(t, ts)) is not None:
                 d.update(outcome="extended", pre_entry_move=r.get("pre_entry_move"))
         elif ev == "news_signal_poller: ACTIONABLE SIGNAL PERSISTED":
-            if (d := latest(t, "no_signal")) is not None:
+            if (d := take(t, ts)) is not None:
                 d.update(outcome="signal", pre_entry_move=r.get("pre_entry_move"))
         elif ev == "auto_trader: ENTRY SUBMITTED":
             if r.get("order_id") in exclude_orders:
@@ -239,21 +255,75 @@ def _outcome_key(d: dict) -> str:
     return f"skipped:{d.get('reason')}" if d["outcome"] == "skipped" else d["outcome"]
 
 
-def _open_at(bars: dict[str, list[MinuteBar]], t: str, at: dt.datetime) -> Decimal | None:
+def _sim_quote(bars: dict[str, list[MinuteBar]], t: str, at: dt.datetime) -> Decimal | None:
+    """The price SimBroker quotes at `at`: this minute's open, else the last close."""
     minute = at.astimezone(KST).replace(tzinfo=None, second=0, microsecond=0)
-    return next((b.open for b in bars.get(t, []) if b.ts == minute), None)
+    done = None
+    for b in bars.get(t, []):
+        if b.ts == minute:
+            return b.open
+        if b.ts < minute:
+            done = b.close
+    return done
+
+
+def _on_grid(price: Decimal) -> bool:
+    return price == _round_tick(price)
+
+
+def live_price_and_prev(
+    move: Decimal, near: Decimal, kr_prev: Decimal
+) -> tuple[Decimal, Decimal] | None:
+    """(live price, live prev close) consistent with a logged pre_entry_move.
+
+    Live used last price or bid/ask mid (half ticks allowed) against the prev
+    close kr_quant held that morning, which must be a valid tick price. Scans
+    half ticks within ±15% of `near`; prefers kr_quant's prev close if it fits.
+    """
+    hits = []
+    p = _round_tick(near * Decimal("0.85"))
+    hi = near * Decimal("1.15")
+    while p <= hi:
+        prev = p / (1 + move)
+        r = prev.quantize(Decimal(1), rounding=ROUND_HALF_UP)
+        if abs(prev - r) < Decimal("0.001") and _on_grid(r):
+            hits.append((p, r))
+        p += tick_size(p) / 2
+    if not hits:
+        return None
+    return min(hits, key=lambda h: (h[1] != kr_prev, abs(h[0] - near)))
 
 
 def _price_class(
     bars: dict[str, list[MinuteBar]], t: str, price: Decimal, at: dt.datetime, src: str
 ) -> tuple[str, str]:
-    o = _open_at(bars, t, at)
+    o = _sim_quote(bars, t, at)
     if o is None:
-        return "other", f"live {src} {price}: no bar at {at.time()}"
-    note = f"live {src} {price:.1f} @{at.strftime('%H:%M:%S')} vs open {o}"
-    if _round_tick(price) - price > Decimal("0.01") or price - _round_tick(price) > Decimal("0.01"):
-        note += " (implied price off tick grid: prev-close vintage?)"
+        return (
+            INTRA,
+            f"live {src} {price:.1f} @{at.strftime('%H:%M:%S')}: no bar yet (call auction/VI)",
+        )
+    note = f"live {src} {price:.1f} @{at.strftime('%H:%M:%S')} vs sim quote {o}"
     return (INTRA if not reproducible_from_open(price, o) else "other"), note
+
+
+def _move_class(
+    bars: dict[str, list[MinuteBar]], t: str, move: Decimal, at: dt.datetime, kr_prev: Decimal
+) -> tuple[str, str]:
+    o = _sim_quote(bars, t, at)
+    near = o if o is not None else kr_prev * (1 + move)
+    found = live_price_and_prev(move, near, kr_prev)
+    if found is None:
+        return _price_class(
+            bars, t, kr_prev * (1 + move), at, "pre_entry_move x kr prev (no grid fit)"
+        )
+    price, prev = found
+    if prev != kr_prev:
+        return "other", (
+            f"prev_close_vintage: live prev {prev} vs kr_quant {kr_prev}; "
+            f"live price {price} @{at.strftime('%H:%M:%S')} vs sim quote {o}"
+        )
+    return _price_class(bars, t, price, at, "price (pre_entry_move)")
 
 
 def divergences(
@@ -285,11 +355,14 @@ def divergences(
         if _outcome_key(sim) == _outcome_key(live):
             continue
         cls, note = "other", "no live price for this pair"
-        if live["outcome"] == "entered" and live.get("limit"):
+        if live.get("pre_entry_move") and t in prev_close:
+            cls, note = _move_class(
+                bars, t, Decimal(live["pre_entry_move"]), live["at"], prev_close[t]
+            )
+        if cls != "other" or note.startswith("prev_close_vintage"):
+            pass
+        elif live["outcome"] == "entered" and live.get("limit"):
             cls, note = _price_class(bars, t, Decimal(live["limit"]), live["entered_at"], "limit")
-        elif live.get("pre_entry_move") and t in prev_close:
-            price = prev_close[t] * (1 + Decimal(live["pre_entry_move"]))
-            cls, note = _price_class(bars, t, price, live["at"], "pre_entry_move x prev_close")
         out.append(
             {
                 "kind": "decision",
