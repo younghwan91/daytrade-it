@@ -1,11 +1,14 @@
 """Minute-bar broker for replaying a past session through the live trader.
 
 Fill rules are the spec's (docs/superpowers/specs/2026-09-15-bayes-pipeline-
-optimization-design.md): the quote at minute m is that bar's open (ask) with a
-one-tick spread; marketable limits fill at once at the quote; resting limits
-fill on a later bar that trades through them. Every public call first settles
-resting orders against bars that have *finished* before the current minute,
-and `get_minute_bars` hides the current minute -- nothing after "now" leaks.
+optimization-design.md), with one parity-gate correction: the quote at minute
+m is that bar's open (ask) with a one-tick spread before second 30 and its
+close from second 30 (live asks late in a minute matched the close).
+Marketable limits fill at once at the quote; resting limits fill on a later
+bar that trades through them. Every public call first settles resting orders
+against bars that have *finished* before the current minute, and
+`get_minute_bars` hides the current minute. The only look-ahead is the quote's
+use of the current bar's close, at most 30 s early.
 """
 
 from __future__ import annotations
@@ -142,7 +145,10 @@ class SimBroker(BrokerInterface):
         minute = self._minute()
         bar = self._bar_at(ticker, minute)
         if bar is not None:
-            price = bar.open
+            # Nearest bar boundary: the open for :00-:29, the close for :30-:59.
+            # Live asks late in a minute matched its close, not its open (see
+            # tests); this peeks at most 30 s into the current bar.
+            price = bar.open if self._clock().second < 30 else bar.close
             up, down = self._locked(ticker, bar)
         else:
             done = [b for b in self._bars.get(ticker, []) if b.ts < minute]

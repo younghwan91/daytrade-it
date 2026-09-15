@@ -69,6 +69,22 @@ def test_quote_uses_current_minute_open_one_tick_spread() -> None:
     assert (q.ask, q.bid, q.last_price) == (Decimal(1005), Decimal(1004), Decimal(1005))
 
 
+def test_quote_in_second_half_of_minute_uses_that_bars_close() -> None:
+    """Nearest bar boundary: live asks at hh:mm:4x-5x matched the minute's close.
+
+    Live ledgers 09-14/09-15: 000916 ask 71000 at 09:01:52 (09:01 bar o=70800
+    c=71000), 000270 123300 at 09:01:55 (o=123500 c=123300), 139480 74900 at
+    09:01:58 (o=74800 c=74900); 000952 7550 at 09:53:21 matched the open.
+    """
+    c = _Clock()
+    c.now = dt.datetime(2026, 9, 15, 9, 1, 40, tzinfo=KST)
+    b = _broker(c)
+    q = b.get_quote("000001")
+    assert (q.ask, q.bid, q.last_price) == (Decimal(1010), Decimal(1009), Decimal(1010))
+    r = b.place_order(_buy(1010))
+    assert r.filled_avg_price == Decimal(1010)
+
+
 def test_marketable_buy_fills_at_ask_and_updates_positions_and_cash() -> None:
     c = _Clock()
     b = _broker(c)
