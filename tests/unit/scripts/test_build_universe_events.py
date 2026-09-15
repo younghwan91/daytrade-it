@@ -23,7 +23,7 @@ from build_universe_events import (  # noqa: E402
     prepare_day,
 )
 
-from daytrade_it.application.news.universe import live_article_id, next_visit
+from daytrade_it.application.news.universe import live_article_id, simulate_sweep
 from daytrade_it.infrastructure.brokers.base import KST
 from daytrade_it.infrastructure.external.quant_airflow_db_client import StockInfo
 
@@ -105,12 +105,23 @@ def test_day_pairs_window_universe_and_visit_times(c1: Path) -> None:
     assert got == {("n1", "005930"), ("n2", "000660"), ("n3", "000660")}
     by = {p["news_id"]: p for p in pairs}
     start = dt.datetime(2026, 9, 15, 8, 0, tzinfo=KST)
-    # pre-open / prior-day articles are first seen on the sweep from 08:00
-    assert by["n1"]["visit_at"] == start
-    assert by["n3"]["visit_at"] == start + dt.timedelta(seconds=1)
-    assert by["n2"]["visit_at"] == next_visit(
-        "000660", universe, D, dt.datetime(2026, 9, 15, 10, 0, 0, 500000, tzinfo=KST)
+    sec = dt.timedelta(seconds=1)
+    # 08:00:00 page 005930 -> detail n1 08:00:01 (done 08:00:02); 08:00:02 page 000660 ->
+    # detail n3 08:00:03 (done 08:00:04); then pages alternate: 000660 on odd seconds
+    assert by["n1"]["discovered_at"] == start + 2 * sec
+    assert by["n3"]["discovered_at"] == start + 4 * sec
+    # n2 published 10:00:00.5 -> 000660 page 10:00:01, detail 10:00:02, done 10:00:03
+    assert by["n2"]["discovered_at"] == dt.datetime(2026, 9, 15, 10, 0, 3, tzinfo=KST)
+    found = simulate_sweep(
+        universe,
+        D,
+        {
+            "005930": [("n1", by["n1"]["published_at"])],
+            "000660": [("n2", by["n2"]["published_at"]), ("n3", by["n3"]["published_at"])],
+        },
+        stale_before=dt.datetime(2026, 9, 14, 15, 20, tzinfo=KST),
     )
+    assert {n: by[n]["discovered_at"] for n in found} == found
     assert by["n1"]["key"] == f"{live_article_id('n1')}|005930"
     assert by["n1"]["session"] == "pre_market"
     assert by["n2"]["session"] == "intraday"
@@ -132,7 +143,7 @@ def test_build_day_events_uses_cache_and_counts_excluded(c1: Path) -> None:
     assert excluded == len(pairs) - 1
     (e,) = events
     assert e.source == "universe"
-    assert e.decide_at == pairs[0]["visit_at"] + lag
+    assert e.decide_at == pairs[0]["discovered_at"] + lag
     assert e.batch_at == e.decide_at + dt.timedelta(seconds=1)
     assert e.features == FEATS
     assert e.article_id == live_article_id(pairs[0]["news_id"])
@@ -175,16 +186,16 @@ def test_parse_days_list_and_range() -> None:
     ]
 
 
-def test_all_pairs_of_an_article_share_the_first_related_visit(tmp_path: Path) -> None:
+def test_all_pairs_of_an_article_share_the_first_related_discovery(tmp_path: Path) -> None:
     root = tmp_path / "u"
     row = _row("multi", "2026-09-15T10:00:00.5")
-    _write_c1(root, "005930", [row])  # slot 0: even seconds -> own visit 10:00:02
-    _write_c1(root, "000660", [row])  # slot 1: odd seconds -> own visit 10:00:01
+    _write_c1(root, "005930", [row])  # pages on even seconds -> would see it 10:00:02
+    _write_c1(root, "000660", [row])  # pages on odd seconds -> sees it 10:00:01, detail 10:00:02
     universe = ["005930", "000660"]
     pairs = day_pairs(load_articles(root), D, PREV, universe)
     assert {p["code"] for p in pairs} == {"005930", "000660"}
-    first = dt.datetime(2026, 9, 15, 10, 0, 1, tzinfo=KST)
-    assert [p["visit_at"] for p in pairs] == [first, first]
+    first = dt.datetime(2026, 9, 15, 10, 0, 3, tzinfo=KST)
+    assert [p["discovered_at"] for p in pairs] == [first, first]
     events, _ = build_day_events(
         pairs, STOCKS, {p["key"]: [{"v2": FEATS}] for p in pairs}, dt.timedelta(seconds=3)
     )
@@ -358,3 +369,16 @@ def test_load_cache_keeps_every_row_per_key(tmp_path: Path) -> None:
         + "\n"
     )
     assert [r.get("input_hash") for r in load_cache(path)["a|1"]] == [None, "h"]
+
+
+def test_detail_calls_delay_later_codes_like_the_live_sweep(tmp_path: Path) -> None:
+    # F3: 25 overnight articles on the first code -> two pages and 25 detail calls
+    # before the second code's first page (a fixed 1-code-per-second plan would say 08:00:01).
+    root = tmp_path / "u"
+    _write_c1(root, "005930", [_row(f"b{i:02d}", f"2026-09-15T07:{i:02d}:00") for i in range(25)])
+    _write_c1(root, "000660", [_row("other", "2026-09-15T07:59:00")])
+    pairs = day_pairs(load_articles(root), D, PREV, ["005930", "000660"])
+    other = next(p for p in pairs if p["news_id"] == "other")
+    # page1 + 20 details + page2 + 5 details = 27 requests, then 000660 page at 08:00:27,
+    # detail 08:00:28, done 08:00:29
+    assert other["discovered_at"] == dt.datetime(2026, 9, 15, 8, 0, 29, tzinfo=KST)

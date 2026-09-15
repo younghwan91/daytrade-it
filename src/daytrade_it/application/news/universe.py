@@ -1,9 +1,11 @@
 """Pure library for the news universe pool: same pool for live and backtest.
 
 `docs/superpowers/plans/2026-09-16-news-universe-a-plan.md` (C2). Selects the
-sweep universe (previous day's traded value, top N), computes the
-deterministic time a code is next visited by the fixed-order/fixed-interval
-sweep (so a historical article's operational discovery time is computable),
+sweep universe (previous day's traded value, top N), defines the sweep's
+request order once (`SweepCursor`: fixed code order, paging, one detail call
+per new article, one interval per request) and replays it deterministically
+(`simulate_sweep`) so a historical article's operational discovery time is
+the one the live sweep would have had,
 reproduces the live daemon's article key (`TossNewsClient` /
 `toss_news_client.TOSS_NEWS_NAMESPACE`) so the dashboard feed and the
 sweep pool never double-judge the same article, and groups sweep rows into
@@ -15,8 +17,12 @@ plan doc). Everything here is deterministic so it can be replayed exactly.
 
 from __future__ import annotations
 
+import bisect
 import datetime as dt
 import hashlib
+from collections import deque
+from collections.abc import Sequence
+from dataclasses import dataclass
 from uuid import uuid5
 
 from krx_news_client.scrapers.toss import build_article_url
@@ -34,9 +40,7 @@ SWEEP_INTERVAL = dt.timedelta(seconds=1)
 #: Sweep start-of-day (spec design doc / plan C2: "start" = 08:00 KST).
 _DEFAULT_START = dt.time(8, 0)
 
-#: The sweep stops making new discoveries at 15:20 KST (plan C2): a computed
-#: visit at or after this time is not one that operationally would have
-#: happened, so `next_visit` returns None instead.
+#: The sweep makes no request at or after 15:20 KST (plan C2).
 _CUTOFF = dt.time(15, 20)
 
 
@@ -57,54 +61,139 @@ def select_universe(daily_values: dict[str, float], size: int = UNIVERSE_SIZE) -
     return candidates[:size]
 
 
-def next_visit(
-    code: str,
+#: Items per company news page -- the live sweep's `size` parameter (C5).
+PAGE_SIZE = 20
+
+
+@dataclass(frozen=True)
+class SweepRequest:
+    """One Toss request of the sweep: a company news page, or an article detail."""
+
+    kind: str  # "page" | "detail"
+    code: str
+    page: int = 1
+    news_id: str | None = None
+
+
+class SweepCursor:
+    """The sweep's request order -- shared by the live runner (C5) and `simulate_sweep` (C3).
+
+    Rules (each request costs one interval, enforced by the caller's clock):
+      * codes are visited in universe order, repeating;
+      * after a page, every item not seen earlier today (via any code), not
+        stale (published before `stale_before`, or undated) gets one detail
+        request, in page order, before anything else;
+      * if the page was full (`page_size` items) and every item on it was new,
+        the next page of the same code follows those details;
+      * otherwise the next code's page 1.
+    `page_result` must be called for each page request before `next_request`.
+    """
+
+    def __init__(
+        self, universe: list[str], stale_before: dt.datetime, page_size: int = PAGE_SIZE
+    ) -> None:
+        if not universe:
+            raise ValueError("empty universe")
+        self.universe = list(universe)
+        self.stale_before = stale_before
+        self.page_size = page_size
+        self.seen: set[str] = set()
+        self._pending: deque[SweepRequest] = deque()
+        self._index = 0
+        self._awaiting: SweepRequest | None = None
+
+    def next_request(self) -> SweepRequest:
+        if self._awaiting is not None:
+            raise RuntimeError(f"page_result not recorded for {self._awaiting}")
+        if not self._pending:
+            code = self.universe[self._index % len(self.universe)]
+            self._index += 1
+            self._pending.append(SweepRequest("page", code, 1))
+        request = self._pending.popleft()
+        if request.kind == "page":
+            self._awaiting = request
+        return request
+
+    def page_result(
+        self, request: SweepRequest, items: Sequence[tuple[str | None, dt.datetime | None]]
+    ) -> list[str]:
+        """Record a page's (news id, createdAt) items (empty on an HTTP error); new ids."""
+        if request != self._awaiting:
+            raise RuntimeError(f"unexpected page result for {request}")
+        self._awaiting = None
+        new: list[str] = []
+        for news_id, created in items:
+            if not news_id or news_id in self.seen:
+                continue
+            if created is None or created < self.stale_before:
+                continue
+            self.seen.add(news_id)
+            new.append(news_id)
+        self._pending.extend(SweepRequest("detail", request.code, request.page, n) for n in new)
+        if len(items) >= self.page_size and len(new) == len(items):
+            self._pending.append(SweepRequest("page", request.code, request.page + 1))
+        return new
+
+
+def page_items(
+    listing: Sequence[tuple[dt.datetime, str]],
+    at: dt.datetime,
+    page: int,
+    page_size: int = PAGE_SIZE,
+) -> list[tuple[str, dt.datetime]]:
+    """Page `page` (1-based) of a code's newest-first list as of `at`.
+
+    `listing` is the code's (createdAt, news id) sorted ascending; an article is
+    listed once createdAt <= `at`.
+    """
+    visible = bisect.bisect_right(listing, (at, "\U0010ffff"))
+    hi = visible - (page - 1) * page_size
+    if hi <= 0:
+        return []
+    lo = max(0, hi - page_size)
+    return [(news_id, created) for created, news_id in reversed(listing[lo:hi])]
+
+
+def simulate_sweep(
     universe: list[str],
     day: dt.date,
-    after: dt.datetime,
+    arrivals: dict[str, list[tuple[str, dt.datetime]]],
+    stale_before: dt.datetime,
     start: dt.time = _DEFAULT_START,
+    end: dt.time = _CUTOFF,
     interval: dt.timedelta = SWEEP_INTERVAL,
-) -> dt.datetime | None:
-    """The next time the sweep visits `code`, at or after `after`, on `day`.
+    page_size: int = PAGE_SIZE,
+    trace: list[SweepRequest] | None = None,
+) -> dict[str, dt.datetime]:
+    """News id -> when the live sweep would have discovered it on `day`.
 
-    The sweep visits `universe[i]` at `start + (k * len(universe) + i) *
-    interval` for k = 0, 1, 2, ... (fixed order, fixed cadence, repeating).
-    `after` may be naive (assumed KST) or aware (converted to KST). Returns
-    None if `code` isn't in `universe`, or if that next visit would fall at or
-    after 15:20 KST on `day` (the sweep makes no more discoveries past that
-    point, per the plan's Global Constraints on backtest = live-achievable).
-
-    O(1) arithmetic (plus the one `universe.index` lookup) -- never loops
-    over candidate visit timestamps.
+    Deterministic replay of `SweepCursor` on a synthetic clock: request k starts
+    at `start + k * interval` (only if that is before `end`) and completes one
+    interval later; a page lists the code's `arrivals` published by the
+    request's start (`page_items`); an article's discovery time is when its
+    detail request completes (every pair of the article shares it). Articles
+    never reached before `end` are absent. `trace`, if given, receives the
+    request sequence (the live runner's order must equal it).
     """
-    try:
-        i = universe.index(code)
-    except ValueError:
-        return None
-    n = len(universe)
-
-    after = after.replace(tzinfo=KST) if after.tzinfo is None else after.astimezone(KST)
-
-    day_start = dt.datetime.combine(day, start, tzinfo=KST)
-    cutoff = dt.datetime.combine(day, _CUTOFF, tzinfo=KST)
-
-    diff = after - day_start
-    # p = ceil(diff / interval): the smallest slot index (unconstrained to
-    # this code's residue class) whose time is >= after. Exact integer
-    # arithmetic via timedelta divmod -- no float division.
-    q, r = divmod(diff, interval)
-    p = q if r == dt.timedelta(0) else q + 1
-
-    if p <= i:
-        m = i
-    else:
-        k = -(-(p - i) // n)  # ceil division, all ints
-        m = i + k * n
-
-    visit_time = day_start + m * interval
-    if visit_time >= cutoff:
-        return None
-    return visit_time
+    found: dict[str, dt.datetime] = {}
+    if not universe:
+        return found
+    listings = {code: sorted((c, n) for n, c in rows) for code, rows in arrivals.items()}
+    cursor = SweepCursor(universe, stale_before, page_size)
+    now = dt.datetime.combine(day, start, tzinfo=KST)
+    stop = dt.datetime.combine(day, end, tzinfo=KST)
+    while now < stop:
+        request = cursor.next_request()
+        if trace is not None:
+            trace.append(request)
+        if request.kind == "page":
+            items = page_items(listings.get(request.code, ()), now, request.page, page_size)
+            cursor.page_result(request, items)
+        else:
+            assert request.news_id is not None
+            found[request.news_id] = now + interval
+        now += interval
+    return found
 
 
 def live_article_id(news_id: str) -> str:

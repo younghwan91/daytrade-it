@@ -11,9 +11,10 @@ For trading day d:
   `daily_bars_adjusted.trade_value`, read-only);
 - pairs = (article, code) with createdAt in [prev 15:20, d 15:20) and code in
   (related codes from the C1 backfill files) ∩ universe;
-- decide_at = min over the article's related universe codes of
-  next_visit(code, universe, d, max(createdAt, d 08:00)) + judge_lag -- the same
-  for every pair of the article (live sweep judges all pairs at first discovery),
+- decide_at = the article's discovery time in `simulate_sweep` (the live sweep
+  runner's exact request order: universe order, paging, one detail call per new
+  article, 1 request/s from 08:00 until 15:20) + judge_lag -- the same for every
+  pair of the article (live sweep judges all pairs at discovery),
   batch_at = decide_at + 1s; features = judgment cache v2 (missing -> excluded,
   count printed).
 
@@ -43,9 +44,9 @@ from judge_batch import cache_row_valid
 
 from daytrade_it.application.news.universe import (
     live_article_id,
-    next_visit,
     related_codes,
     select_universe,
+    simulate_sweep,
 )
 from daytrade_it.application.replay.events import ReplayEvent, dump_events
 from daytrade_it.infrastructure.brokers.base import KST
@@ -197,18 +198,21 @@ def day_pairs(
     related code for discovery -- and counted in `stats["excluded_pairs"]`.
     `coverage=None` treats every code as covered.
 
-    Live-sweep parity (C5): a new article is found at the first visit of ANY
-    of its related universe codes after publication, and all of its pairs
-    (detail companyCodes ∩ universe) are judged then -- so every pair of an
-    article shares visit_at = min over related codes of next_visit.
+    Live-sweep parity (C5, F3): discovery times come from `simulate_sweep` --
+    the live runner's request order (code order, paging, one detail call per
+    new article, 1 request/s from 08:00, none from 15:20) over each covered
+    universe code's article list. An article is judged for all of its pairs
+    (related codes ∩ universe) when its detail call completes, so every pair
+    shares `discovered_at`. Articles the sweep can't reach before 15:20 are
+    dropped.
     """
     lo = dt.datetime.combine(prev_day, CUTOFF, tzinfo=KST)
     hi = dt.datetime.combine(day, CUTOFF, tzinfo=KST)
-    start = dt.datetime.combine(day, SWEEP_START, tzinfo=KST)
     open_ = dt.datetime.combine(day, OPEN, tzinfo=KST)
     members = set(universe)
-    out = []
     excluded = 0
+    candidates: list[tuple[dict, list[str]]] = []
+    arrivals: dict[str, list[tuple[str, dt.datetime]]] = {}
     for a in articles.values() if isinstance(articles, dict) else articles:
         pub = a["published_at"]
         if not lo <= pub < hi:
@@ -216,10 +220,17 @@ def day_pairs(
         in_universe = [c for c in a["codes"] if c in members]
         codes = [c for c in in_universe if covered(c, coverage, lo)]
         excluded += len(in_universe) - len(codes)
-        visits = [v for c in codes if (v := next_visit(c, universe, day, max(pub, start)))]
-        if not visits:
+        if not codes:
             continue
-        visit = min(visits)
+        candidates.append((a, codes))
+        for code in codes:
+            arrivals.setdefault(code, []).append((a["news_id"], pub))
+    found = simulate_sweep(universe, day, arrivals, stale_before=lo, start=SWEEP_START, end=CUTOFF)
+    out = []
+    for a, codes in candidates:
+        discovered = found.get(a["news_id"])
+        if discovered is None:
+            continue
         aid = live_article_id(a["news_id"])
         for code in codes:
             out.append(
@@ -231,11 +242,11 @@ def day_pairs(
                     "article_id": aid,
                     "code": code,
                     "day": day,
-                    "visit_at": visit,
-                    "session": "pre_market" if pub < open_ else "intraday",
+                    "discovered_at": discovered,
+                    "session": "pre_market" if a["published_at"] < open_ else "intraday",
                 }
             )
-    out.sort(key=lambda p: (p["visit_at"], p["key"]))
+    out.sort(key=lambda p: (p["discovered_at"], p["key"]))
     if stats is not None:
         stats["excluded_pairs"] = stats.get("excluded_pairs", 0) + excluded
     return out
@@ -266,7 +277,7 @@ def build_day_events(
             continue
         features = valid["v2"]
         s = stocks.get(p["code"])
-        decide = p["visit_at"] + judge_lag
+        decide = p["discovered_at"] + judge_lag
         events.append(
             ReplayEvent(
                 key=p["key"],

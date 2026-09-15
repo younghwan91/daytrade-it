@@ -6,16 +6,19 @@ from __future__ import annotations
 
 import datetime as dt
 
+import pytest
 from krx_quant_core.market.session import KST
 
 from daytrade_it.application.news.universe import (
     SWEEP_INTERVAL,
     UNIVERSE_SIZE,
+    SweepCursor,
+    SweepRequest,
     judgment_input_hash,
     live_article_id,
-    next_visit,
     related_codes,
     select_universe,
+    simulate_sweep,
 )
 
 
@@ -45,87 +48,108 @@ class TestSelectUniverse:
         assert select_universe({}) == []
 
 
-class TestNextVisit:
-    UNIVERSE = ["000001", "000002", "000003"]
-    DAY = dt.date(2026, 9, 16)
+DAY = dt.date(2026, 9, 16)
+STALE = dt.datetime(2026, 9, 15, 15, 20, tzinfo=KST)
 
-    def test_first_visit_of_the_day_for_first_code(self) -> None:
-        after = dt.datetime(2026, 9, 16, 8, 0, tzinfo=KST)
-        result = next_visit("000001", self.UNIVERSE, self.DAY, after)
-        assert result == dt.datetime(2026, 9, 16, 8, 0, 0, tzinfo=KST)
 
-    def test_first_visit_offset_by_index(self) -> None:
-        after = dt.datetime(2026, 9, 16, 8, 0, tzinfo=KST)
-        result = next_visit("000003", self.UNIVERSE, self.DAY, after)
-        assert result == dt.datetime(2026, 9, 16, 8, 0, 2, tzinfo=KST)
+def t(h: int, m: int, s: int = 0) -> dt.datetime:
+    return dt.datetime.combine(DAY, dt.time(h, m, s), tzinfo=KST)
 
-    def test_after_within_current_cycle_returns_next_cycle(self) -> None:
-        # after 08:00:01 (already past 000001's 08:00:00 slot this cycle),
-        # 000001's next visit is the next cycle: 08:00:03.
-        after = dt.datetime(2026, 9, 16, 8, 0, 1, tzinfo=KST)
-        result = next_visit("000001", self.UNIVERSE, self.DAY, after)
-        assert result == dt.datetime(2026, 9, 16, 8, 0, 3, tzinfo=KST)
 
-    def test_after_exactly_on_slot_returns_that_slot(self) -> None:
-        after = dt.datetime(2026, 9, 16, 8, 0, 2, tzinfo=KST)
-        result = next_visit("000003", self.UNIVERSE, self.DAY, after)
-        assert result == dt.datetime(2026, 9, 16, 8, 0, 2, tzinfo=KST)
+def _reqs(trace: list[SweepRequest]) -> list[tuple]:
+    return [(r.kind, r.code, r.page, r.news_id) for r in trace]
 
-    def test_many_cycles_later(self) -> None:
-        # 08:50:00.001 is just past the k=999 slot for code index 1
-        # (08:00:01 + 999*3s = 08:50:00.0), so the next slot is k=1000:
-        # 08:00:01 + 1000*3s = 08:50:01.
-        after = (
-            dt.datetime(2026, 9, 16, 8, 0, 0, tzinfo=KST)
-            + 1000 * 3 * dt.timedelta(seconds=1)
-            + dt.timedelta(milliseconds=1)
+
+class TestSweepCursor:
+    def test_visits_codes_in_order_and_detail_follows_its_page(self) -> None:
+        cur = SweepCursor(["A", "B"], STALE, page_size=3)
+        r = cur.next_request()
+        assert (r.kind, r.code, r.page) == ("page", "A", 1)
+        assert cur.page_result(r, [("n1", t(8, 0)), ("n0", STALE - dt.timedelta(seconds=1))]) == [
+            "n1"
+        ]
+        d = cur.next_request()
+        assert (d.kind, d.code, d.news_id) == ("detail", "A", "n1")
+        assert cur.next_request().code == "B"
+
+    def test_seen_via_any_code_costs_nothing_and_stale_or_undated_skipped(self) -> None:
+        cur = SweepCursor(["A", "B"], STALE, page_size=3)
+        cur.page_result(cur.next_request(), [("n1", t(8, 0))])
+        cur.next_request()  # detail n1
+        r = cur.next_request()
+        assert cur.page_result(r, [("n1", t(8, 0)), ("n2", None), (None, t(8, 0))]) == []
+        assert cur.next_request() == SweepRequest("page", "A", 1)
+
+    def test_pages_on_while_the_page_is_full_of_new_items(self) -> None:
+        cur = SweepCursor(["A"], STALE, page_size=2)
+        r = cur.next_request()
+        cur.page_result(r, [("n4", t(8, 0)), ("n3", t(8, 0))])
+        assert [cur.next_request().news_id for _ in range(2)] == ["n4", "n3"]
+        r2 = cur.next_request()
+        assert (r2.kind, r2.code, r2.page) == ("page", "A", 2)
+        cur.page_result(r2, [("n2", t(8, 0)), ("n1", STALE - dt.timedelta(1))])  # one stale: stop
+        assert cur.next_request().news_id == "n2"
+        assert cur.next_request() == SweepRequest("page", "A", 1)
+
+    def test_page_result_is_required_before_the_next_request(self) -> None:
+        cur = SweepCursor(["A"], STALE)
+        cur.next_request()
+        with pytest.raises(RuntimeError):
+            cur.next_request()
+
+
+class TestSimulateSweep:
+    def test_detail_costs_an_interval_and_discovery_is_detail_completion(self) -> None:
+        arrivals = {"A": [("n1", t(7, 0))], "B": [("n2", t(7, 30)), ("n1", t(7, 0))]}
+        trace: list[SweepRequest] = []
+        found = simulate_sweep(["A", "B"], DAY, arrivals, STALE, end=dt.time(8, 0, 6), trace=trace)
+        assert _reqs(trace) == [
+            ("page", "A", 1, None),  # 08:00:00
+            ("detail", "A", 1, "n1"),  # 08:00:01 -> found 08:00:02
+            ("page", "B", 1, None),  # 08:00:02 (n1 already seen: free)
+            ("detail", "B", 1, "n2"),  # 08:00:03 -> found 08:00:04
+            ("page", "A", 1, None),  # 08:00:04
+            ("page", "B", 1, None),  # 08:00:05
+        ]
+        assert found == {"n1": t(8, 0, 2), "n2": t(8, 0, 4)}
+
+    def test_article_not_visible_before_created(self) -> None:
+        arrivals = {"A": [("late", t(8, 0, 1))]}
+        found = simulate_sweep(["A"], DAY, arrivals, STALE, end=dt.time(8, 0, 5))
+        # 08:00:00 page: not yet published; 08:00:01 page sees it, detail 08:00:02 -> 08:00:03
+        assert found == {"late": t(8, 0, 3)}
+
+    def test_paging_through_a_full_backlog(self) -> None:
+        arrivals = {"A": [(f"n{i}", t(7, 0, i)) for i in range(5)]}
+        trace: list[SweepRequest] = []
+        found = simulate_sweep(
+            ["A"], DAY, arrivals, STALE, end=dt.time(8, 1), page_size=2, trace=trace
         )
-        result = next_visit("000002", self.UNIVERSE, self.DAY, after)
-        assert result == dt.datetime(2026, 9, 16, 8, 0, 1, tzinfo=KST) + 1000 * 3 * dt.timedelta(
-            seconds=1
-        )
+        kinds = [(r.kind, r.page, r.news_id) for r in trace[:9]]
+        assert kinds == [
+            ("page", 1, None),
+            ("detail", 1, "n4"),
+            ("detail", 1, "n3"),
+            ("page", 2, None),
+            ("detail", 2, "n2"),
+            ("detail", 2, "n1"),
+            ("page", 3, None),
+            ("detail", 3, "n0"),
+            ("page", 1, None),  # page 3 was not full: back to the cycle
+        ]
+        assert found["n0"] == t(8, 0, 8)
 
-    def test_accepts_naive_after_as_kst(self) -> None:
-        after_naive = dt.datetime(2026, 9, 16, 8, 0, 0)
-        result = next_visit("000001", self.UNIVERSE, self.DAY, after_naive)
-        assert result == dt.datetime(2026, 9, 16, 8, 0, 0, tzinfo=KST)
+    def test_stops_at_end_and_excludes_stale(self) -> None:
+        arrivals = {"A": [("old", STALE - dt.timedelta(seconds=1)), ("n", t(15, 19, 59))]}
+        found = simulate_sweep(["A"], DAY, arrivals, STALE, start=dt.time(15, 19, 58))
+        # 15:19:58 page (not yet), 15:19:59 page sees n; its detail would start at 15:20 -> no
+        assert found == {}
 
-    def test_after_before_start_clamps_to_start_slot(self) -> None:
-        after = dt.datetime(2026, 9, 16, 0, 0, 0, tzinfo=KST)
-        result = next_visit("000002", self.UNIVERSE, self.DAY, after)
-        assert result == dt.datetime(2026, 9, 16, 8, 0, 1, tzinfo=KST)
-
-    def test_none_when_code_not_in_universe(self) -> None:
-        after = dt.datetime(2026, 9, 16, 8, 0, 0, tzinfo=KST)
-        assert next_visit("999999", self.UNIVERSE, self.DAY, after) is None
-
-    def test_none_when_visit_would_be_at_or_after_1520(self) -> None:
-        after = dt.datetime(2026, 9, 16, 15, 19, 59, tzinfo=KST)
-        result = next_visit("000001", self.UNIVERSE, self.DAY, after)
-        # next slot for 000001 at/after 15:19:59 lands at/after 15:20:00.
-        assert result is None
-
-    def test_returns_last_visit_just_before_1520(self) -> None:
-        # Build a universe sized so a slot lands exactly one interval before
-        # the 15:20 cutoff, using a 1-code universe (visits every interval).
-        after = dt.datetime(2026, 9, 16, 15, 19, 59, tzinfo=KST)
-        result = next_visit("000001", ["000001"], self.DAY, after)
-        assert result == dt.datetime(2026, 9, 16, 15, 19, 59, tzinfo=KST)
+    def test_empty_universe(self) -> None:
+        assert simulate_sweep([], DAY, {}, STALE) == {}
 
     def test_default_interval_is_one_second(self) -> None:
         assert dt.timedelta(seconds=1) == SWEEP_INTERVAL
-
-    def test_custom_start_and_interval(self) -> None:
-        after = dt.datetime(2026, 9, 16, 9, 0, 0, tzinfo=KST)
-        result = next_visit(
-            "000002",
-            self.UNIVERSE,
-            self.DAY,
-            after,
-            start=dt.time(9, 0),
-            interval=dt.timedelta(minutes=1),
-        )
-        assert result == dt.datetime(2026, 9, 16, 9, 1, 0, tzinfo=KST)
 
 
 class TestLiveArticleId:

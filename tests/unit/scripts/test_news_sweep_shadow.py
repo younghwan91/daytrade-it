@@ -23,7 +23,13 @@ import news_sweep_shadow as shadow  # noqa: E402
 from krx_quant_core.market.session import KST  # noqa: E402
 
 from daytrade_it.application.news.judging import JudgmentLog, judgment_record  # noqa: E402
-from daytrade_it.application.news.universe import live_article_id, next_visit  # noqa: E402
+from daytrade_it.application.news.universe import (  # noqa: E402
+    PAGE_SIZE,
+    SweepRequest,
+    live_article_id,
+    page_items,
+    simulate_sweep,
+)
 from daytrade_it.domain.value_objects import Ticker  # noqa: E402
 from daytrade_it.infrastructure.external.anthropic_client import ArticleFeatures  # noqa: E402
 from daytrade_it.infrastructure.external.quant_airflow_db_client import StockInfo  # noqa: E402
@@ -50,14 +56,11 @@ class TestSchedule:
         assert sched.first_slot(at(8, 0, 4)) == 4
         assert sched.first_slot(at(8, 0, 4) + dt.timedelta(milliseconds=1)) == 5
 
-    def test_visit_order_repeats_universe_and_matches_next_visit(self) -> None:
+    def test_page_one_plan_repeats_universe(self) -> None:
         sched = shadow.SweepSchedule(UNIVERSE, DAY)
         codes = [sched.code_at(m) for m in range(7)]
         assert codes == UNIVERSE * 2 + ["005930"]
-        for m in range(7):
-            planned = sched.planned_at(m)
-            assert planned == at(8, 0, m)
-            assert next_visit(sched.code_at(m), UNIVERSE, DAY, planned) == planned
+        assert [sched.planned_at(m) for m in range(7)] == [at(8, 0, m) for m in range(7)]
 
     def test_slots_stop_at_1520(self) -> None:
         sched = shadow.SweepSchedule(UNIVERSE, DAY)
@@ -91,27 +94,14 @@ def _write_dashboard(path: Path, news_ids: list[str], ticker: str = "005930") ->
 
 
 class TestDedupe:
-    def test_new_ids_dedupes_across_codes(self, tmp_path: Path) -> None:
-        state = shadow.SweepState(shadow.DashboardKeys(tmp_path / "none.jsonl"))
-        new1, dash1 = state.new_items([{"id": "a"}, {"id": "b"}])
-        new2, dash2 = state.new_items([{"id": "b"}, {"id": "c"}, {"id": "c"}])
-        assert [i["id"] for i in new1] == ["a", "b"]
-        assert [i["id"] for i in new2] == ["c"]
-        assert dash1 == dash2 == []
-
-    def test_dashboard_articles_stay_in_the_pool_and_are_flagged(self, tmp_path: Path) -> None:
+    def test_dashboard_file_is_reread_as_it_grows(self, tmp_path: Path) -> None:
         dash_path = tmp_path / "news_judgments" / f"{DAY}.jsonl"
+        keys = shadow.DashboardKeys(dash_path)
+        assert live_article_id("yna_1") not in keys  # no file yet
         _write_dashboard(dash_path, ["yna_1"])
-        state = shadow.SweepState(shadow.DashboardKeys(dash_path))
-        new, dash = state.new_items([{"id": "yna_1"}, {"id": "yna_2"}])
-        # Overlap with the dashboard must not shrink the universe pool.
-        assert [i["id"] for i in new] == ["yna_1", "yna_2"]
-        assert dash == ["yna_1"]
-
-        # The live daemon keeps appending during the day.
+        assert live_article_id("yna_1") in keys
         _write_dashboard(dash_path, ["yna_3"])
-        new, dash = state.new_items([{"id": "yna_3"}])
-        assert [i["id"] for i in new] == ["yna_3"] and dash == ["yna_3"]
+        assert live_article_id("yna_3") in keys
 
     def test_dashboard_rows_by_pair_key(self, tmp_path: Path) -> None:
         dash_path = tmp_path / "news_judgments" / f"{DAY}.jsonl"
@@ -120,10 +110,6 @@ class TestDedupe:
         aid = live_article_id("yna_1")
         assert keys.row(f"{aid}|005930")["category"] == "breaking"
         assert keys.row(f"{aid}|000660") is None
-
-    def test_items_without_id_are_ignored(self, tmp_path: Path) -> None:
-        state = shadow.SweepState(shadow.DashboardKeys(tmp_path / "x.jsonl"))
-        assert state.new_items([{"title": "no id"}]) == ([], [])
 
 
 # --- stale ------------------------------------------------------------------
@@ -595,7 +581,7 @@ async def test_halt_signal_stops_sweep(tmp_path: Path, monkeypatch: pytest.Monke
     assert runner.requests == 1 and runner.stop_reason == "signal SIGTERM"
 
 
-async def test_universe_pairs_judged_with_empty_category_and_shared_visit_seen_at(
+async def test_universe_pairs_judged_with_empty_category_and_detail_completion_seen_at(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     second = {**ITEM, "id": "yna_AKR2", "title": "SK하이닉스 공급 계약"}
@@ -617,9 +603,13 @@ async def test_universe_pairs_judged_with_empty_category_and_shared_visit_seen_a
     assert claude.categories == ["", ""]
     rows = _rows(tmp_path / "news_judgments_universe" / f"{DAY}.jsonl")
     assert [r["category"] for r in rows] == ["", ""]
-    # Both articles came from one visit: they share that visit's timestamp.
-    page_ts = _rows(tmp_path / "news_sweep" / f"{DAY}.jsonl")[0]["ts"]
-    assert [r["sweep_seen_at"] for r in rows] == [page_ts, page_ts]
+    # F3: an article is discovered when its own detail call completes (simulate_sweep).
+    log = _rows(tmp_path / "news_sweep" / f"{DAY}.jsonl")
+    detail_ts = {r["detail_id"]: r["ts"] for r in log if "detail_id" in r}
+    seen = {r["article_id"]: r["sweep_seen_at"] for r in rows}
+    for nid in ("yna_AKR1", "yna_AKR2"):
+        assert seen[live_article_id(nid)] > detail_ts[nid] > log[0]["ts"]
+    assert seen[live_article_id("yna_AKR2")] > seen[live_article_id("yna_AKR1")]
 
 
 async def test_judge_keeps_only_related_codes_in_todays_universe(
@@ -639,3 +629,82 @@ async def test_judge_keeps_only_related_codes_in_todays_universe(
     assert claude.calls == [("005930", False)]
     rows = _rows(tmp_path / "news_judgments_universe" / f"{DAY}.jsonl")
     assert [r["ticker"] for r in rows] == ["005930"]
+
+
+# --- F3/F4: live request order == simulate_sweep ------------------------------
+
+
+async def test_live_request_sequence_equals_simulator(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    universe = ["005930", "000660", "035420"]
+    stale_before = dt.datetime(2026, 9, 16, 15, 20, tzinfo=KST)
+    arrivals = {
+        # 23 fresh overnight + 2 stale on 005930: page 1 full of new -> page 2
+        "005930": [(f"s{i:02d}", at(7, 0, i)) for i in range(23)]
+        + [(f"old{i}", dt.datetime(2026, 9, 16, 10, 0, i, tzinfo=KST)) for i in range(2)],
+        # shared with 005930 (seen already: free) + one new
+        "000660": [("s05", at(7, 0, 5)), ("h1", at(7, 30))],
+        # published mid-sweep: visible only from 08:00:40
+        "035420": [("n1", at(8, 0, 40))],
+    }
+    related = {"s05": ["005930", "000660"]}
+    listings = {c: sorted((t, n) for n, t in rows) for c, rows in arrivals.items()}
+    clock = [at(8, 0)]
+    live: list[tuple] = []
+    detail_done: dict[str, dt.datetime] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if "/companies/" in path:
+            code = path.rsplit("/", 1)[-1]
+            page = int(request.url.params["number"])
+            assert int(request.url.params["size"]) == PAGE_SIZE
+            live.append(("page", code, page, None))
+            items = page_items(listings.get(code, []), clock[0], page, PAGE_SIZE)
+            body = [
+                {
+                    "id": n,
+                    "title": f"t {n}",
+                    "summary": "s",
+                    "createdAt": t.replace(tzinfo=None).isoformat(),
+                }
+                for n, t in items
+            ]
+            clock[0] += dt.timedelta(seconds=1)  # response lands one interval later
+            return httpx.Response(200, json={"result": {"body": body}})
+        news_id = path.rsplit("/", 1)[-1]
+        live.append(("detail", None, None, news_id))
+        clock[0] += dt.timedelta(seconds=1)
+        detail_done[news_id] = clock[0]
+        codes = related.get(news_id, ["005930"])
+        return httpx.Response(200, json={"result": {"kr": {"id": news_id, "companyCodes": codes}}})
+
+    n_requests = 70
+    runner = _runner(tmp_path, monkeypatch, handler, max_requests=n_requests)
+    runner.schedule = shadow.SweepSchedule(universe, DAY)
+    runner.cursor = shadow.SweepCursor(universe, stale_before, PAGE_SIZE)
+    # NoWait limiter: each response lands 1 s after its request, so request k starts at 08:00 + k s
+    runner.now = lambda: clock[0]
+    await runner.run()
+
+    trace: list[SweepRequest] = []
+    found = simulate_sweep(
+        universe,
+        DAY,
+        arrivals,
+        stale_before,
+        end=(at(8, 0) + dt.timedelta(seconds=n_requests)).time(),
+        trace=trace,
+    )
+    expected = [
+        (r.kind, r.code, r.page, None) if r.kind == "page" else ("detail", None, None, r.news_id)
+        for r in trace
+    ]
+    assert live == expected
+    assert ("page", "005930", 2, None) in live  # F4: paged past page 1
+    assert {"h1", "n1", "s22", "s00"} <= set(found)
+    assert detail_done == found  # same discovery times
+    rows = _rows(tmp_path / "news_judgments_universe" / f"{DAY}.jsonl")
+    seen = {r["article_id"]: r["sweep_seen_at"] for r in rows}
+    assert seen[live_article_id("h1")] == found["h1"].isoformat()

@@ -3,12 +3,14 @@
 Plan C5 (`docs/superpowers/plans/2026-09-16-news-universe-a-plan.md`). Sweeps
 the day's universe (previous trading day's top 600 by traded value, fixed at
 start; `application/news/universe.py`) one request per second in fixed order
-from 08:00 to 15:20 KST, fetching each code's first news page
-(`/api/v2/news/companies/{code}?number=1&size=20`). For every news id not seen
-earlier in the sweep and not already judged by the live dashboard daemon
-(today's `data/news_judgments/` keys, via `live_article_id`), one detail call
-(same 1 req/s budget) gives the article's `companyCodes`. Articles published
-before the previous session close are skipped (the live stale rule).
+from 08:00 to 15:20 KST, fetching company news pages
+(`/api/v2/news/companies/{code}?number=N&size=20`). For every news id not seen
+earlier in the sweep, one detail call (same 1 req/s budget) gives the
+article's `companyCodes`; a page full of new items is followed by the next page.
+Articles published before the previous session close are skipped (the live
+stale rule). The request order is `application/news/universe.SweepCursor` --
+the same object `simulate_sweep` replays for the backtest (C3), so detection
+times match (F3/F4).
 
 Articles the dashboard daemon already judged stay in the pool (backtest pool =
 sweep pool): they still get the detail call, pairs the dashboard archive has
@@ -19,8 +21,9 @@ category "" (per-company pages carry no dashboard category; A3 parity).
 Judging reuses the live path (`application/news/judging.judge_pair`: same
 prompt, same v2 score, same archive row); v4 shadow is off (spec). Rows go to
 `data/news_judgments_universe/{day}.jsonl` in the live archive format plus
-`"pool": "universe"` and `"sweep_seen_at"`. Every request is logged to
-`data/news_sweep/{day}.jsonl` (code, ts, planned_at, status, new_ids) for
+`"pool": "universe"` and `"sweep_seen_at"` (when the article's detail call
+completed = its discovery time). Every request is logged to
+`data/news_sweep/{day}.jsonl` (code, page, ts, status, new_ids) for
 measuring detection delay. Only with `--with-broker` (uses the LIVE Kiwoom
 token: KIWOOM_APP_KEY/SECRET, quotes and minute bars only), the live entry filter
 (`build_entry_candidate`, broker quotes/minute bars only) is evaluated from
@@ -63,7 +66,7 @@ import signal
 import sys
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -81,8 +84,10 @@ from daytrade_it.application.news.judging import (
     session_close_kst,
 )
 from daytrade_it.application.news.universe import (
+    PAGE_SIZE,
     SWEEP_INTERVAL,
     UNIVERSE_SIZE,
+    SweepCursor,
     live_article_id,
     select_universe,
 )
@@ -99,7 +104,6 @@ SWEEP_STOP = dt.time(15, 20)
 #: Candidates (entry filter) only from the live daemon's first poll: before
 #: the opening auction prints, quotes are pre-open and not what live used.
 CANDIDATES_FROM = dt.time(9, 0, 30)
-PAGE_SIZE = 20
 BLOCK_STATUSES = frozenset({403, 429})
 BLOCK_LIMIT = 3
 
@@ -118,7 +122,11 @@ HTTP_HEADERS = {
 
 @dataclass(frozen=True)
 class SweepSchedule:
-    """Slot m visits `universe[m % n]` at `start + m * interval` (C2 `next_visit`)."""
+    """Sweep window and a page-1-only slot plan (for `--dry-run-http`).
+
+    The real request order also spends slots on detail calls and extra pages
+    (`SweepCursor`), so actual visit times drift later than `planned_at`.
+    """
 
     universe: list[str]
     day: dt.date
@@ -245,30 +253,6 @@ class DashboardKeys:
         return article_id in self._ids
 
 
-@dataclass
-class SweepState:
-    dashboard: DashboardKeys
-    seen: set[str] = field(default_factory=set)
-
-    def new_items(self, items: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[str]]:
-        """(items new to the sweep, ids among them the dashboard already judged).
-
-        Dashboard articles stay in the returned items: overlap with the
-        dashboard must not shrink the universe pool (backtest pool = sweep pool).
-        """
-        new: list[dict[str, Any]] = []
-        dashboard_dups: list[str] = []
-        for item in items:
-            news_id = item.get("id")
-            if not news_id or news_id in self.seen:
-                continue
-            self.seen.add(news_id)
-            new.append(item)
-            if live_article_id(news_id) in self.dashboard:
-                dashboard_dups.append(news_id)
-        return new, dashboard_dups
-
-
 def _created_at(item: dict[str, Any]) -> dt.datetime | None:
     try:
         parsed = dt.datetime.fromisoformat(item["createdAt"])
@@ -349,12 +333,12 @@ def append_jsonl(path: Path, row: dict[str, Any]) -> None:
 
 
 async def fetch_company_page(
-    http: httpx.AsyncClient, code: str
+    http: httpx.AsyncClient, code: str, page: int = 1
 ) -> tuple[int | None, list[dict[str, Any]]]:
-    """(HTTP status or None on a network error, first-page items)."""
+    """(HTTP status or None on a network error, the page's items)."""
     try:
         resp = await http.get(
-            COMPANY_NEWS_URL.format(code=code), params={"number": 1, "size": PAGE_SIZE}
+            COMPANY_NEWS_URL.format(code=code), params={"number": page, "size": PAGE_SIZE}
         )
     except httpx.HTTPError as exc:
         logger.warning("news_sweep_shadow: page request failed", code=code, error=str(exc))
@@ -427,7 +411,8 @@ class ShadowRunner:
         self.requests = 0
         self.limiter = RateLimiter()
         self.guard = BlockGuard()
-        self.state = SweepState(DashboardKeys(DASHBOARD_JUDGMENT_DIR / f"{day}.jsonl"))
+        self.dashboard = DashboardKeys(DASHBOARD_JUDGMENT_DIR / f"{day}.jsonl")
+        self.cursor = SweepCursor(schedule.universe, stale_before, PAGE_SIZE)
         self.judgments = UniverseJudgmentLog(UNIVERSE_JUDGMENT_DIR, day)
         self.sweep_log = SWEEP_LOG_DIR / f"{day}.jsonl"
         self.candidate_log = CANDIDATE_DIR / f"{day}.jsonl"
@@ -469,49 +454,55 @@ class ShadowRunner:
             logger.info("news_sweep_shadow: waiting for sweep start", seconds=int(wait))
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(self.stop.wait(), wait)
-        slot = self.schedule.first_slot(self.now())
+        pending_items: dict[str, dict[str, Any]] = {}
         while not self.stop.is_set():
             if self.now().time() >= self.schedule.stop:
                 self._halt("15:20 KST")
                 break
-            code = self.schedule.code_at(slot)
-            planned = self.schedule.planned_at(slot)
-            slot += 1
+            request = self.cursor.next_request()
             if not await self._request():
                 break
             ts = self.now()
-            status, items = await fetch_company_page(self.http, code)
-            self._record_status(status)
-            fresh = [i for i in items if not is_stale(i, self.stale_before)]
-            new, dashboard_dups = self.state.new_items(fresh)
-            append_jsonl(
-                self.sweep_log,
-                {
-                    "code": code,
-                    "ts": ts.isoformat(),
-                    "planned_at": planned.isoformat(),
-                    "status": status,
-                    "items": len(items),
-                    "new_ids": [i["id"] for i in new],
-                    "dashboard_ids": dashboard_dups,
-                },
-            )
-            for item in new:
-                if not await self._request():
-                    break
-                detail_ts = self.now()
-                detail, detail_status = await self._fetch_detail(item["id"])
-                self._record_status(detail_status)
+            if request.kind == "page":
+                status, items = await fetch_company_page(self.http, request.code, request.page)
+                self._record_status(status)
+                new_ids = self.cursor.page_result(
+                    request, [(i.get("id"), _created_at(i)) for i in items]
+                )
+                fresh = set(new_ids)
+                for item in items:
+                    if item.get("id") in fresh:
+                        pending_items.setdefault(item["id"], item)
                 append_jsonl(
                     self.sweep_log,
                     {
-                        "code": code,
-                        "ts": detail_ts.isoformat(),
-                        "detail_id": item["id"],
-                        "status": detail_status,
+                        "code": request.code,
+                        "page": request.page,
+                        "ts": ts.isoformat(),
+                        "status": status,
+                        "items": len(items),
+                        "new_ids": new_ids,
+                        "dashboard_ids": [
+                            n for n in new_ids if live_article_id(n) in self.dashboard
+                        ],
                     },
                 )
-                await self.queue.put(Queued(item, detail, ts))
+                continue
+            assert request.news_id is not None
+            item = pending_items.pop(request.news_id)
+            detail, detail_status = await self._fetch_detail(request.news_id)
+            self._record_status(detail_status)
+            seen_at = self.now()  # detail completed = discovery (simulate_sweep)
+            append_jsonl(
+                self.sweep_log,
+                {
+                    "code": request.code,
+                    "ts": ts.isoformat(),
+                    "detail_id": request.news_id,
+                    "status": detail_status,
+                },
+            )
+            await self.queue.put(Queued(item, detail, seen_at))
 
     async def _fetch_detail(self, news_id: str) -> tuple[dict[str, Any] | None, int | None]:
         """Live `fetch_article_detail`, with the HTTP status captured for the block guard."""
@@ -560,7 +551,7 @@ class ShadowRunner:
             key = pair_key(article, ticker)
             if self.judgments.seen(key):
                 continue
-            dashboard_row = self.state.dashboard.row(key)
+            dashboard_row = self.dashboard.row(key)
             features: Any
             if dashboard_row is not None:
                 self.judgments.append_dashboard_copy(dashboard_row)
@@ -631,7 +622,7 @@ class ShadowRunner:
             "news_sweep_shadow: done",
             reason=self.stop_reason,
             requests=self.requests,
-            seen=len(self.state.seen),
+            seen=len(self.cursor.seen),
         )
 
 
