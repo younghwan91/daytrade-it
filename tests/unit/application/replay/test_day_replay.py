@@ -2,6 +2,7 @@
 
 import datetime as dt
 import sqlite3
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 
@@ -174,3 +175,46 @@ def test_swallowed_errors_surface_in_result(tmp_path: Path) -> None:
     assert res.errors
     assert not [r for r in res.ledger if r["event"] == "entry_submitted"]
     assert any("positions endpoint down" in e.get("exception", "") for e in res.errors)
+
+
+def _cap1_day(tmp_path: Path, enter_on_decide: bool):  # noqa: ANN202
+    """Two pairs in one poll: 000001 judged first (surprise 1), 000002 later (surprise 3)."""
+    clock_holder: dict = {}
+    bars = {"000001": _bars(10100), "000002": _bars(10100)}
+    broker = SimBroker(bars, {t: Decimal(10000) for t in bars}, lambda: clock_holder["now"]())
+    stocks = {t: StockInfo(code=t, name=t, market="KOSPI", sector="s") for t in bars}
+    first = replace(_event("1", "000001", "09:00:35"), features={**V2, "surprise": 1})
+    second = replace(_event("2", "000002", "09:00:40"), features={**V2, "surprise": 3})
+    first = replace(first, batch_at=second.batch_at)
+    cfg = DayConfig(
+        limits=TradingLimits(max_open_positions=1, vwap_exit_gap=None, add_on_min_gain=None),
+        max_pre_entry_move=Decimal("0.03"),
+        enter_on_decide=enter_on_decide,
+    )
+    return replay_day(
+        DAY,
+        [first, second],
+        broker,
+        _DB(),
+        stocks,
+        dt.datetime(2026, 9, 14, 15, 20, tzinfo=KST),
+        cfg,
+        tmp_path,
+        _dart(tmp_path),
+        clock_holder=clock_holder,
+    )
+
+
+def test_ranked_batch_enters_highest_surprise_at_batch_end(tmp_path: Path) -> None:
+    res = _cap1_day(tmp_path, enter_on_decide=False)
+    entries = [r for r in res.ledger if r["event"] == "entry_submitted"]
+    assert [r["ticker"] for r in entries] == ["000002"]
+    assert entries[0]["ts"].startswith("2026-09-15T09:00:41")
+
+
+def test_enter_on_decide_enters_each_pair_when_judged_unranked(tmp_path: Path) -> None:
+    """Poller before d357b88 (live 09-14): trader.enter right after each judgment."""
+    res = _cap1_day(tmp_path, enter_on_decide=True)
+    entries = [r for r in res.ledger if r["event"] == "entry_submitted"]
+    assert [r["ticker"] for r in entries] == ["000001"]
+    assert entries[0]["ts"].startswith("2026-09-15T09:00:35")

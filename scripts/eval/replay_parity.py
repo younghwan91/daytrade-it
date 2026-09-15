@@ -36,10 +36,13 @@ WORK = Path("data/eval/replay_work")
 MAX_FILL_DEV = 0.005
 
 LIVE_CONFIGS = {
-    # Code before 4ebd39d (cap 2) and c273b9b (+2% no-chase); no VWAP exit, no add-on.
+    # Code before 4ebd39d (cap 2), c273b9b (+2% no-chase), d357b88 (surprise-ranked
+    # batch, VWAP exit) and b57e6d8 (add-on): each BUY entered as judged. Live
+    # ledger: entries followed their judgment by about two seconds.
     dt.date(2026, 9, 14): DayConfig(
         limits=TradingLimits(max_open_positions=2, vwap_exit_gap=None, add_on_min_gain=None),
         max_pre_entry_move=Decimal("0.02"),
+        enter_on_decide=True,
     ),
     # 48d6cb1 defaults.
     dt.date(2026, 9, 15): DayConfig(limits=TradingLimits(), max_pre_entry_move=Decimal("0.03")),

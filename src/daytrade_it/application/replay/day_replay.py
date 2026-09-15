@@ -54,6 +54,9 @@ class DayConfig:
     max_pre_entry_move: Decimal
     manage_every: dt.timedelta = dt.timedelta(seconds=30)
     exits_until: dt.time = dt.time(15, 30)
+    #: Poller before d357b88 (live through 09-14): each BUY went to
+    #: `trader.enter` right after its judgment, in judgment order, unranked.
+    enter_on_decide: bool = False
 
 
 @dataclass
@@ -200,7 +203,14 @@ async def _run(
             except Exception:
                 logger.exception("replay: entry filter failed", ticker=e.ticker)
                 continue
-            if c is not None:
+            if c is None:
+                continue
+            if config.enter_on_decide:
+                try:
+                    await trader.enter(c.signal)
+                except Exception:
+                    logger.exception("replay: enter failed", ticker=e.ticker)
+            else:
                 pending.setdefault(e.batch_at, []).append(c)
         else:
             batch = pending.pop(payload, [])
