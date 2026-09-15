@@ -11,6 +11,7 @@ from krx_quant_core.market.session import KST
 from daytrade_it.application.news.universe import (
     SWEEP_INTERVAL,
     UNIVERSE_SIZE,
+    judgment_input_hash,
     live_article_id,
     next_visit,
     related_codes,
@@ -162,3 +163,25 @@ class TestRelatedCodes:
 
     def test_empty_input(self) -> None:
         assert related_codes({}) == {}
+
+
+def test_judgment_input_hash_covers_model_system_and_user() -> None:
+    import hashlib
+
+    h = judgment_input_hash("m", "sys", "user")
+    assert len(h) == 64
+    assert h == judgment_input_hash("m", "sys", "user")
+    assert (
+        len(
+            {
+                h,
+                judgment_input_hash("m2", "sys", "user"),
+                judgment_input_hash("m", "sys2", "user"),
+                judgment_input_hash("m", "sys", "user2"),
+            }
+        )
+        == 4
+    )
+    # unambiguous framing: moving text across the boundary changes the hash
+    assert judgment_input_hash("m", "ab", "c") != judgment_input_hash("m", "a", "bc")
+    assert h != hashlib.sha256(b"msysuser").hexdigest()

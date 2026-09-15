@@ -15,6 +15,7 @@ from judge_batch import (  # noqa: E402
     build_request,
     custom_id_of,
     estimate_cost,
+    pair_input_hash,
     stratified_sample,
 )
 
@@ -333,3 +334,41 @@ def test_resume_aborts_when_remaining_chunks_exceed_current_budget(tmp_path: Pat
     assert len(api.created) == 1  # remaining chunk not submitted
     assert any("original estimate" in m for m in logs)
     assert any("remaining" in m for m in logs)
+
+
+# --- F5: cache rows are keyed by the judged input ------------------------------
+
+
+def test_cache_rows_store_the_input_hash_of_what_was_judged(tmp_path: Path) -> None:
+    from daytrade_it.application.news.universe import judgment_input_hash
+
+    pairs = [_pair(1)]
+    _judge(tmp_path, FakeAPI()).run(pairs, sample=10, stratify=["month"], seed=1)
+    (row,) = [json.loads(line) for line in (tmp_path / "cache.jsonl").open()]
+    req = build_request(pairs[0], "claude-haiku-4-5")["params"]
+    expected = judgment_input_hash(req["model"], req["system"], req["messages"][0]["content"])
+    assert row["input_hash"] == expected == pair_input_hash(pairs[0], "claude-haiku-4-5")
+
+
+def test_changed_input_is_rejudged(tmp_path: Path) -> None:
+    pair = _pair(1)
+    _judge(tmp_path, FakeAPI()).run([pair], sample=10, stratify=["month"], seed=1)
+    api = FakeAPI()
+    changed = {**pair, "title": "다른 제목"}
+    _judge(tmp_path, api).run([changed], sample=10, stratify=["month"], seed=1, new_run=True)
+    assert len(api.created) == 1 and len(api.created[0]["requests"]) == 1
+    # the same input again: nothing to judge
+    api2 = FakeAPI()
+    _judge(tmp_path, api2).run([changed], sample=10, stratify=["month"], seed=1, new_run=True)
+    assert api2.created == []
+
+
+def test_legacy_rows_without_hash_valid_only_if_input_unchanged(tmp_path: Path) -> None:
+    same = {**_pair(1), "summary": "요약 " * 50}  # body == summary: pre-F5 input unchanged
+    fallback = {**_pair(2), "summary": "", "body": "제목 2"}  # pre-F5 body was ""
+    (tmp_path / "cache.jsonl").write_text(
+        "".join(json.dumps({"key": p["key"], "v2": {"score": 0}}) + "\n" for p in (same, fallback))
+    )
+    api = FakeAPI()
+    _judge(tmp_path, api).run([same, fallback], sample=10, stratify=["month"], seed=1)
+    assert [r["custom_id"] for r in api.created[0]["requests"]] == [custom_id_of(fallback["key"])]

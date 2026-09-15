@@ -120,6 +120,21 @@ def live_article_id(news_id: str) -> str:
     return str(uuid5(TOSS_NEWS_NAMESPACE, f"toss:{digest}"))
 
 
+def judgment_input_hash(model: str, system: str, user: str) -> str:
+    """sha256 over the judged input (model, system prompt, user prompt), length-framed.
+
+    Judgment caches key rows by (pair key, this hash) so a pair whose prompt
+    inputs changed (e.g. the body fallback) is re-judged instead of reusing a
+    judgment of different text.
+    """
+    h = hashlib.sha256()
+    for part in (model, system, user):
+        data = part.encode()
+        h.update(len(data).to_bytes(8, "big"))
+        h.update(data)
+    return h.hexdigest()
+
+
 def related_codes(rows_by_id: dict[str, set[str]]) -> dict[str, tuple[str, ...]]:
     """Article id -> sorted tuple of codes it appeared under across the sweep.
 

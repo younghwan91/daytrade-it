@@ -21,11 +21,9 @@ from build_universe_events import (  # noqa: E402
     pair_rows,
     parse_days,
     prepare_day,
-    run_day,
 )
 
 from daytrade_it.application.news.universe import live_article_id, next_visit
-from daytrade_it.application.replay.events import load_events
 from daytrade_it.infrastructure.brokers.base import KST
 from daytrade_it.infrastructure.external.quant_airflow_db_client import StockInfo
 
@@ -128,7 +126,7 @@ def test_day_pairs_drops_articles_whose_visit_is_after_cutoff(tmp_path: Path) ->
 def test_build_day_events_uses_cache_and_counts_excluded(c1: Path) -> None:
     universe = ["005930", "000660"]
     pairs = day_pairs(load_articles(c1), D, PREV, universe)
-    cache = {pairs[0]["key"]: FEATS}
+    cache = {pairs[0]["key"]: [{"v2": FEATS}]}
     lag = dt.timedelta(seconds=7)
     events, excluded = build_day_events(pairs, STOCKS, cache, lag)
     assert excluded == len(pairs) - 1
@@ -177,22 +175,6 @@ def test_parse_days_list_and_range() -> None:
     ]
 
 
-def test_run_day_writes_event_file_with_fake_daily_values(c1: Path, tmp_path: Path) -> None:
-    def daily_values(day: dt.date) -> dict[str, float]:
-        assert day == PREV
-        return {"005930": 3e12, "000660": 2e12, "123456": 0.0}
-
-    arts = load_articles(c1)
-    pairs = day_pairs(arts, D, PREV, ["005930", "000660"])
-    cache = {p["key"]: FEATS for p in pairs}
-    out = tmp_path / "events"
-    n, excluded = run_day(arts, D, PREV, daily_values, STOCKS, cache, dt.timedelta(seconds=5), out)
-    assert (n, excluded) == (3, 0)
-    events = load_events(out / f"{D}.jsonl")
-    assert [e.decide_at for e in events] == sorted(e.decide_at for e in events)
-    assert all(e.source == "universe" for e in events)
-
-
 def test_all_pairs_of_an_article_share_the_first_related_visit(tmp_path: Path) -> None:
     root = tmp_path / "u"
     row = _row("multi", "2026-09-15T10:00:00.5")
@@ -204,7 +186,7 @@ def test_all_pairs_of_an_article_share_the_first_related_visit(tmp_path: Path) -
     first = dt.datetime(2026, 9, 15, 10, 0, 1, tzinfo=KST)
     assert [p["visit_at"] for p in pairs] == [first, first]
     events, _ = build_day_events(
-        pairs, STOCKS, {p["key"]: FEATS for p in pairs}, dt.timedelta(seconds=3)
+        pairs, STOCKS, {p["key"]: [{"v2": FEATS}] for p in pairs}, dt.timedelta(seconds=3)
     )
     assert {e.decide_at for e in events} == {first + dt.timedelta(seconds=3)}
 
@@ -332,3 +314,47 @@ def test_prepare_day_prints_coverage_and_dashboard_overlap(tmp_path: Path) -> No
         prepare_day(arts.values(), D, PREV, ["005930", "999999"], coverage, False, archive)
     _, line = prepare_day(arts.values(), D, PREV, ["005930"], coverage, False, tmp_path / "none")
     assert line.endswith("dashboard_overlap n/a")
+
+
+# --- F5: body fallback + input-hash cache -------------------------------------
+
+
+def test_pair_rows_body_falls_back_to_title_when_summary_empty(tmp_path: Path) -> None:
+    root = tmp_path / "u"
+    _write_c1(root, "005930", [_row("e", "2026-09-15T09:00:00", title="제목만", summary="")])
+    pairs = day_pairs(load_articles(root), D, PREV, ["005930"])
+    (row,) = pair_rows(pairs, STOCKS)
+    assert row["body"] == "제목만" and row["summary"] == ""
+
+
+def test_events_use_only_cache_rows_matching_the_pair_input(c1: Path) -> None:
+    from judge_batch import pair_input_hash
+
+    from daytrade_it.infrastructure.external.anthropic_client import DEFAULT_MODEL
+
+    universe = ["005930", "000660"]
+    pairs = day_pairs(load_articles(c1), D, PREV, universe)
+    rows = {r["key"]: r for r in pair_rows(pairs, STOCKS)}
+    k0, k1, k2 = (p["key"] for p in pairs)
+    cache = {
+        k0: [{"v2": FEATS, "input_hash": pair_input_hash(rows[k0], DEFAULT_MODEL)}],
+        k1: [{"v2": FEATS, "input_hash": "stale"}],
+        k2: [{"v2": FEATS}],  # legacy row; c1 summaries are non-empty -> input unchanged
+    }
+    stats: dict = {}
+    events, excluded = build_day_events(pairs, STOCKS, cache, dt.timedelta(0), stats=stats)
+    assert {e.key for e in events} == {k0, k2}
+    assert excluded == 1 and stats["stale_cache"] == 1
+
+
+def test_load_cache_keeps_every_row_per_key(tmp_path: Path) -> None:
+    from build_universe_events import load_cache
+
+    path = tmp_path / "c.jsonl"
+    path.write_text(
+        json.dumps({"key": "a|1", "v2": {"x": 1}})
+        + "\n"
+        + json.dumps({"key": "a|1", "v2": {"x": 2}, "input_hash": "h"})
+        + "\n"
+    )
+    assert [r.get("input_hash") for r in load_cache(path)["a|1"]] == [None, "h"]

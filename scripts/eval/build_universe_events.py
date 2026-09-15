@@ -39,6 +39,8 @@ import sys
 from collections.abc import Callable, Iterable
 from pathlib import Path
 
+from judge_batch import cache_row_valid
+
 from daytrade_it.application.news.universe import (
     live_article_id,
     next_visit,
@@ -47,6 +49,7 @@ from daytrade_it.application.news.universe import (
 )
 from daytrade_it.application.replay.events import ReplayEvent, dump_events
 from daytrade_it.infrastructure.brokers.base import KST
+from daytrade_it.infrastructure.external.anthropic_client import DEFAULT_MODEL
 
 C1_DIR = Path("data/toss_universe")
 CACHE = Path("data/eval/cache/universe_v2.jsonl")
@@ -239,15 +242,29 @@ def day_pairs(
 
 
 def build_day_events(
-    pairs: list[dict], stocks: dict, cache: dict[str, dict], judge_lag: dt.timedelta
+    pairs: list[dict],
+    stocks: dict,
+    cache: dict[str, list[dict]],
+    judge_lag: dt.timedelta,
+    model: str = DEFAULT_MODEL,
+    stats: dict | None = None,
 ) -> tuple[list[ReplayEvent], int]:
+    """Events for pairs with a cached judgment of their current input (`cache_row_valid`).
+
+    Pairs without a valid row are excluded (counted); `stats["stale_cache"]`
+    counts those that had only rows for a different input.
+    """
     events = []
-    excluded = 0
+    excluded = stale = 0
+    rows = {r["key"]: r for r in pair_rows(pairs, stocks)}
     for p in pairs:
-        features = cache.get(p["key"])
-        if features is None:
+        candidates = cache.get(p["key"], [])
+        valid = next((r for r in candidates if cache_row_valid(r, rows[p["key"]], model)), None)
+        if valid is None:
             excluded += 1
+            stale += bool(candidates)
             continue
+        features = valid["v2"]
         s = stocks.get(p["code"])
         decide = p["visit_at"] + judge_lag
         events.append(
@@ -268,11 +285,18 @@ def build_day_events(
             )
         )
     events.sort(key=lambda e: (e.decide_at, e.key))
+    if stats is not None:
+        stats["stale_cache"] = stats.get("stale_cache", 0) + stale
     return events, excluded
 
 
 def pair_rows(pairs: list[dict], stocks: dict) -> list[dict]:
-    """C4 input rows (contract fields + month/session/day/published_at for stratifying)."""
+    """C4 input rows (contract fields + month/session/day/published_at for stratifying).
+
+    body = summary, else title: the live mapper judges summary, else
+    content[:500], else title, and backfilled rows carry no content (F5).
+    `summary` keeps the raw C1 summary (legacy cache check, empty counts).
+    """
     rows = []
     for p in pairs:
         s = stocks.get(p["code"])
@@ -284,7 +308,8 @@ def pair_rows(pairs: list[dict], stocks: dict) -> list[dict]:
                 "market": s.market if s else None,
                 "sector": s.sector if s else None,
                 "title": p["title"],
-                "body": p["summary"],
+                "body": p["summary"] or p["title"],
+                "summary": p["summary"],
                 "category": p["category"],
                 "day": str(p["day"]),
                 "month": str(p["day"])[:7],
@@ -293,24 +318,6 @@ def pair_rows(pairs: list[dict], stocks: dict) -> list[dict]:
             }
         )
     return rows
-
-
-def run_day(
-    articles: dict[str, dict] | Iterable[dict],
-    day: dt.date,
-    prev_day: dt.date,
-    daily_values: Callable[[dt.date], dict[str, float]],
-    stocks: dict,
-    cache: dict[str, dict],
-    judge_lag: dt.timedelta,
-    out_dir: Path,
-) -> tuple[int, int]:
-    universe = select_universe(daily_values(prev_day))
-    events, excluded = build_day_events(
-        day_pairs(articles, day, prev_day, universe), stocks, cache, judge_lag
-    )
-    dump_events(out_dir / f"{day}.jsonl", events)
-    return len(events), excluded
 
 
 def measure_judge_lag(rows: Iterable[dict], polls: list[dt.datetime]) -> dt.timedelta:
@@ -337,14 +344,15 @@ def parse_days(spec: str, trading_days: list[dt.date]) -> list[dt.date]:
     return sorted(d for x in spec.split(",") if x and (d := dt.date.fromisoformat(x)) in valid)
 
 
-def load_cache(path: Path) -> dict[str, dict]:
+def load_cache(path: Path) -> dict[str, list[dict]]:
+    """Pair key -> every cache row for it (re-judged inputs append new rows)."""
     if not path.exists():
         return {}
-    out = {}
+    out: dict[str, list[dict]] = {}
     for line in path.open():
         if line.strip():
             r = json.loads(line)
-            out[r["key"]] = r["v2"]
+            out.setdefault(r["key"], []).append(r)
     return out
 
 
@@ -411,11 +419,12 @@ def prepare_day(
     pairs = day_pairs(articles, day, prev_day, universe, coverage, stats)
     dash = dashboard_keys(day, archive)
     overlap = "n/a" if dash is None else str(sum(p["key"] in dash for p in pairs))
+    empty = sum(not p["summary"] for p in pairs)
     line = (
         f"{day}: universe {report['universe']} truncated {len(report['truncated'])} "
         f"missing {len(report['missing'])} uncovered {len(report['uncovered'])} "
         f"pairs {len(pairs)} excluded_pairs {stats.get('excluded_pairs', 0)} "
-        f"dashboard_overlap {overlap}"
+        f"empty_summary {empty} dashboard_overlap {overlap}"
     )
     return pairs, line
 
@@ -433,6 +442,7 @@ def main() -> None:
     ap.add_argument(
         "--pairs-out", type=Path, default=None, help="write C4 pairs file instead of events"
     )
+    ap.add_argument("--model", default=DEFAULT_MODEL, help="judge model (cache input hash)")
     ap.add_argument(
         "--allow-incomplete",
         action="store_true",
@@ -496,10 +506,19 @@ def main() -> None:
     cache = load_cache(args.cache)
     done_days = []
     for day, pairs in plans():
-        events, excluded = build_day_events(pairs, stocks, cache, lag)
+        stats: dict = {}
+        events, excluded = build_day_events(pairs, stocks, cache, lag, args.model, stats)
         dump_events(args.out / f"{day}.jsonl", events)
         done_days.append(day)
-        print(day, "universe events", len(events), "excluded (no cached judgment)", excluded)
+        print(
+            day,
+            "universe events",
+            len(events),
+            "excluded (no cached judgment of the current input)",
+            excluded,
+            "of which stale cache rows",
+            stats["stale_cache"],
+        )
     args.out.mkdir(parents=True, exist_ok=True)
     (args.out / "meta.json").write_text(
         json.dumps(

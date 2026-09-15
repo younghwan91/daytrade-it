@@ -10,7 +10,10 @@
   `_complete` call (temperature 0, `_MAX_OUTPUT_TOKENS`), parsing = the live
   `parse_features` (fixed-schema validation). Nothing is copied.
 - Pairs already in the cache (`data/eval/cache/universe_v2.jsonl`, rows
-  `{"key", "v2"}` with v2 = asdict(features) + "score") are skipped; so are
+  `{"key", "input_hash", "v2"}` with v2 = asdict(features) + "score") are
+  skipped only if the row's input_hash = sha256 of (model, system, user) of the
+  request this pair would send now (`cache_row_valid`; legacy rows without a
+  hash count only if the pair's input is unchanged by the body fallback); so are
   pairs that already failed in `MAX_ATTEMPTS` (3) distinct batches (errors file).
 - Stratified sample: proportional allocation over the `--stratify` fields
   (largest remainder), seeded shuffle within each stratum -- deterministic for
@@ -47,6 +50,7 @@ from pathlib import Path
 
 import httpx
 
+from daytrade_it.application.news.universe import judgment_input_hash
 from daytrade_it.infrastructure.external.anthropic_client import (
     _MAX_OUTPUT_TOKENS,
     DEFAULT_MODEL,
@@ -96,6 +100,31 @@ def build_request(pair: dict, model: str) -> dict:
             "messages": [{"role": "user", "content": user}],
         },
     }
+
+
+def request_input_hash(req: dict) -> str:
+    p = req["params"]
+    return judgment_input_hash(p["model"], p["system"], p["messages"][0]["content"])
+
+
+def pair_input_hash(pair: dict, model: str) -> str:
+    """Hash of the exact input `build_request` would send for this pair."""
+    return request_input_hash(build_request(pair, model))
+
+
+def cache_row_valid(row: dict, pair: dict, model: str) -> bool:
+    """Whether a cache row judged this pair's current input.
+
+    Rows carry `input_hash`. Legacy rows (written before hashing) are valid only
+    if the pair's current input hash equals the hash of the input the old
+    pipeline sent -- body = the raw C1 summary (no title fallback) -- i.e. the
+    pair's input didn't change.
+    """
+    current = pair_input_hash(pair, model)
+    if "input_hash" in row:
+        return row["input_hash"] == current
+    legacy = {**pair, "body": pair["summary"]} if "summary" in pair else pair
+    return pair_input_hash(legacy, model) == current
 
 
 def _chars(req: dict) -> int:
@@ -181,10 +210,17 @@ class BatchJudge:
         tmp.write_text(json.dumps(state, indent=1))
         tmp.replace(self.state)
 
-    def cached_keys(self) -> set[str]:
-        if not self.cache.exists():
-            return set()
-        return {json.loads(line)["key"] for line in self.cache.open() if line.strip()}
+    def cached_rows(self) -> dict[str, list[dict]]:
+        out: dict[str, list[dict]] = {}
+        if self.cache.exists():
+            for line in self.cache.open():
+                if line.strip():
+                    row = json.loads(line)
+                    out.setdefault(row["key"], []).append(row)
+        return out
+
+    def is_cached(self, pair: dict, rows: dict[str, list[dict]]) -> bool:
+        return any(cache_row_valid(r, pair, self.model) for r in rows.get(pair["key"], []))
 
     def failure_counts(self) -> Counter[str]:
         if not self.errors.exists():
@@ -249,6 +285,7 @@ class BatchJudge:
                 "id": batch["id"],
                 "chunk": chunk,
                 "custom_ids": {r["custom_id"]: keys[r["custom_id"]] for r in requests},
+                "input_hashes": {r["custom_id"]: request_input_hash(r) for r in requests},
                 "submitted_at": now,
                 "processed": False,
             }
@@ -274,6 +311,7 @@ class BatchJudge:
         batch = self.wait(entry["id"])
         text = self._http("GET", batch["results_url"]).text
         keys = entry["custom_ids"]
+        hashes = entry.get("input_hashes") or {}
         ok = bad = 0
         seen = set()
         for line in text.splitlines():
@@ -308,9 +346,12 @@ class BatchJudge:
                 )
                 bad += 1
                 continue
-            self._append(
-                self.cache, {"key": key, "v2": {**asdict(features), "score": features.score()}}
-            )
+            cached: dict = {"key": key}
+            # the hash of the input actually submitted (entries from before hashing have none)
+            if (h := hashes.get(row["custom_id"])) is not None:
+                cached["input_hash"] = h
+            cached["v2"] = {**asdict(features), "score": features.score()}
+            self._append(self.cache, cached)
             ok += 1
         for cid in set(keys) - seen:
             self._append(
@@ -367,10 +408,14 @@ class BatchJudge:
             summary["refused"] = True
             return summary
 
-        done = self.cached_keys()
+        cached = self.cached_rows()
         failures = self.failure_counts()
         unique = {p["key"]: p for p in pairs}
-        todo = [p for k, p in unique.items() if k not in done and failures[k] < MAX_ATTEMPTS]
+        todo = [
+            p
+            for k, p in unique.items()
+            if failures[k] < MAX_ATTEMPTS and not self.is_cached(p, cached)
+        ]
         chosen = stratified_sample(todo, sample, stratify, seed)
         requests = [build_request(p, self.model) for p in chosen]
         if calibrate and requests and not dry_run:
