@@ -29,3 +29,13 @@ def _fresh_empty_dart_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Pat
     con.close()
     monkeypatch.setattr(tools, "_DART_DB_PATH", path)
     return path
+
+
+@pytest.fixture(autouse=True)
+def _run_records_in_tmp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """krx-quant-core start_run writes research/runs under KQC_RUNS_ROOT -- keep tests
+    from appending run records to the real checkout."""
+    root = tmp_path / "kqc_runs_root"
+    monkeypatch.setenv("KQC_RUNS_ROOT", str(root))
+    monkeypatch.delenv("KR_QUANT_DB", raising=False)
+    return root

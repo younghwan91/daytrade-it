@@ -189,6 +189,19 @@ async def test_backtest_tool_relays_real_handler_metrics_not_placeholder(
     assert result.winning_trades == expected_metrics.winning_trades
     assert result.losing_trades == expected_metrics.losing_trades
 
+    # krx-quant-core start_run recorded the run (git sha, data range, config, result).
+    import json  # noqa: PLC0415
+    import os  # noqa: PLC0415
+    from pathlib import Path  # noqa: PLC0415
+
+    runs_file = (
+        Path(os.environ["KQC_RUNS_ROOT"]) / "research" / "runs" / "mcp-backtest-composite"
+    ) / "RUNS.jsonl"
+    start_row, end_row = (json.loads(x) for x in runs_file.read_text().splitlines())
+    assert start_row["config"]["tickers"] == ["005930"] and len(start_row["git_sha"]) == 40
+    assert end_row["status"] == "ok"
+    assert end_row["result"]["sharpe_ratio"] == float(expected_metrics.sharpe_ratio)
+
 
 @pytest.mark.asyncio
 async def test_train_model_tool_flags_placeholder_metrics_in_response_data() -> None:

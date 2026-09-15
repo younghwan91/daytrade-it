@@ -11,12 +11,14 @@ from __future__ import annotations
 import inspect
 import time
 from collections.abc import Callable
+from contextlib import AbstractContextManager, nullcontext
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, TypeVar
 from uuid import UUID, uuid5
 
+from krx_quant_core.runtime import DataSpec, Run, start_run
 from pydantic import BaseModel, Field
 
 from daytrade_it.shared.runtime_host import require_backtest_host
@@ -1261,6 +1263,32 @@ def _default_backtest_handler() -> Any:
     return BacktestHandler(market_data_client=QuantAirflowDBClient())
 
 
+_REPO_ROOT = Path(__file__).resolve().parents[4]
+
+
+def _backtest_run_record(
+    strategy: str, config: dict[str, Any], start: str, end: str
+) -> AbstractContextManager[Run | None]:
+    """Record this backtest via krx-quant-core ``start_run`` (research/runs/<label>/RUNS.jsonl).
+
+    Git sha, data range, config and the multiple-testing trial count are written so a
+    backtest number can be traced back to the exact code and data. Only when running
+    from a git checkout (the MCP server on simnode is); an installed package without a
+    checkout records nothing rather than failing the tool. Uncommitted changes are
+    recorded as ``dirty`` instead of refused -- MCP backtests are exploratory.
+    """
+    if not (_REPO_ROOT / ".git").exists():
+        return nullcontext(None)
+    label = "mcp-backtest-" + "".join(c if c.isalnum() or c in "._-" else "_" for c in strategy)
+    return start_run(
+        label,
+        config,
+        repo_root=_REPO_ROOT,
+        data=DataSpec(start, end, "backtest"),
+        allow_dirty=True,
+    )
+
+
 @mcp_tool(
     name="backtest",
     description=(
@@ -1344,8 +1372,28 @@ async def backtest(
         strategy=strategy,
         params=parameters or {},
     )
-    result = await ctx.backtest_handler.handle(command)
-    metrics = result.metrics
+    run_config = {
+        "strategy": strategy,
+        "tickers": sorted(tickers),
+        "initial_capital": initial_capital,
+        "parameters": parameters or {},
+    }
+    with _backtest_run_record(
+        strategy, run_config, start_dt.date().isoformat(), end_dt.date().isoformat()
+    ) as run:
+        result = await ctx.backtest_handler.handle(command)
+        metrics = result.metrics
+        if run is not None:
+            run.log_result(
+                {
+                    "total_return_pct": float(metrics.total_return_pct),
+                    "sharpe_ratio": float(metrics.sharpe_ratio),
+                    "max_drawdown_pct": float(metrics.max_drawdown_pct),
+                    "total_trades": metrics.total_trades,
+                    "win_rate": float(metrics.win_rate),
+                    "strategy_is_placeholder": True,
+                }
+            )
 
     # Every numeric field below is relayed verbatim from
     # BacktestHandler._calculate_metrics()'s output (or a single-expression
