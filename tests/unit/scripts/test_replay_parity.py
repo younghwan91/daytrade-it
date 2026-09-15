@@ -157,7 +157,7 @@ def test_live_decisions_merge_duplicate_daemon_judgments_of_same_article() -> No
     assert [d["outcome"] for d in got] == ["entered", "no_signal"]
 
 
-def test_divergence_from_prev_close_vintage_is_other() -> None:
+def test_divergence_from_prev_close_vintage_is_data_vintage() -> None:
     """Live move +2.080% fits price 331250 over prev 324500 only."""
     at = dt.datetime(2026, 9, 15, 9, 0, 35, tzinfo=KST)
     live = {
@@ -171,8 +171,19 @@ def test_divergence_from_prev_close_vintage_is_other() -> None:
     rows = divergences(
         [(sim, live)], [], [], [], {"A": [_bar("09:00", 331250)]}, {"A": Decimal(321500)}
     )
-    assert [r["cls"] for r in rows] == ["other"]
-    assert "prev_close_vintage" in rows[0]["note"]
+    assert [r["cls"] for r in rows] == ["data_vintage"]
+    assert "live prev 324500 vs kr_quant 321500" in rows[0]["note"]
+
+
+def test_prev_close_within_a_tenth_of_a_percent_is_not_data_vintage() -> None:
+    """Live prev 100000 vs kr_quant 100050 (0.05%): same close, price decides the class."""
+    at = dt.datetime(2026, 9, 15, 9, 0, 35, tzinfo=KST)
+    live = {"ticker": "A", "at": at, "outcome": "extended", "pre_entry_move": "0.031"}
+    sim = {"ticker": "A", "decide_at": at, "outcome": "no_signal"}
+    rows = divergences(
+        [(sim, live)], [], [], [], {"A": [_bar("09:00", 102000)]}, {"A": Decimal(100050)}
+    )
+    assert [r["cls"] for r in rows] == ["intra_minute_price"]
 
 
 def test_divergence_with_no_bar_yet_is_intra_minute() -> None:

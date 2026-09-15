@@ -10,7 +10,9 @@ the live daemon log and the replay, and every ticker-level difference (add-on,
 exit quantity, entry, fill > ±0.5%), is listed and classified:
 ``intra_minute_price`` when the live price behind it (ledger limit, or
 pre_entry_move x prev close) is not the open of that minute -- the replay
-quotes the open and never looks inside the current bar -- else ``other``.
+quotes the open and never looks inside the current bar; ``data_vintage`` (R11)
+when the prev close live's pre_entry_move implies differs from today's kr_quant
+close by more than 0.1%; else ``other``.
 PASS = no ``other`` difference and no errors logged during the replay.
 """
 
@@ -44,6 +46,12 @@ WORK = Path("data/eval/replay_work")
 #: Copy of trader's data/news_signal_daemon.log (the live daemon's JSON log).
 LIVE_LOG = Path("data/eval/news_signal_daemon_trader_0915.log")
 INTRA = "intra_minute_price"
+#: Ruling R11: live's implied prev close differs from today's kr_quant close by
+#: more than this, so the no-chase filter saw a different close. Not an engine
+#: difference; the replay keeps today's closes.
+VINTAGE = "data_vintage"
+VINTAGE_TOL = Decimal("0.001")
+PASSING_CLASSES = {INTRA, VINTAGE}
 MAX_FILL_DEV = 0.005
 
 LIVE_CONFIGS = {
@@ -321,9 +329,10 @@ def _move_class(
             bars, t, kr_prev * (1 + move), at, "pre_entry_move x kr prev (no grid fit)"
         )
     price, prev = found
-    if prev != kr_prev:
-        return "other", (
-            f"prev_close_vintage: live prev {prev} vs kr_quant {kr_prev}; "
+    if abs(prev / kr_prev - 1) > VINTAGE_TOL:
+        return VINTAGE, (
+            f"live prev {prev} vs kr_quant {Decimal(kr_prev).normalize():f} "
+            f"({prev / kr_prev - 1:+.2%}); "
             f"live price {price} @{at.strftime('%H:%M:%S')} vs sim quote {o}"
         )
     return _price_class(bars, t, price, at, "price (pre_entry_move)")
@@ -362,7 +371,7 @@ def divergences(
             cls, note = _move_class(
                 bars, t, Decimal(live["pre_entry_move"]), live["at"], prev_close[t]
             )
-        if cls != "other" or note.startswith("prev_close_vintage"):
+        if cls != "other":
             pass
         elif live["outcome"] == "entered" and live.get("limit"):
             cls, note = _price_class(bars, t, Decimal(live["limit"]), live["entered_at"], "limit")
@@ -490,7 +499,8 @@ def main() -> None:
         pairs = match_decisions(res.decisions, live_dec, within=dt.timedelta(seconds=5))
         divs = divergences(pairs, live, res.ledger, res.fills, bars, prev)
         n_dec = sum(1 for x in divs if x["kind"] == "decision")
-        n_other = sum(1 for x in divs if x["cls"] != INTRA)
+        n_other = sum(1 for x in divs if x["cls"] not in PASSING_CLASSES)
+        by_cls = {c: sum(1 for x in divs if x["cls"] == c) for c in (INTRA, VINTAGE, "other")}
         ok = n_other == 0 and not res.errors
         ok_all &= ok
         print(
@@ -499,7 +509,7 @@ def main() -> None:
         )
         print(
             f"  decision divergences {n_dec}/{len(res.decisions)} judged pairs; "
-            f"ticker-level {len(divs) - n_dec}; other={n_other}; errors={len(res.errors)}; "
+            f"ticker-level {len(divs) - n_dec}; by class {by_cls}; errors={len(res.errors)}; "
             f"exact comparison {'MATCH' if exact else 'DIFF'}"
         )
         for x in divs:
