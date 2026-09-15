@@ -94,8 +94,6 @@ def load_c1(root: Path) -> tuple[dict[str, dict], dict[str, dict]]:
     for done in sorted(root.glob("*.done")):
         code = done.stem
         info = json.loads(done.read_text())
-        status = info.get("status")
-        start = dt.datetime.combine(dt.date.fromisoformat(info["since"]), dt.time(0), tzinfo=KST)
         earliest: dt.datetime | None = None
         path = root / f"{code}.jsonl"
         if path.exists():
@@ -116,12 +114,36 @@ def load_c1(root: Path) -> tuple[dict[str, dict], dict[str, dict]]:
                             "category": r.get("category"),
                             "published_at": created,
                         }
-        if status in TRUNCATED and earliest is not None:
-            start = max(start, earliest)
-        coverage[code] = {"status": status, "start": start}
+        coverage[code] = _coverage_entry(info, earliest)
     for news_id, related in related_codes(codes).items():
         arts[news_id]["codes"] = related
     return arts, coverage
+
+
+def _coverage_entry(info: dict, earliest: dt.datetime | None) -> dict:
+    status = info.get("status")
+    start = dt.datetime.combine(dt.date.fromisoformat(info["since"]), dt.time(0), tzinfo=KST)
+    if status in TRUNCATED and earliest is not None:
+        start = max(start, earliest)
+    return {"status": status, "start": start}
+
+
+def load_coverage(root: Path) -> dict[str, dict]:
+    """`load_c1`'s coverage without loading articles (reads rows of truncated codes only)."""
+    coverage: dict[str, dict] = {}
+    for done in sorted(root.glob("*.done")):
+        code = done.stem
+        info = json.loads(done.read_text())
+        earliest: dt.datetime | None = None
+        path = root / f"{code}.jsonl"
+        if info.get("status") in TRUNCATED and path.exists():
+            with path.open() as f:
+                for line in f:
+                    if line.strip():
+                        created = _parse_created(json.loads(line)["createdAt"])
+                        earliest = created if earliest is None else min(earliest, created)
+        coverage[code] = _coverage_entry(info, earliest)
+    return coverage
 
 
 def load_articles(root: Path) -> dict[str, dict]:
