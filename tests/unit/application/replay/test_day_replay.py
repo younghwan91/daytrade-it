@@ -1,12 +1,21 @@
 """replay_day drives the live AutoTrader through a synthetic session."""
 
 import datetime as dt
+import json
+import os
 import sqlite3
 from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 
-from daytrade_it.application.replay.day_replay import DayConfig, replay_day, snapshot_dart
+import pytest
+
+from daytrade_it.application.replay.day_replay import (
+    DayConfig,
+    ReplayDataError,
+    replay_day,
+    snapshot_dart,
+)
 from daytrade_it.application.replay.events import ReplayEvent
 from daytrade_it.application.trading.auto_trader import TradingLimits
 from daytrade_it.infrastructure.brokers.base import KST, MinuteBar
@@ -254,3 +263,98 @@ def test_decisions_record_extended_pairs_with_pre_entry_move(tmp_path: Path) -> 
         clock_holder=clock_holder,
     )
     assert [(d["outcome"], d["pre_entry_move"]) for d in res.decisions] == [("extended", "0.05")]
+
+
+# -- final review fix wave -----------------------------------------------------
+
+
+def _replay(
+    tmp_path: Path,
+    broker: SimBroker,
+    clock_holder: dict,
+    cfg: DayConfig,
+    events: list[ReplayEvent] | None = None,
+    dart: Path | None = None,
+    work: Path | None = None,
+):  # noqa: ANN202
+    events = events or [_event("1", "000001", "09:00:35"), _event("2", "000002", "09:00:35")]
+    stocks = {
+        e.ticker: StockInfo(code=e.ticker, name="n", market="KOSPI", sector="s") for e in events
+    }
+    if dart is None:
+        dart = tmp_path / "dart.db" if (tmp_path / "dart.db").exists() else _dart(tmp_path)
+    return replay_day(
+        DAY,
+        events,
+        broker,
+        _DB(),
+        stocks,
+        dt.datetime(2026, 9, 14, 15, 20, tzinfo=KST),
+        cfg,
+        work or tmp_path / "work",
+        dart,
+        clock_holder=clock_holder,
+    )
+
+
+def _cfg(**kw: object) -> DayConfig:
+    limits = {"max_open_positions": 2, "vwap_exit_gap": None, "add_on_min_gain": None, **kw}
+    return DayConfig(limits=TradingLimits(**limits), max_pre_entry_move=Decimal("0.03"))
+
+
+def test_risk_gate_refusals_are_counted_with_marked_positions(tmp_path: Path) -> None:
+    """Exposure cap 10,000: the second entry sees 10,100 of marked holdings and is refused."""
+    res = _replay(tmp_path, *_fresh_broker(), _cfg(max_trader_exposure=Decimal(10000)))
+    assert len([r for r in res.ledger if r["event"] == "entry_submitted"]) == 1
+    assert len(res.refusals) == 1
+    assert "exposure" in res.refusals[0]["reason"]
+
+
+def test_reused_broker_reports_only_this_calls_fills(tmp_path: Path) -> None:
+    broker, clock_holder = _fresh_broker()
+    first = _replay(tmp_path, broker, clock_holder, _cfg())
+    second = _replay(tmp_path, broker, clock_holder, _cfg())
+    assert first.fills
+    assert {f["order_id"] for f in first.fills}.isdisjoint({f["order_id"] for f in second.fills})
+    assert len(second.fills) == len(first.fills)
+
+
+def test_two_configs_into_one_work_root_keep_independent_ledgers(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    one = _replay(tmp_path, *_fresh_broker(), _cfg(max_open_positions=1), work=root)
+    two = _replay(tmp_path, *_fresh_broker(), _cfg(max_open_positions=2), work=root)
+    assert one.run_dir != two.run_dir
+    on_disk = [
+        [json.loads(x) for x in (r.run_dir / "ledger" / f"{DAY}.jsonl").read_text().splitlines()]
+        for r in (one, two)
+    ]
+    assert on_disk == [one.ledger, two.ledger]
+    count = [sum(r["event"] == "entry_submitted" for r in led) for led in on_disk]
+    assert count == [1, 2]
+    [snap] = list((root / "dart_snapshots").glob("*.db"))
+    assert not os.access(snap, os.W_OK)
+
+
+def test_replay_fails_loudly_when_dart_source_lags_the_day(tmp_path: Path) -> None:
+    p = tmp_path / "old.db"
+    con = sqlite3.connect(p)
+    con.execute(
+        "CREATE TABLE disclosures (rcept_no TEXT, rcept_dt TEXT, code TEXT, report_nm TEXT)"
+    )
+    con.execute("INSERT INTO disclosures VALUES ('1','20260914','000002','x')")
+    con.commit()
+    con.close()
+    with pytest.raises(ReplayDataError, match="rcept_dt"):
+        _replay(tmp_path, *_fresh_broker(), _cfg(), dart=p)
+
+
+def test_replay_fails_when_over_5pct_of_event_tickers_lack_bars(tmp_path: Path) -> None:
+    events = [_event("1", "000001", "09:00:35"), _event("2", "000009", "09:00:35")]
+    with pytest.raises(ReplayDataError, match="000009"):
+        _replay(tmp_path, *_fresh_broker(), _cfg(), events=events)
+
+
+def test_leftover_positions_at_end_of_replay_are_reported(tmp_path: Path) -> None:
+    cfg = replace(_cfg(), exits_until=dt.time(14, 0))  # stop before flatten_at
+    res = _replay(tmp_path, *_fresh_broker(), cfg)
+    assert res.positions == {"000001": 1, "000002": 1}

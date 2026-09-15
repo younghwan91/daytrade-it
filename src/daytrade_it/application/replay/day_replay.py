@@ -13,8 +13,11 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import hashlib
 import json
+import os
 import sqlite3
+import uuid
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
@@ -45,7 +48,12 @@ logger = get_logger(__name__)
 FIRST_POLL = dt.time(9, 0, 30)
 SESSION_CLOSE = dt.time(15, 20)
 _ERROR_LEVELS = {"error", "critical"}
+MAX_MISSING_BARS = 0.05
 _SKIP_EVENTS = {"auto_trader: entry skipped", "entry_filter: extended, no entry"}
+
+
+class ReplayDataError(RuntimeError):
+    """Input data can't support a faithful replay of the day (fail the day loudly)."""
 
 
 def _enter_outcome(new_logs: list[dict], ticker: str, decision: dict) -> None:
@@ -84,6 +92,17 @@ class DayResult:
     #: (not_tradable | filter_failed | no_signal | extended | entered | skipped
     #: | enter_failed) plus pre_entry_move / reason / limit where known.
     decisions: list[dict] = field(default_factory=list)
+    #: `execute_trade` pre-order refusals (ledger `entry_refused`: risk gate,
+    #: DART, price band, kill switch).
+    refusals: list[dict] = field(default_factory=list)
+    #: Resting BUYs SimBroker cancelled at fill time for lack of cash.
+    cash_rejections: list[dict] = field(default_factory=list)
+    #: Shares held at the broker when the timeline ended (leftovers if > 0).
+    positions: dict[str, int] = field(default_factory=dict)
+    #: Event tickers with no minute bar that day (<= 5%, else the day fails).
+    missing_bars: list[str] = field(default_factory=list)
+    #: This call's own directory (ledger under it); never shared between calls.
+    run_dir: Path | None = None
 
 
 def snapshot_dart(src: Path, day: dt.date, dst: Path) -> Path:
@@ -101,6 +120,46 @@ def snapshot_dart(src: Path, day: dt.date, dst: Path) -> Path:
     con.execute("DETACH DATABASE src")
     con.close()
     return dst
+
+
+def dart_snapshot(src: Path, day: dt.date, cache_dir: Path) -> Path:
+    """Read-only no-look-ahead snapshot, built once per (source content, day).
+
+    Fails the day if the source has no filing received on or after `day`: a
+    lagging copy would silently hide that day's hard disclosures.
+    """
+    con = sqlite3.connect(f"file:{src}?mode=ro", uri=True)
+    try:
+        (latest,) = con.execute("SELECT max(rcept_dt) FROM disclosures").fetchone()
+    finally:
+        con.close()
+    if latest is None or latest < day.strftime("%Y%m%d"):
+        raise ReplayDataError(
+            f"DART source {src} max(rcept_dt)={latest} is before {day}: refresh or pass "
+            "a newer copy (--dart)"
+        )
+    digest = hashlib.sha256(src.read_bytes()).hexdigest()[:16]
+    dst = cache_dir / f"{digest}-{day:%Y%m%d}.db"
+    if dst.exists():
+        return dst
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    tmp = cache_dir / f".{dst.name}.{uuid.uuid4().hex}.tmp"
+    snapshot_dart(src, day, tmp)
+    tmp.chmod(0o444)
+    os.replace(tmp, dst)
+    return dst
+
+
+def missing_bar_tickers(events: list[ReplayEvent], broker: SimBroker) -> list[str]:
+    """Event tickers without bars; raises if they exceed 5% of event tickers."""
+    codes = sorted({e.ticker for e in events})
+    missing = [c for c in codes if not broker.has_bars(c)]
+    if codes and len(missing) / len(codes) > MAX_MISSING_BARS:
+        raise ReplayDataError(
+            f"{len(missing)}/{len(codes)} event tickers have no minute bars "
+            f"(> {MAX_MISSING_BARS:.0%}): {missing}"
+        )
+    return missing
 
 
 def _timeline(
@@ -131,13 +190,18 @@ def replay_day(
     dart_db: Path,
     clock_holder: dict | None = None,
 ) -> DayResult:
-    work_dir.mkdir(parents=True, exist_ok=True)
-    ledger_dir = work_dir / "ledger"
+    missing = missing_bar_tickers(events, broker)
+    snapshot = dart_snapshot(dart_db, day, work_dir / "dart_snapshots")
+    # A fresh directory per call: AutoTrader reloads an existing day's ledger,
+    # so two replays (trials) must never share one.
+    run_dir = work_dir / f"{day.isoformat()}-{uuid.uuid4().hex[:12]}"
+    ledger_dir = run_dir / "ledger"
     path = ledger_dir / f"{day.isoformat()}.jsonl"
-    path.unlink(missing_ok=True)  # AutoTrader reloads an existing day's ledger; start clean
+    ledger_dir.mkdir(parents=True)
     expires_at = dt.datetime.combine(day, SESSION_CLOSE, tzinfo=KST)
     saved = (entry_filter.MAX_PRE_ENTRY_MOVE, tools._DART_DB_PATH, tools._KILL_SWITCH_PATH)
-    snapshot = snapshot_dart(dart_db, day, work_dir / "dart_snapshot.db")
+    n_fills, n_rejections = len(broker.fills), len(broker.rejections)
+    positions: dict[str, int] = {}
     if clock_holder is not None:
         clock_holder["now"] = lambda: dt.datetime.now(KST)
     timeline = _timeline(day, events, config)
@@ -145,7 +209,7 @@ def replay_day(
     try:
         entry_filter.MAX_PRE_ENTRY_MOVE = config.max_pre_entry_move
         tools._DART_DB_PATH = snapshot
-        tools._KILL_SWITCH_PATH = work_dir / "no_kill_switch"
+        tools._KILL_SWITCH_PATH = run_dir / "no_kill_switch"
         with (
             time_machine.travel(timeline[0][0], tick=False) as traveller,
             capture_logs(processors=[format_exc_info]) as logs,
@@ -165,6 +229,10 @@ def replay_day(
                     ledger_dir,
                 )
             )
+            try:
+                positions = {p.ticker: int(p.quantity) for p in broker.get_positions()}
+            except Exception:
+                logger.exception("replay: end-of-day positions lookup failed")
     finally:
         entry_filter.MAX_PRE_ENTRY_MOVE, tools._DART_DB_PATH, tools._KILL_SWITCH_PATH = saved
     ledger = (
@@ -181,9 +249,14 @@ def replay_day(
     return DayResult(
         ledger=ledger,
         skips=skips,
-        fills=list(broker.fills),
+        fills=broker.fills[n_fills:],
         errors=errors,
         decisions=decisions,
+        refusals=[r for r in ledger if r["event"] == "entry_refused"],
+        cash_rejections=broker.rejections[n_rejections:],
+        positions=positions,
+        missing_bars=missing,
+        run_dir=run_dir,
     )
 
 
