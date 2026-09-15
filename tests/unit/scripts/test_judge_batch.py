@@ -1,5 +1,6 @@
 """judge_batch (plan C4): Batch API over httpx.MockTransport -- never the network."""
 
+import datetime as dt
 import json
 import sys
 from pathlib import Path
@@ -12,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "scripts" / "eval")
 from judge_batch import (  # noqa: E402
     BatchJudge,
     BudgetExceeded,
+    SubmitUncertain,
     build_request,
     custom_id_of,
     estimate_cost,
@@ -104,6 +106,8 @@ class FakeAPI:
     def __init__(self, result_for=None, prefix: str = "b") -> None:
         self.prefix = prefix
         self.created: list[dict] = []
+        self.created_at: list[str] = []
+        self.posts = 0
         self.polls = 0
         self.result_for = result_for or (lambda _cid: {"type": "succeeded", "message": _msg(FEATS)})
 
@@ -111,9 +115,21 @@ class FakeAPI:
         assert request.headers["x-api-key"] == "k"
         assert request.headers["anthropic-version"] == "2023-06-01"
         path = request.url.path
+        if request.method == "GET" and path == "/v1/messages/batches":
+            data = [
+                {
+                    "id": f"{self.prefix}{i + 1}",
+                    "created_at": self.created_at[i],
+                    "request_counts": {"processing": len(b["requests"])},
+                }
+                for i, b in reversed(list(enumerate(self.created)))
+            ]
+            return httpx.Response(200, json={"data": data, "has_more": False})
         if request.method == "POST" and path == "/v1/messages/batches":
+            self.posts += 1
             body = json.loads(request.content)
             self.created.append(body)
+            self.created_at.append(dt.datetime.now(dt.UTC).isoformat())
             return httpx.Response(
                 200,
                 json={
@@ -134,6 +150,11 @@ class FakeAPI:
                 json={
                     "id": bid,
                     "processing_status": status,
+                    "request_counts": {
+                        "processing": len(
+                            self.created[int(bid[len(self.prefix) :]) - 1]["requests"]
+                        )
+                    },
                     "results_url": f"https://api.anthropic.com/v1/messages/batches/{bid}/results"
                     if status == "ended"
                     else None,
@@ -257,13 +278,14 @@ def test_crash_after_first_chunk_rerun_submits_only_the_rest_of_the_same_sample(
 ) -> None:
     pairs = [_pair(i) for i in range(4)]
     api = CrashOnSecondCreate()
-    with pytest.raises(httpx.ConnectError):
+    with pytest.raises(SubmitUncertain):
         _judge(tmp_path, api, chunk=2).run(pairs, sample=4, stratify=["month"], seed=1)
     assert len(api.created) == 1
     state = json.loads((tmp_path / "state.json").read_text())
     assert state["run"]["keys"] == sorted(p["key"] for p in pairs)
     log = [json.loads(line) for line in (tmp_path / "state.batches.log").open()]
-    assert [r["id"] for r in log] == ["b1"]
+    assert [r["id"] for r in log if "id" in r] == ["b1"]
+    assert [r["chunk"] for r in log if r.get("uncertain")] == [1]
     first = {r["custom_id"] for r in api.created[0]["requests"]}
 
     api.crash = False
@@ -321,7 +343,7 @@ def test_dry_run_makes_no_http_calls(tmp_path: Path) -> None:
 def test_resume_aborts_when_remaining_chunks_exceed_current_budget(tmp_path: Path) -> None:
     pairs = [_pair(i) for i in range(4)]
     api = CrashOnSecondCreate()
-    with pytest.raises(httpx.ConnectError):
+    with pytest.raises(SubmitUncertain):
         _judge(tmp_path, api, chunk=2).run(pairs, sample=4, stratify=["month"], seed=1)
     state = json.loads((tmp_path / "state.json").read_text())
     assert state["run"]["budget_usd"] == 100.0 and state["run"]["estimate"]["usd"] > 0
@@ -372,3 +394,72 @@ def test_legacy_rows_without_hash_valid_only_if_input_unchanged(tmp_path: Path) 
     api = FakeAPI()
     _judge(tmp_path, api).run([same, fallback], sample=10, stratify=["month"], seed=1)
     assert [r["custom_id"] for r in api.created[0]["requests"]] == [custom_id_of(fallback["key"])]
+
+
+# --- minor: batch create is never retried ---------------------------------------
+
+
+class CreateFails(FakeAPI):
+    """POST /batches answers `status`; with `phantom` the batch was created anyway."""
+
+    def __init__(self, status: int, phantom: bool = False) -> None:
+        super().__init__()
+        self.status = status
+        self.phantom = phantom
+        self.failing = True
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        if self.failing and request.method == "POST" and request.url.path == "/v1/messages/batches":
+            if self.phantom:
+                super().__call__(request)
+            else:
+                self.posts += 1
+            return httpx.Response(self.status)
+        return super().__call__(request)
+
+
+def test_create_5xx_is_not_retried_and_fails_loudly(tmp_path: Path) -> None:
+    api = CreateFails(500)
+    with pytest.raises(SubmitUncertain, match="batches"):
+        _judge(tmp_path, api).run(
+            [_pair(i) for i in range(2)], sample=2, stratify=["month"], seed=1
+        )
+    assert api.posts == 1
+    state = json.loads((tmp_path / "state.json").read_text())
+    assert state["uncertain_submits"][0]["chunk"] == 0 and state["batches"] == []
+
+
+def test_rerun_after_uncertain_create_refuses_when_an_unknown_batch_exists(tmp_path: Path) -> None:
+    pairs = [_pair(i) for i in range(2)]
+    api = CreateFails(529, phantom=True)  # the batch exists server-side
+    with pytest.raises(SubmitUncertain):
+        _judge(tmp_path, api).run(pairs, sample=2, stratify=["month"], seed=1)
+    api.failing = False
+    with pytest.raises(SubmitUncertain, match="b1"):
+        _judge(tmp_path, api).run(pairs, sample=2, stratify=["month"], seed=1)
+    assert api.posts == 1  # never resubmitted
+
+    # adopting the batch records it for the chunk and collects it: no second create
+    j = _judge(tmp_path, api)
+    j.adopt_batch("b1")
+    summary = j.run(pairs, sample=2, stratify=["month"], seed=1)
+    assert api.posts == 1 and summary["succeeded"] == 2
+    assert "uncertain_submits" not in json.loads((tmp_path / "state.json").read_text())
+
+
+def test_rerun_after_uncertain_create_resubmits_when_no_batch_was_created(tmp_path: Path) -> None:
+    pairs = [_pair(i) for i in range(2)]
+    api = CreateFails(503)
+    with pytest.raises(SubmitUncertain):
+        _judge(tmp_path, api).run(pairs, sample=2, stratify=["month"], seed=1)
+    api.failing = False
+    summary = _judge(tmp_path, api).run(pairs, sample=2, stratify=["month"], seed=1)
+    assert api.posts == 2 and summary["succeeded"] == 2
+
+
+def test_create_4xx_raises_without_retry(tmp_path: Path) -> None:
+    api = CreateFails(400)
+    with pytest.raises(httpx.HTTPStatusError):
+        _judge(tmp_path, api).run([_pair(1)], sample=1, stratify=["month"], seed=1)
+    assert api.posts == 1
+    assert "uncertain_submits" not in json.loads((tmp_path / "state.json").read_text())

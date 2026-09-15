@@ -24,6 +24,9 @@
   measured ~150) at $5/M, times the 50% Batch discount. Abort if over
   `--budget-usd`. `--calibrate N` measures chars/token on N sampled requests
   with the free count_tokens endpoint first (not in --dry-run).
+- A batch create is never retried: a 5xx/transport error records the attempt
+  and fails loudly (`SubmitUncertain`); a rerun resubmits that chunk only if no
+  unrecorded batch of that size is listed, else `--adopt-batch ID` records it.
 - Resumable, no double spend: the chosen sample (keys, chunking, seed, args)
   is saved to the state file before the first submit; each batch id is appended
   to `<state>.batches.log` as soon as the create call returns, then recorded in
@@ -73,6 +76,14 @@ CHUNK = 10_000  # requests per batch (API limit 100k / 256 MB)
 
 class BudgetExceeded(RuntimeError):
     pass
+
+
+class SubmitUncertain(RuntimeError):
+    """A batch create may or may not have happened (5xx / transport error): never retried."""
+
+
+#: How far before a failed create a listed batch may claim to be created (clock skew).
+UNCERTAIN_SKEW = dt.timedelta(minutes=10)
 
 
 def custom_id_of(key: str) -> str:
@@ -272,27 +283,157 @@ class BatchJudge:
         return self.state.with_suffix(".batches.log")
 
     def submit(self, requests: list[dict], keys: dict[str, str], chunk: int) -> str:
-        batch = self._http("POST", f"{API}/v1/messages/batches", json={"requests": requests}).json()
+        """Create one batch. Exactly one POST: a create is billable, so it is never retried.
+
+        A 5xx or transport error leaves it unknown whether the batch exists: the
+        attempt is recorded in the state (`uncertain_submits`) and in the
+        batches log, and `SubmitUncertain` is raised. A rerun lists recent
+        batches before submitting that chunk again (`_resolve_uncertain`).
+        """
+        attempted_at = dt.datetime.now(dt.UTC).isoformat()
+        custom_ids = {r["custom_id"]: keys[r["custom_id"]] for r in requests}
+        hashes = {r["custom_id"]: request_input_hash(r) for r in requests}
+        try:
+            resp = self.client.request(
+                "POST",
+                f"{API}/v1/messages/batches",
+                headers=self._headers(),
+                timeout=120.0,
+                json={"requests": requests},
+            )
+        except httpx.TransportError as exc:
+            self._uncertain(chunk, custom_ids, hashes, attempted_at, f"{type(exc).__name__}: {exc}")
+            raise AssertionError("unreachable") from exc
+        if resp.status_code >= 500:
+            self._uncertain(chunk, custom_ids, hashes, attempted_at, f"HTTP {resp.status_code}")
+        resp.raise_for_status()  # 4xx (incl. 429): rejected, nothing was created
+        batch = resp.json()
+        self._record_batch(batch["id"], chunk, custom_ids, hashes)
+        return batch["id"]
+
+    def _record_batch(
+        self, batch_id: str, chunk: int, custom_ids: dict[str, str], hashes: dict[str, str]
+    ) -> None:
         now = dt.datetime.now(dt.UTC).isoformat()
         # the batch is billable from here: log its id before anything else can fail
         self._append(
             self.batches_log,
-            {"id": batch["id"], "chunk": chunk, "requests": len(requests), "submitted_at": now},
+            {"id": batch_id, "chunk": chunk, "requests": len(custom_ids), "submitted_at": now},
         )
         state = self._load_state()
         state["batches"].append(
             {
-                "id": batch["id"],
+                "id": batch_id,
                 "chunk": chunk,
-                "custom_ids": {r["custom_id"]: keys[r["custom_id"]] for r in requests},
-                "input_hashes": {r["custom_id"]: request_input_hash(r) for r in requests},
+                "custom_ids": custom_ids,
+                "input_hashes": hashes,
                 "submitted_at": now,
                 "processed": False,
             }
         )
+        pending = [u for u in state.get("uncertain_submits", []) if u["chunk"] != chunk]
+        if pending:
+            state["uncertain_submits"] = pending
+        else:
+            state.pop("uncertain_submits", None)
         self._save_state(state)
-        self.log(f"submitted batch {batch['id']} chunk {chunk} ({len(requests)} requests)")
-        return batch["id"]
+        self.log(f"submitted batch {batch_id} chunk {chunk} ({len(custom_ids)} requests)")
+
+    def _uncertain(
+        self,
+        chunk: int,
+        custom_ids: dict[str, str],
+        hashes: dict[str, str],
+        attempted_at: str,
+        error: str,
+    ) -> None:
+        entry = {
+            "chunk": chunk,
+            "requests": len(custom_ids),
+            "attempted_at": attempted_at,
+            "error": error,
+            "custom_ids": custom_ids,
+            "input_hashes": hashes,
+        }
+        self._append(
+            self.batches_log,
+            {
+                "uncertain": True,
+                **{k: v for k, v in entry.items() if k not in ("custom_ids", "input_hashes")},
+            },
+        )
+        state = self._load_state()
+        state["uncertain_submits"] = [
+            u for u in state.get("uncertain_submits", []) if u["chunk"] != chunk
+        ] + [entry]
+        self._save_state(state)
+        candidates = self._candidates(entry)
+        raise SubmitUncertain(self._uncertain_message(entry, candidates))
+
+    def _candidates(self, entry: dict) -> list[str] | None:
+        """Unknown recent batches that could be this create (None if listing failed)."""
+        try:
+            listed = self._http("GET", f"{API}/v1/messages/batches", params={"limit": 100}).json()
+        except (httpx.HTTPError, ValueError) as exc:
+            self.log(f"listing batches failed: {exc}")
+            return None
+        known = {b["id"] for b in self._load_state().get("batches", [])}
+        since = dt.datetime.fromisoformat(entry["attempted_at"]) - UNCERTAIN_SKEW
+        out = []
+        for b in listed.get("data") or []:
+            try:
+                created = dt.datetime.fromisoformat(str(b["created_at"]).replace("Z", "+00:00"))
+            except (KeyError, ValueError):
+                created = None
+            total = sum((b.get("request_counts") or {}).values())
+            if b.get("id") in known or (created is not None and created < since):
+                continue
+            if total == entry["requests"]:
+                out.append(b["id"])
+        return out
+
+    def _uncertain_message(self, entry: dict, candidates: list[str] | None) -> str:
+        if candidates is None:
+            found = "could not list batches"
+        elif candidates:
+            found = f"unrecorded batch(es) that may be it: {', '.join(candidates)}"
+        else:
+            found = "no matching batch listed"
+        return (
+            f"batch create for chunk {entry['chunk']} ({entry['requests']} requests) at "
+            f"{entry['attempted_at']} failed with {entry['error']} and was NOT retried; {found}. "
+            f"Check GET /v1/messages/batches and {self.batches_log}. If a batch was created, "
+            "record it with --adopt-batch ID; otherwise rerun (it resubmits only if no "
+            "matching batch is listed)."
+        )
+
+    def _resolve_uncertain(self, chunk: int) -> None:
+        """Before resubmitting a chunk whose create was uncertain: refuse if a batch may exist."""
+        entry = next(
+            (u for u in self._load_state().get("uncertain_submits", []) if u["chunk"] == chunk),
+            None,
+        )
+        if entry is None:
+            return
+        candidates = self._candidates(entry)
+        if candidates is None or candidates:
+            raise SubmitUncertain(self._uncertain_message(entry, candidates))
+        self.log(f"chunk {chunk}: no batch from the failed create is listed -- resubmitting")
+
+    def adopt_batch(self, batch_id: str) -> None:
+        """Record an existing batch for the uncertain create it belongs to (matched by size)."""
+        batch = self._http("GET", f"{API}/v1/messages/batches/{batch_id}").json()
+        total = sum((batch.get("request_counts") or {}).values())
+        state = self._load_state()
+        if batch_id in {b["id"] for b in state.get("batches", [])}:
+            raise ValueError(f"{batch_id} is already recorded")
+        matches = [u for u in state.get("uncertain_submits", []) if u["requests"] == total]
+        if len(matches) != 1:
+            raise ValueError(
+                f"{batch_id} has {total} requests: {len(matches)} uncertain create(s) match"
+            )
+        u = matches[0]
+        self._record_batch(batch_id, u["chunk"], u["custom_ids"], u["input_hashes"])
 
     def wait(self, batch_id: str, first: float = 30.0, cap: float = 600.0) -> dict:
         delay = first
@@ -496,6 +637,7 @@ class BatchJudge:
                     f"remaining estimate ${est['usd']:.2f} > budget ${self.budget_usd:.2f}"
                 )
         for i, chunk_keys, reqs in remaining:
+            self._resolve_uncertain(i)
             self.submit(reqs, {custom_id_of(k): k for k in chunk_keys}, i)
             summary["submitted"] += 1
         for entry in [b for b in self._load_state()["batches"] if not b["processed"]]:
@@ -536,6 +678,11 @@ def main() -> None:
     ap.add_argument("--chunk", type=int, default=CHUNK)
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument(
+        "--adopt-batch",
+        default=None,
+        help="record an existing batch for a failed (uncertain) create, then resume",
+    )
+    ap.add_argument(
         "--new-run",
         action="store_true",
         help="draw a fresh sample even though the state file holds a completed run",
@@ -559,6 +706,8 @@ def main() -> None:
             chunk=args.chunk,
         )
         try:
+            if args.adopt_batch:
+                judge.adopt_batch(args.adopt_batch)
             summary = judge.run(
                 pairs,
                 sample=args.sample,
@@ -568,7 +717,7 @@ def main() -> None:
                 calibrate=args.calibrate,
                 new_run=args.new_run,
             )
-        except BudgetExceeded as exc:
+        except (BudgetExceeded, SubmitUncertain) as exc:
             sys.exit(f"ABORT: {exc}")
     print(json.dumps(summary, indent=1, ensure_ascii=False))
 
