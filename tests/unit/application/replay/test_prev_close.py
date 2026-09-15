@@ -76,3 +76,21 @@ def test_krx_prices_is_the_regular_session_close_not_the_unified_close() -> None
         krx={"424870": (Decimal(2705), PREV)},
     )
     assert f.krx_prices == {"424870": Decimal(2705)}
+
+
+def test_market_snapshot_reads_069500_through_the_frozen_db() -> None:
+    from daytrade_it.application.signals import news_entry  # noqa: PLC0415
+
+    frozen = FrozenPrevCloses(day=DAY, closes={"069500": (Decimal(35000), PREV)})
+    db = FrozenPrevCloseDB(frozen)
+    (bar,) = db.get_adjusted_daily_bars(
+        Ticker(value="069500"), start=DAY - dt.timedelta(days=10), end=DAY - dt.timedelta(days=1)
+    )
+    assert bar.close == 35000.0 and bar.date == PREV
+    news_entry._MARKET_CACHE.clear()
+    with time_machine.travel(dt.datetime(2026, 9, 15, 9, 30, tzinfo=KST), tick=False):
+        assert news_entry._market_snapshot(_Broker(), db, dt.datetime.now(KST)) == (
+            Decimal(2950),
+            Decimal(35000),
+        )
+    news_entry._MARKET_CACHE.clear()

@@ -172,3 +172,33 @@ def test_day_net_removes_its_run_dir(tmp_path: Path) -> None:
     work = tmp_path / "work"
     day_net(_data(), NewsPolicy(limits=BASE), STOCKS, _dart(tmp_path), work)
     assert not list(work.glob(f"{DAY}-*"))
+
+
+def test_built_day_carries_069500_bars_and_prior_close(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    import replay_parity  # noqa: PLC0415
+
+    ev = tmp_path / "events"
+    ev.mkdir()
+    ev_line = _event()
+    (ev / f"{DAY}.jsonl").write_text("")
+    monkeypatch.setattr(replay_parity, "EVENTS", ev)
+    monkeypatch.setattr(replay_common, "load_events", lambda _p: [ev_line])
+    seen: list[list[str]] = []
+
+    def fake_bars(codes, day):  # noqa: ANN001, ANN202
+        seen.append(list(codes))
+        return {c: _bars() for c in codes}
+
+    def fake_frozen(codes, day):  # noqa: ANN001, ANN202
+        return FrozenPrevCloses(
+            day=DAY,
+            closes={c: (Decimal(10000), PREV) for c in codes},
+            krx={c: (Decimal(10000), PREV) for c in codes},
+        )
+
+    monkeypatch.setattr(replay_parity, "load_session_bars", fake_bars)
+    monkeypatch.setattr(replay_parity, "frozen_prev_closes", fake_frozen)
+    data = replay_common._build_day(DAY)
+    assert seen == [["000001", "069500"]]
+    assert "069500" in data.bars and "069500" in data.frozen.closes
+    assert [e.ticker for e in data.events] == ["000001"]

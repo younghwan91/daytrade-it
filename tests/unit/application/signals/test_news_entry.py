@@ -403,3 +403,39 @@ def test_bandit_market_quote_fetched_once_per_minute(tmp_path) -> None:  # noqa:
     for _ in range(3):
         assert _build_bandit("10200", model, broker) is not None
     assert broker.quotes.count("069500") == 1
+
+
+def test_bandit_features_is_the_row_the_verdict_judges() -> None:
+    from daytrade_it.application.trading import bandit  # noqa: PLC0415
+
+    broker = _BanditBroker("10200", n_bars=10)
+    with time_machine.travel(NOW, tick=False):
+        x = news_entry.bandit_features(
+            _article(["005930"]), Ticker(value="005930"), BULL, 0.02, broker, _DB(), EXPIRES
+        )
+        expected = bandit.features_for(
+            BULL,
+            0.02,
+            NOW,
+            EXPIRES,
+            NOW,
+            broker.get_minute_bars("005930"),
+            Decimal("30000"),
+            Decimal("10000"),
+        )
+    assert x == expected
+    assert x["mkt_move"] == pytest.approx(2.0)
+    news_entry._MARKET_CACHE.clear()
+    with time_machine.travel(NOW, tick=False):
+        assert (
+            news_entry.bandit_features(
+                _article(["005930"]),
+                Ticker(value="005930"),
+                BULL,
+                0.02,
+                broker,
+                _NoMktDB(),
+                EXPIRES,
+            )
+            is None
+        )

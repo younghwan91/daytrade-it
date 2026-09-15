@@ -53,7 +53,7 @@ from daytrade_it.application.replay.prev_close import (
     dump_prev_closes,
     load_prev_closes,
 )
-from daytrade_it.application.signals.news_entry import SelectionConfig
+from daytrade_it.application.signals.news_entry import MARKET_TICKER, SelectionConfig
 from daytrade_it.application.trading.auto_trader import TradingLimits, add_on_hit, vwap_exit_hit
 from daytrade_it.application.trading.policy import NewsPolicy
 from daytrade_it.infrastructure.brokers.base import KST, MinuteBar
@@ -252,6 +252,33 @@ def vintage_flags(
     return out
 
 
+def _add_frozen_code(
+    path: Path,
+    frozen: FrozenPrevCloses,
+    code: str,
+    day: dt.date,
+    fetch_bars,  # noqa: ANN001
+    fetch_daily,  # noqa: ANN001
+) -> FrozenPrevCloses:
+    rows = fetch_bars([code], day)
+    closes = last_unified_closes(rows, day)
+    krx = last_regular_closes(rows, day)
+    out = FrozenPrevCloses(
+        day=frozen.day,
+        closes={**frozen.closes, **closes},
+        krx={**frozen.krx, **krx},
+        flags=frozen.flags + vintage_flags(closes, fetch_daily([code], day)),
+        missing=sorted({*frozen.missing, *({code} - set(closes))}),
+    )
+    dump_prev_closes(path, out)
+    return out
+
+
+def day_codes(events: list) -> list[str]:
+    """A day's replay tickers: the events' plus MARKET_TICKER (the bandit's `mkt_move`)."""
+    return sorted({e.ticker for e in events} | {MARKET_TICKER})
+
+
 def frozen_prev_closes(
     codes: list[str],
     day: dt.date,
@@ -264,6 +291,10 @@ def frozen_prev_closes(
     if path.exists():
         frozen = load_prev_closes(path)
         uncovered = sorted(set(codes) - set(frozen.closes) - set(frozen.missing))
+        if uncovered == [MARKET_TICKER]:
+            # Files frozen before the bandit carry no 069500: add it once, the
+            # event closes stay as frozen.
+            return _add_frozen_code(path, frozen, MARKET_TICKER, day, fetch_bars, fetch_daily)
         if uncovered:
             raise ValueError(f"{path} was frozen without event codes {uncovered}")
         return frozen
@@ -950,7 +981,7 @@ def prepare_day(
     day: dt.date, events: list
 ) -> tuple[dict[str, list[MinuteBar]], FrozenPrevCloses, SimBroker, dt.datetime]:
     """Bars, frozen prev closes (flags printed), a fresh SimBroker and stale_before."""
-    codes = sorted({e.ticker for e in events})
+    codes = day_codes(events)
     bars = load_session_bars(codes, day)
     frozen = frozen_prev_closes(codes, day)
     print(

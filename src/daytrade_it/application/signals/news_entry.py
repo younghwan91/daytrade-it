@@ -32,7 +32,7 @@ logger = get_logger(__name__)
 
 SESSIONS: tuple[str, ...] = ("premarket", "intraday")
 _REGULAR_OPEN = dt.time(9, 0)
-_MARKET_TICKER = "069500"  # KODEX 200
+MARKET_TICKER = "069500"  # KODEX 200; replay data always carries it
 _MARKET_LOOKBACK_DAYS = 10
 
 
@@ -216,12 +216,12 @@ def _market_snapshot(
     price: Decimal | None = None
     prev_close: Decimal | None = None
     try:
-        quote = broker.get_quote(_MARKET_TICKER)
+        quote = broker.get_quote(MARKET_TICKER)
         last = quote.last_price or quote.mid_price
         price = last if last and last > 0 else None
         today = now.astimezone(KST).date()
         daily = db_client.get_adjusted_daily_bars(
-            Ticker(value=_MARKET_TICKER),
+            Ticker(value=MARKET_TICKER),
             start=today - dt.timedelta(days=_MARKET_LOOKBACK_DAYS),
             end=today - dt.timedelta(days=1),
         )
@@ -232,6 +232,40 @@ def _market_snapshot(
     _MARKET_CACHE.clear()
     _MARKET_CACHE[minute] = (price, prev_close)
     return price, prev_close
+
+
+def bandit_features(
+    article: NewsArticle,
+    ticker: Ticker,
+    features: ArticleFeatures,
+    pre_entry_move: float,
+    broker: BrokerInterface,
+    db_client: QuantAirflowDBClient,
+    expires_at: dt.datetime,
+) -> dict[str, float] | None:
+    """The bandit's feature row for this pair, decided now; None without 069500 data.
+
+    The one place features are gathered: the live verdict and the replay's
+    counterfactual dataset (`scripts/eval/bandit_dataset.py`) both call it.
+    Broker errors propagate (the verdict fails closed on them).
+    """
+    from daytrade_it.application.trading import bandit
+
+    decided_at = dt.datetime.now(KST)
+    bars = broker.get_minute_bars(ticker.value)
+    mkt_price, mkt_prev_close = _market_snapshot(broker, db_client, decided_at)
+    if mkt_price is None or mkt_prev_close is None or mkt_prev_close <= 0:
+        return None
+    return bandit.features_for(
+        features,
+        pre_entry_move,
+        article.published_at,
+        expires_at,
+        decided_at,
+        bars,
+        mkt_price,
+        mkt_prev_close,
+    )
 
 
 def _bandit_verdict(
@@ -256,26 +290,16 @@ def _bandit_verdict(
 
     try:
         model = bandit.load_model(model_path)
-        decided_at = dt.datetime.now(KST)
-        bars = broker.get_minute_bars(ticker.value)
+        x = bandit_features(
+            article, ticker, features, pre_entry_move, broker, db_client, expires_at
+        )
     except Exception as exc:
         skip("error", error=f"{type(exc).__name__}: {exc}")
         return None
-    mkt_price, mkt_prev_close = _market_snapshot(broker, db_client, decided_at)
-    if mkt_price is None or mkt_prev_close is None or mkt_prev_close <= 0:
+    if x is None:
         skip("market data unavailable")
         return None
     try:
-        x = bandit.features_for(
-            features,
-            pre_entry_move,
-            article.published_at,
-            expires_at,
-            decided_at,
-            bars,
-            mkt_price,
-            mkt_prev_close,
-        )
         enter, m, p = bandit.decide(model, x)
     except Exception as exc:
         skip("error", error=f"{type(exc).__name__}: {exc}")

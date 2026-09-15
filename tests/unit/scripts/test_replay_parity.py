@@ -676,3 +676,41 @@ def test_load_session_bars_runs_the_session_hours_guard(monkeypatch) -> None:
 
     with pytest.raises(ReplayDataError, match="000001"):
         replay_parity.load_session_bars(["000001"], DAY)
+
+
+def test_frozen_prev_closes_add_the_market_etf_to_an_older_file(tmp_path: Path) -> None:
+    import pytest  # noqa: PLC0415
+    from replay_parity import frozen_prev_closes  # noqa: PLC0415
+
+    def bars_a(codes, day):  # noqa: ANN001, ANN202
+        return [("A", dt.datetime(2026, 9, 14, 15, 30), 2900.0)]
+
+    old = frozen_prev_closes(["A"], DAY, tmp_path, bars_a, lambda _c, _d: {"A": Decimal(2900)})
+    fetched: list[list[str]] = []
+
+    def bars_mkt(codes, day):  # noqa: ANN001, ANN202
+        fetched.append(list(codes))
+        return [("069500", dt.datetime(2026, 9, 14, 15, 30), 35000.0)]
+
+    new = frozen_prev_closes(
+        ["069500", "A"], DAY, tmp_path, bars_mkt, lambda _c, _d: {"069500": Decimal(35000)}
+    )
+    assert fetched == [["069500"]]
+    assert new.closes["A"] == old.closes["A"]  # event closes stay frozen
+    assert new.closes["069500"] == (Decimal(35000), dt.date(2026, 9, 14))
+    assert new.krx["069500"] == (Decimal(35000), dt.date(2026, 9, 14))
+    assert frozen_prev_closes(["069500", "A"], DAY, tmp_path, bars_mkt, lambda _c, _d: {}) == new
+    assert fetched == [["069500"]]  # re-frozen once, then read
+    with pytest.raises(ValueError, match="Z"):
+        frozen_prev_closes(["069500", "A", "Z"], DAY, tmp_path, bars_mkt, lambda _c, _d: {})
+
+
+def test_day_codes_always_carry_the_market_etf() -> None:
+    from replay_parity import day_codes  # noqa: PLC0415
+
+    class E:
+        def __init__(self, t: str) -> None:
+            self.ticker = t
+
+    assert day_codes([E("000002"), E("000001"), E("000002")]) == ["000001", "000002", "069500"]
+    assert day_codes([]) == ["069500"]

@@ -57,10 +57,10 @@ def _build_day(day: dt.date) -> DayData:
 
 
 def _bars_row_count(day: dt.date, events_path: Path) -> int:
-    """kr_quant minute_bars rows on `day` for the events' tickers (part of the cache key)."""
-    from replay_parity import _conn  # noqa: PLC0415
+    """kr_quant minute_bars rows on `day` for the day's codes (events + 069500; cache key)."""
+    from replay_parity import _conn, day_codes  # noqa: PLC0415
 
-    codes = sorted({e.ticker for e in load_events(events_path) if VALID_TICKER.match(e.ticker)})
+    codes = day_codes([e for e in load_events(events_path) if VALID_TICKER.match(e.ticker)])
     with _conn() as c, c.cursor() as cur:
         cur.execute(
             "SELECT count(*) FROM minute_bars WHERE code = ANY(%s) AND ts >= %s AND ts < %s",
