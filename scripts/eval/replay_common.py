@@ -23,7 +23,7 @@ from pathlib import Path
 
 from replay_baseline import VALID_TICKER, last_regular_close, trade_pnl
 
-from daytrade_it.application.replay.day_replay import DayConfig, replay_day
+from daytrade_it.application.replay.day_replay import DayConfig, DayResult, replay_day
 from daytrade_it.application.replay.events import ReplayEvent, load_events
 from daytrade_it.application.replay.prev_close import FrozenPrevCloseDB, FrozenPrevCloses
 from daytrade_it.application.trading.policy import NewsPolicy
@@ -113,25 +113,26 @@ def load_day(
     return data
 
 
-def day_net(
+def run_day(
     data: DayData,
     policy: NewsPolicy,
     stocks: dict[str, StockInfo],
     dart: Path,
     work_root: Path,
     keep_run_dir: bool = False,
-) -> dict:
-    """Net P&L of `policy` on one day (costs included, leftovers at the last regular close).
+    cash: Decimal | None = None,
+) -> tuple[DayResult, list[dict]]:
+    """Replay `policy` on one day with a fresh `SimBroker` -> (result, `trade_pnl` rows).
 
-    `errors` counts error logs during the replay; `net` is reported as computed
-    either way, so the caller decides whether an errored day counts. The run
-    directory is removed afterwards unless `keep_run_dir` (thousands of trials).
+    `cash` overrides SimBroker's default deposit (the bandit's uncapped
+    counterfactual day). The run directory is removed unless `keep_run_dir`.
     """
     broker = SimBroker(
         data.bars,
         data.frozen.prices,
         lambda: dt.datetime.now(KST),
         limit_base=data.frozen.krx_prices,
+        **({} if cash is None else {"cash": cash}),
     )
     res = replay_day(
         data.day,
@@ -146,7 +147,24 @@ def day_net(
     )
     if not keep_run_dir and res.run_dir is not None:
         shutil.rmtree(res.run_dir, ignore_errors=True)
-    pnl = trade_pnl(res.fills, res.positions, last_regular_close(data.bars))
+    return res, trade_pnl(res.fills, res.positions, last_regular_close(data.bars))
+
+
+def day_net(
+    data: DayData,
+    policy: NewsPolicy,
+    stocks: dict[str, StockInfo],
+    dart: Path,
+    work_root: Path,
+    keep_run_dir: bool = False,
+) -> dict:
+    """Net P&L of `policy` on one day (costs included, leftovers at the last regular close).
+
+    `errors` counts error logs during the replay; `net` is reported as computed
+    either way, so the caller decides whether an errored day counts. The run
+    directory is removed afterwards unless `keep_run_dir` (thousands of trials).
+    """
+    res, pnl = run_day(data, policy, stocks, dart, work_root, keep_run_dir)
     nets = [r["net"] for r in pnl]
     return {
         "day": data.day,

@@ -406,3 +406,36 @@ def test_policy_selection_min_score_filters_pairs(tmp_path: Path) -> None:
     cfg = DayConfig(policy=NewsPolicy(selection=SelectionConfig(min_score=1.0)))
     res = _replay(tmp_path, *_fresh_broker(), cfg)
     assert {d["outcome"] for d in res.decisions} == {"no_signal"}
+
+
+def test_decisions_carry_the_event_key_and_a_deferred_outcome(tmp_path: Path) -> None:
+    clock_holder: dict = {}
+    bars = {"000001": _bars(10100)}
+    broker = SimBroker(bars, {"000001": Decimal(10000)}, lambda: clock_holder["now"]())
+    stocks = {"000001": StockInfo(code="000001", name="n", market="KOSPI", sector="s")}
+    limits = TradingLimits(
+        vwap_exit_gap=None, add_on_min_gain=None, entry_delay=dt.timedelta(minutes=3)
+    )
+    res = replay_day(
+        DAY,
+        [_event("1", "000001", "09:00:35")],
+        broker,
+        _DB(),
+        stocks,
+        dt.datetime(2026, 9, 14, 15, 20, tzinfo=KST),
+        DayConfig(policy=NewsPolicy(limits=limits)),
+        tmp_path,
+        _dart(tmp_path),
+        clock_holder=clock_holder,
+    )
+    assert [(d["key"], d["outcome"]) for d in res.decisions] == [("k1", "deferred")]
+    assert [r["ticker"] for r in res.ledger if r["event"] == "entry_submitted"] == ["000001"]
+
+
+def test_replay_day_starts_with_an_empty_market_cache(tmp_path: Path) -> None:
+    from daytrade_it.application.signals import news_entry  # noqa: PLC0415
+
+    stale = dt.datetime(2026, 9, 15, 9, 0)
+    news_entry._MARKET_CACHE[stale] = (None, None)
+    _run_day(tmp_path, *_fresh_broker())
+    assert stale not in news_entry._MARKET_CACHE

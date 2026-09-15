@@ -28,7 +28,7 @@ from structlog.processors import format_exc_info
 from structlog.testing import capture_logs
 
 from daytrade_it.application.replay.events import ReplayEvent, features_of, to_article
-from daytrade_it.application.signals import entry_filter
+from daytrade_it.application.signals import entry_filter, news_entry
 from daytrade_it.application.signals.news_entry import (
     EntryCandidate,
     build_entry_candidate,
@@ -69,6 +69,9 @@ def _enter_outcome(new_logs: list[dict], ticker: str, decision: dict) -> None:
         if ev == "auto_trader: entry skipped":
             decision.update(outcome="skipped", reason=r.get("reason"))
             return
+        if ev == "auto_trader: entry deferred":
+            decision.update(outcome="deferred")
+            return
     decision.update(outcome="enter_failed")
 
 
@@ -100,7 +103,8 @@ class DayResult:
     errors: list[dict] = field(default_factory=list)
     #: One row per judged pair, in decide order: ticker, decide_at, outcome
     #: (not_tradable | filter_failed | no_signal | extended | entered | skipped
-    #: | enter_failed) plus pre_entry_move / reason / limit where known.
+    #: | deferred | enter_failed) plus the event `key` and pre_entry_move /
+    #: reason / limit where known.
     decisions: list[dict] = field(default_factory=list)
     #: `execute_trade` pre-order refusals (ledger `entry_refused`: risk gate,
     #: DART, price band, kill switch).
@@ -215,6 +219,8 @@ def replay_day(
     if clock_holder is not None:
         clock_holder["now"] = lambda: dt.datetime.now(KST)
     timeline = _timeline(day, events, config)
+    # The bandit's 069500 snapshot is cached per minute: never carry one across replays.
+    news_entry._MARKET_CACHE.clear()
     decisions: list[dict] = []
     try:
         entry_filter.MAX_PRE_ENTRY_MOVE = no_chase_cap(config.policy)
@@ -302,7 +308,7 @@ async def _run(
                 logger.exception("replay: manage failed")
         elif kind == 1:
             e: ReplayEvent = payload
-            decision: dict = {"ticker": e.ticker, "decide_at": e.decide_at}
+            decision: dict = {"ticker": e.ticker, "decide_at": e.decide_at, "key": e.key}
             decisions.append(decision)
             article = to_article(e)
             if not any(

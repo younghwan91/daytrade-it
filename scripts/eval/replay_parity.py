@@ -521,7 +521,7 @@ def _price_class(
 def _filter_side(d: dict) -> str:
     """What the no-chase filter decided for a pair: extended, pass or the outcome."""
     o = d["outcome"]
-    if o in ("entered", "skipped", "signal", "pending", "enter_failed"):
+    if o in ("entered", "skipped", "deferred", "signal", "pending", "enter_failed"):
         return "pass"
     return o
 
