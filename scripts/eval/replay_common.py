@@ -32,6 +32,10 @@ from daytrade_it.infrastructure.brokers.sim_broker import SimBroker
 from daytrade_it.infrastructure.external.quant_airflow_db_client import StockInfo
 
 CACHE = Path("data/eval/cache/days")
+#: Which codes a day carries besides its events (replay_parity.day_codes); part of
+#: the cache key, so a pickle built before 069500 joined is rebuilt even when
+#: kr_quant had no 069500 bar that day.
+CODES_VERSION = "events+069500"
 
 
 @dataclass
@@ -74,6 +78,7 @@ def _input_key(day: dt.date, events_dir: Path, prev_close_dir: Path) -> str:
     events_path = events_dir / f"{day}.jsonl"
     prev = prev_close_dir / f"{day}.json"
     h = hashlib.sha256()
+    h.update(f"codes:{CODES_VERSION}\0".encode())
     h.update(events_path.read_bytes())
     h.update(b"\0prev\0")
     h.update(prev.read_bytes() if prev.exists() else b"<none>")

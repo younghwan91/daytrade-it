@@ -231,9 +231,14 @@ def main(argv: list[str] | None = None) -> None:
     rows = [r for day in per_day for r in day]
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows))
+    no_market = 0
     for s in summarize(rows):
         print(json.dumps(s, ensure_ascii=False))
+        no_market += s["no_market"]
     print(f"{len(rows)} rows ({len(trainable(rows))} trainable) -> {args.out}", file=sys.stderr)
+    if no_market:
+        print(f"ERROR: {no_market} row(s) without 069500 data (not trainable)", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

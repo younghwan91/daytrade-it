@@ -202,3 +202,12 @@ def test_built_day_carries_069500_bars_and_prior_close(tmp_path: Path, monkeypat
     assert seen == [["000001", "069500"]]
     assert "069500" in data.bars and "069500" in data.frozen.closes
     assert [e.ticker for e in data.events] == ["000001"]
+
+
+def test_load_day_cache_key_carries_the_code_set_version(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    calls, events_dir, prev_dir, cache = _cache_env(tmp_path, monkeypatch)
+    kw = {"cache_dir": cache, "events_dir": events_dir, "prev_close_dir": prev_dir}
+    load_day(DAY, **kw)
+    monkeypatch.setattr(replay_common, "CODES_VERSION", "test-next")
+    load_day(DAY, **kw)
+    assert len(calls) == 2  # a pickle built before 069500 joined the day codes is not reused
