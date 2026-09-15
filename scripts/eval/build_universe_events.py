@@ -65,29 +65,100 @@ def _parse_created(value: str) -> dt.datetime:
     return ts.replace(tzinfo=KST) if ts.tzinfo is None else ts.astimezone(KST)
 
 
-def load_articles(root: Path) -> dict[str, dict]:
-    """C1 files -> article id -> {title, summary, category, published_at, codes}."""
+#: C1 `.done` statuses whose file stops before `since` (Toss's 100-page cap or
+#: the collector's `--max-pages`): coverage starts at the earliest row instead.
+TRUNCATED = frozenset({"page_cap", "max_pages"})
+
+
+class IncompleteDay(RuntimeError):
+    """A day's universe has codes the C1 backfill hasn't finished (no `.done`)."""
+
+
+def load_c1(root: Path) -> tuple[dict[str, dict], dict[str, dict]]:
+    """C1 files of finished codes -> (articles, coverage).
+
+    Only `{code}.jsonl` with a `{code}.done` next to it is read: a code still
+    being backfilled (or failed) has no `.done` and its partial rows would
+    silently under-count related codes. articles: news id -> {news_id, title,
+    summary, category, published_at, codes}. coverage: code -> {status, start}
+    where start is `since` 00:00 KST for a complete code and the earliest
+    createdAt in the file for a truncated one (S12).
+    """
     arts: dict[str, dict] = {}
     codes: dict[str, set[str]] = {}
-    for path in sorted(root.glob("*.jsonl")):
-        with path.open() as f:
-            for line in f:
-                if not line.strip():
-                    continue
-                r = json.loads(line)
-                news_id = str(r["id"])
-                codes.setdefault(news_id, set()).add(r.get("code") or path.stem)
-                if news_id not in arts:
-                    arts[news_id] = {
-                        "news_id": news_id,
-                        "title": r.get("title") or "",
-                        "summary": r.get("summary") or "",
-                        "category": r.get("category"),
-                        "published_at": _parse_created(r["createdAt"]),
-                    }
+    coverage: dict[str, dict] = {}
+    for done in sorted(root.glob("*.done")):
+        code = done.stem
+        info = json.loads(done.read_text())
+        status = info.get("status")
+        start = dt.datetime.combine(dt.date.fromisoformat(info["since"]), dt.time(0), tzinfo=KST)
+        earliest: dt.datetime | None = None
+        path = root / f"{code}.jsonl"
+        if path.exists():
+            with path.open() as f:
+                for line in f:
+                    if not line.strip():
+                        continue
+                    r = json.loads(line)
+                    news_id = str(r["id"])
+                    created = _parse_created(r["createdAt"])
+                    earliest = created if earliest is None else min(earliest, created)
+                    codes.setdefault(news_id, set()).add(code)
+                    if news_id not in arts:
+                        arts[news_id] = {
+                            "news_id": news_id,
+                            "title": r.get("title") or "",
+                            "summary": r.get("summary") or "",
+                            "category": r.get("category"),
+                            "published_at": created,
+                        }
+        if status in TRUNCATED and earliest is not None:
+            start = max(start, earliest)
+        coverage[code] = {"status": status, "start": start}
     for news_id, related in related_codes(codes).items():
         arts[news_id]["codes"] = related
-    return arts
+    return arts, coverage
+
+
+def load_articles(root: Path) -> dict[str, dict]:
+    """Articles only (see `load_c1`)."""
+    return load_c1(root)[0]
+
+
+def covered(code: str, coverage: dict[str, dict] | None, window_start: dt.datetime) -> bool:
+    """Whether the C1 file of `code` holds every article of a window starting at `window_start`."""
+    if coverage is None:
+        return True
+    info = coverage.get(code)
+    return info is not None and info["start"] <= window_start
+
+
+def check_day_coverage(
+    universe: list[str],
+    coverage: dict[str, dict],
+    day: dt.date,
+    prev_day: dt.date,
+    allow_incomplete: bool = False,
+) -> dict:
+    """Per-day C1 readiness: missing (no `.done`), truncated, and uncovered universe codes.
+
+    Raises `IncompleteDay` listing the missing codes unless `allow_incomplete`.
+    """
+    lo = dt.datetime.combine(prev_day, CUTOFF, tzinfo=KST)
+    missing = [c for c in universe if c not in coverage]
+    report = {
+        "universe": len(universe),
+        "missing": missing,
+        "truncated": [c for c in universe if c in coverage and coverage[c]["status"] in TRUNCATED],
+        "uncovered": [c for c in universe if not covered(c, coverage, lo)],
+    }
+    if missing and not allow_incomplete:
+        shown = ", ".join(missing[:20]) + (" ..." if len(missing) > 20 else "")
+        raise IncompleteDay(
+            f"{day}: {len(missing)} universe code(s) without C1 .done: {shown} "
+            "(finish the backfill or pass --allow-incomplete)"
+        )
+    return report
 
 
 def bucket_articles(
@@ -113,8 +184,15 @@ def day_pairs(
     day: dt.date,
     prev_day: dt.date,
     universe: list[str],
+    coverage: dict[str, dict] | None = None,
+    stats: dict | None = None,
 ) -> list[dict]:
     """(article, code) pairs the sweep would judge on `day`, with the discovery time.
+
+    S12: a code whose C1 coverage starts after the day's window start
+    (`covered`) is dropped for that day -- both its pairs and its use as a
+    related code for discovery -- and counted in `stats["excluded_pairs"]`.
+    `coverage=None` treats every code as covered.
 
     Live-sweep parity (C5): a new article is found at the first visit of ANY
     of its related universe codes after publication, and all of its pairs
@@ -127,11 +205,14 @@ def day_pairs(
     open_ = dt.datetime.combine(day, OPEN, tzinfo=KST)
     members = set(universe)
     out = []
+    excluded = 0
     for a in articles.values() if isinstance(articles, dict) else articles:
         pub = a["published_at"]
         if not lo <= pub < hi:
             continue
-        codes = [c for c in a["codes"] if c in members]
+        in_universe = [c for c in a["codes"] if c in members]
+        codes = [c for c in in_universe if covered(c, coverage, lo)]
+        excluded += len(in_universe) - len(codes)
         visits = [v for c in codes if (v := next_visit(c, universe, day, max(pub, start)))]
         if not visits:
             continue
@@ -152,6 +233,8 @@ def day_pairs(
                 }
             )
     out.sort(key=lambda p: (p["visit_at"], p["key"]))
+    if stats is not None:
+        stats["excluded_pairs"] = stats.get("excluded_pairs", 0) + excluded
     return out
 
 
@@ -298,6 +381,45 @@ def _db_sources() -> tuple[list[dt.date], Callable[[dt.date], dict[str, float]],
     return trading, daily_values, db.get_stock_master()
 
 
+def dashboard_keys(day: dt.date, archive: Path = ARCHIVE) -> set[str] | None:
+    """Pair keys the live dashboard daemon judged on `day`, or None if no archive file."""
+    path = archive / f"{day}.jsonl"
+    if not path.exists():
+        return None
+    keys = set()
+    for line in path.open():
+        if line.strip():
+            try:
+                keys.add(json.loads(line)["key"])
+            except (ValueError, KeyError):
+                continue
+    return keys
+
+
+def prepare_day(
+    articles: Iterable[dict],
+    day: dt.date,
+    prev_day: dt.date,
+    universe: list[str],
+    coverage: dict[str, dict],
+    allow_incomplete: bool,
+    archive: Path = ARCHIVE,
+) -> tuple[list[dict], str]:
+    """Coverage-checked pairs for one day plus its summary line (raises `IncompleteDay`)."""
+    report = check_day_coverage(universe, coverage, day, prev_day, allow_incomplete)
+    stats: dict = {}
+    pairs = day_pairs(articles, day, prev_day, universe, coverage, stats)
+    dash = dashboard_keys(day, archive)
+    overlap = "n/a" if dash is None else str(sum(p["key"] in dash for p in pairs))
+    line = (
+        f"{day}: universe {report['universe']} truncated {len(report['truncated'])} "
+        f"missing {len(report['missing'])} uncovered {len(report['uncovered'])} "
+        f"pairs {len(pairs)} excluded_pairs {stats.get('excluded_pairs', 0)} "
+        f"dashboard_overlap {overlap}"
+    )
+    return pairs, line
+
+
 def main() -> None:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     ap = argparse.ArgumentParser()
@@ -311,35 +433,52 @@ def main() -> None:
     ap.add_argument(
         "--pairs-out", type=Path, default=None, help="write C4 pairs file instead of events"
     )
+    ap.add_argument(
+        "--allow-incomplete",
+        action="store_true",
+        help="proceed on days whose universe has codes without a C1 .done (counts are printed)",
+    )
     args = ap.parse_args()
 
     trading, daily_values, stocks = _db_sources()
     days = parse_days(args.days, trading)
-    articles = load_articles(args.c1_dir)
+    articles, coverage = load_c1(args.c1_dir)
     buckets = bucket_articles(articles, trading)
-    print(f"{len(articles)} articles from {args.c1_dir}; {len(days)} trading days")
+    print(
+        f"{len(articles)} articles from {len(coverage)} finished codes in {args.c1_dir}; "
+        f"{len(days)} trading days"
+    )
+
+    def plans():
+        for day in days:
+            i = bisect.bisect_left(trading, day)
+            if i == 0:
+                print(f"{day}: no previous trading day in bars -- skipped")
+                continue
+            universe = select_universe(daily_values(trading[i - 1]))
+            try:
+                pairs, line = prepare_day(
+                    buckets.get(day, []),
+                    day,
+                    trading[i - 1],
+                    universe,
+                    coverage,
+                    args.allow_incomplete,
+                )
+            except IncompleteDay as exc:
+                sys.exit(f"REFUSED: {exc}")
+            print(line)
+            yield day, pairs
 
     if args.pairs_out:
         seen: set[str] = set()
         args.pairs_out.parent.mkdir(parents=True, exist_ok=True)
         with args.pairs_out.open("w") as f:
-            for day in days:
-                i = bisect.bisect_left(trading, day)
-                if i == 0:
-                    print(f"{day}: no previous trading day in bars -- skipped")
-                    continue
-                universe = select_universe(daily_values(trading[i - 1]))
-                rows = [
-                    r
-                    for r in pair_rows(
-                        day_pairs(buckets.get(day, []), day, trading[i - 1], universe), stocks
-                    )
-                    if r["key"] not in seen
-                ]
+            for _day, pairs in plans():
+                rows = [r for r in pair_rows(pairs, stocks) if r["key"] not in seen]
                 seen.update(r["key"] for r in rows)
                 for r in rows:
                     f.write(json.dumps(r, ensure_ascii=False) + "\n")
-                print(day, "pairs", len(rows))
         print(f"wrote {len(seen)} pairs -> {args.pairs_out}")
         return
 
@@ -355,18 +494,17 @@ def main() -> None:
         )
 
     cache = load_cache(args.cache)
-    for day in days:
-        i = bisect.bisect_left(trading, day)
-        if i == 0:
-            print(f"{day}: no previous trading day in bars -- skipped")
-            continue
-        n, excluded = run_day(
-            buckets.get(day, []), day, trading[i - 1], daily_values, stocks, cache, lag, args.out
-        )
-        print(day, "universe events", n, "excluded (no cached judgment)", excluded)
+    done_days = []
+    for day, pairs in plans():
+        events, excluded = build_day_events(pairs, stocks, cache, lag)
+        dump_events(args.out / f"{day}.jsonl", events)
+        done_days.append(day)
+        print(day, "universe events", len(events), "excluded (no cached judgment)", excluded)
     args.out.mkdir(parents=True, exist_ok=True)
     (args.out / "meta.json").write_text(
-        json.dumps({"judge_lag_s": lag.total_seconds(), "days": [str(d) for d in days]}, indent=1)
+        json.dumps(
+            {"judge_lag_s": lag.total_seconds(), "days": [str(d) for d in done_days]}, indent=1
+        )
     )
 
 

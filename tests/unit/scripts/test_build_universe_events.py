@@ -10,13 +10,17 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "scripts" / "eval"))
 
 from build_universe_events import (  # noqa: E402
+    IncompleteDay,
     bucket_articles,
     build_day_events,
+    check_day_coverage,
     day_pairs,
     load_articles,
+    load_c1,
     measure_judge_lag,
     pair_rows,
     parse_days,
+    prepare_day,
     run_day,
 )
 
@@ -47,11 +51,14 @@ STOCKS = {
 }
 
 
-def _write_c1(root: Path, code: str, rows: list[dict]) -> None:
+def _write_c1(
+    root: Path, code: str, rows: list[dict], status: str = "done", since: str = "2026-09-01"
+) -> None:
     root.mkdir(parents=True, exist_ok=True)
     with (root / f"{code}.jsonl").open("a") as f:
         for r in rows:
             f.write(json.dumps({**r, "code": code}, ensure_ascii=False) + "\n")
+    (root / f"{code}.done").write_text(json.dumps({"status": status, "rows": 0, "since": since}))
 
 
 def _row(news_id: str, created: str, title: str = "t", summary: str = "s") -> dict:
@@ -212,3 +219,116 @@ def test_bucketed_day_pairs_match_full_scan(c1: Path) -> None:
             arts, day, prev, universe
         )
     assert sum(len(v) for v in buckets.values()) <= len(arts)
+
+
+# --- F2 (S12): C1 coverage -----------------------------------------------------
+
+
+def test_load_c1_reads_only_finished_codes(tmp_path: Path) -> None:
+    root = tmp_path / "u"
+    _write_c1(root, "005930", [_row("a", "2026-09-15T09:00:00")])
+    # still being backfilled: no .done, plus a partial file
+    (root / "000660.jsonl").write_text(
+        json.dumps({**_row("b", "2026-09-15T09:00:00"), "code": "000660"}) + "\n"
+    )
+    (root / "000660.partial.jsonl").write_text(
+        json.dumps({**_row("c", "2026-09-15T09:00:00"), "code": "000660"}) + "\n"
+    )
+    arts, coverage = load_c1(root)
+    assert set(arts) == {"a"}
+    assert set(coverage) == {"005930"}
+    assert load_articles(root).keys() == arts.keys()
+
+
+def test_coverage_start_is_since_for_done_and_earliest_row_for_page_cap(tmp_path: Path) -> None:
+    root = tmp_path / "u"
+    _write_c1(root, "005930", [_row("a", "2026-09-15T09:00:00")], since="2026-09-01")
+    _write_c1(
+        root,
+        "000660",
+        [
+            _row("b", "2026-09-15T09:00:00"),
+            _row("c", "2026-09-14T17:00:00"),
+            _row("d", "2026-09-15T08:00:00"),
+        ],
+        status="page_cap",
+    )
+    _, coverage = load_c1(root)
+    assert coverage["005930"]["status"] == "done"
+    assert coverage["005930"]["start"] == dt.datetime(2026, 9, 1, tzinfo=KST)
+    assert coverage["000660"]["status"] == "page_cap"
+    assert coverage["000660"]["start"] == dt.datetime(2026, 9, 14, 17, 0, tzinfo=KST)
+
+
+def test_day_pairs_drops_truncated_code_before_its_coverage_start(tmp_path: Path) -> None:
+    root = tmp_path / "u"
+    row = _row("x", "2026-09-15T09:00:00")
+    _write_c1(root, "005930", [row])
+    # 000660 page_cap: earliest row 09-14 17:00 > D's window start (09-14 15:20) -> not covered on D
+    _write_c1(root, "000660", [row, _row("y", "2026-09-14T17:00:00")], status="page_cap")
+    arts, coverage = load_c1(root)
+    universe = ["005930", "000660"]
+    stats: dict = {}
+    pairs = day_pairs(arts, D, PREV, universe, coverage=coverage, stats=stats)
+    assert {(p["news_id"], p["code"]) for p in pairs} == {
+        ("x", "005930")
+    }  # y and (x, 000660) dropped
+    assert stats["excluded_pairs"] == 2
+    # the next day's window starts 09-15 15:20 >= coverage start: covered again
+    nxt = dt.date(2026, 9, 16)
+    late = _row("z", "2026-09-16T09:00:00")
+    _write_c1(root, "000660", [late], status="page_cap")
+    arts, coverage = load_c1(root)
+    assert {p["code"] for p in day_pairs(arts, nxt, D, universe, coverage=coverage)} == {"000660"}
+
+
+def test_first_backfill_day_is_fully_excluded(tmp_path: Path) -> None:
+    root = tmp_path / "u"
+    _write_c1(root, "005930", [_row("a", "2026-03-16T09:00:00")], since="2026-03-16")
+    arts, coverage = load_c1(root)
+    stats: dict = {}
+    # 2026-03-16's window starts 2026-03-13 15:20, before since -> nothing is covered
+    pairs = day_pairs(arts, dt.date(2026, 3, 16), dt.date(2026, 3, 13), ["005930"], coverage, stats)
+    assert pairs == [] and stats["excluded_pairs"] == 1
+
+
+def test_check_day_coverage_refuses_missing_codes(tmp_path: Path) -> None:
+    root = tmp_path / "u"
+    _write_c1(root, "005930", [])
+    _write_c1(root, "000660", [_row("y", "2026-09-15T08:00:00")], status="page_cap")
+    _, coverage = load_c1(root)
+    universe = ["005930", "000660", "123456"]
+    with pytest.raises(IncompleteDay, match="123456"):
+        check_day_coverage(universe, coverage, D, PREV)
+    report = check_day_coverage(universe, coverage, D, PREV, allow_incomplete=True)
+    assert report["missing"] == ["123456"]
+    assert report["truncated"] == ["000660"]
+    assert report["uncovered"] == ["000660", "123456"]
+    assert report["universe"] == 3
+
+
+def test_prepare_day_prints_coverage_and_dashboard_overlap(tmp_path: Path) -> None:
+    root = tmp_path / "u"
+    _write_c1(root, "005930", [_row("a", "2026-09-15T09:00:00")])
+    _write_c1(
+        root,
+        "000660",
+        [_row("a", "2026-09-15T09:00:00"), _row("b", "2026-09-15T08:00:00")],
+        status="page_cap",
+    )
+    arts, coverage = load_c1(root)
+    archive = tmp_path / "news_judgments"
+    archive.mkdir()
+    (archive / f"{D}.jsonl").write_text(
+        json.dumps({"key": f"{live_article_id('a')}|005930"}) + "\n"
+    )
+    pairs, line = prepare_day(
+        arts.values(), D, PREV, ["005930", "000660"], coverage, False, archive
+    )
+    assert [p["code"] for p in pairs] == ["005930"]
+    assert "universe 2 truncated 1 missing 0 uncovered 1 pairs 1 excluded_pairs 2" in line
+    assert line.endswith("dashboard_overlap 1")
+    with pytest.raises(IncompleteDay):
+        prepare_day(arts.values(), D, PREV, ["005930", "999999"], coverage, False, archive)
+    _, line = prepare_day(arts.values(), D, PREV, ["005930"], coverage, False, tmp_path / "none")
+    assert line.endswith("dashboard_overlap n/a")
