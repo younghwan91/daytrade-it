@@ -19,7 +19,8 @@ the first exit's submission time must agree within one manage tick (30 s,
 (`sell_fill`).
 
 Previous closes (I2) come from `data/eval/prev_close/YYYY-MM-DD.json`: the
-prior session's last regular minute bar, frozen once and served to SimBroker
+prior session's last minute bar with ts <= 20:00 (unified KRX+NXT close, R17;
+the KRX close < 15:33 is stored as krx_close), frozen once and served to SimBroker
 and the no-chase filter; tickers whose frozen close is > 0.1% off today's
 daily_bars_adjusted are printed. `data_vintage` (R11) is judged against the
 frozen close.
@@ -67,6 +68,8 @@ PREV_CLOSE = Path("data/eval/prev_close")
 #: extends the auction (09-01..09-15: 2,895 bars at 15:30, 22 at 15:32, none
 #: at 15:31/15:33/15:34). NXT after-market bars start at 15:35.
 REGULAR_OPEN, REGULAR_END = dt.time(9, 0), dt.time(15, 33)
+#: R17: live no-chase reads the unified KRX+NXT daily close = last bar by 20:00.
+UNIFIED_END = dt.time(20, 0)
 #: No KRX/NXT trading before 08:00: an earlier bar means a timezone mix-up.
 EARLIEST_BAR = dt.time(8, 0)
 PREV_CLOSE_LOOKBACK = dt.timedelta(days=10)  # entry_filter._LOOKBACK_DAYS
@@ -182,16 +185,20 @@ def daily_adjusted_closes(codes: list[str], day: dt.date) -> dict[str, Decimal]:
 
 
 def prior_regular_bars(codes: list[str], day: dt.date) -> list[tuple[str, dt.datetime, float]]:
-    """(code, ts, close) of each code's last regular bar in the lookback before `day`."""
+    """(code, ts, close) of each code's last regular bar and last bar by 20:00 in the
+    lookback before `day`."""
+    out = []
     with _conn() as c, c.cursor() as cur:
         cur.execute("SET max_parallel_workers_per_gather = 0")
-        cur.execute(
-            "SELECT DISTINCT ON (code) code, ts, close FROM minute_bars "
-            "WHERE code = ANY(%s) AND ts >= %s AND ts < %s "
-            "AND ts::time >= %s AND ts::time < %s ORDER BY code, ts DESC",
-            (codes, day - PREV_CLOSE_LOOKBACK, day, REGULAR_OPEN, REGULAR_END),
-        )
-        return [(code, to_kst_naive(ts), close) for code, ts, close in cur.fetchall()]
+        for lo, hi, op in ((REGULAR_OPEN, REGULAR_END, "<"), (dt.time(0, 0), UNIFIED_END, "<=")):
+            cur.execute(
+                "SELECT DISTINCT ON (code) code, ts, close FROM minute_bars "
+                "WHERE code = ANY(%s) AND ts >= %s AND ts < %s "
+                f"AND ts::time >= %s AND ts::time {op} %s ORDER BY code, ts DESC",
+                (codes, day - PREV_CLOSE_LOOKBACK, day, lo, hi),
+            )
+            out += [(code, to_kst_naive(ts), close) for code, ts, close in cur.fetchall()]
+    return out
 
 
 def last_regular_closes(
@@ -201,6 +208,19 @@ def last_regular_closes(
     best: dict[str, tuple[dt.datetime, float]] = {}
     for code, ts, close in rows:
         if ts.date() >= day or not (REGULAR_OPEN <= ts.time() < REGULAR_END):
+            continue
+        if code not in best or ts > best[code][0]:
+            best[code] = (ts, close)
+    return {c: (Decimal(str(cl)), ts.date()) for c, (ts, cl) in best.items()}
+
+
+def last_unified_closes(
+    rows: list[tuple[str, dt.datetime, float]], day: dt.date
+) -> dict[str, tuple[Decimal, dt.date]]:
+    """Each code's close at its latest bar with ts <= 20:00 strictly before `day` (NXT incl.)."""
+    best: dict[str, tuple[dt.datetime, float]] = {}
+    for code, ts, close in rows:
+        if ts.date() >= day or ts.time() > UNIFIED_END:
             continue
         if code not in best or ts > best[code][0]:
             best[code] = (ts, close)
@@ -244,10 +264,12 @@ def frozen_prev_closes(
         if uncovered:
             raise ValueError(f"{path} was frozen without event codes {uncovered}")
         return frozen
-    closes = last_regular_closes(fetch_bars(codes, day), day)
+    rows = fetch_bars(codes, day)
+    closes = last_unified_closes(rows, day)
     frozen = FrozenPrevCloses(
         day=day,
         closes=closes,
+        krx=last_regular_closes(rows, day),
         flags=vintage_flags(closes, fetch_daily(codes, day)),
         missing=sorted(set(codes) - set(closes)),
     )
@@ -916,8 +938,8 @@ def check_prev_close_coverage(frozen: FrozenPrevCloses) -> None:
     n = len(frozen.closes) + len(frozen.missing)
     if n and len(frozen.missing) / n > MAX_MISSING_BARS:
         raise ReplayDataError(
-            f"{len(frozen.missing)}/{n} event tickers have no prior-session regular minute "
-            f"bar for a frozen prev close (> {MAX_MISSING_BARS:.0%}): {frozen.missing}"
+            f"{len(frozen.missing)}/{n} event tickers have no prior-session minute bar "
+            f"for a frozen prev close (> {MAX_MISSING_BARS:.0%}): {frozen.missing}"
         )
 
 

@@ -21,6 +21,7 @@ PREV = dt.date(2026, 9, 14)
 FROZEN = FrozenPrevCloses(
     day=DAY,
     closes={"424870": (Decimal(2900), PREV)},
+    krx={"424870": (Decimal(2880), PREV)},
     flags=[{"code": "424870", "frozen": "2900", "daily_adjusted": "2720", "dev": "0.0662"}],
 )
 

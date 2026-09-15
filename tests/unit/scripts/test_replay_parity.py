@@ -446,6 +446,25 @@ def test_last_regular_closes_ignore_after_hours_and_the_day_itself() -> None:
     }
 
 
+def test_unified_closes_take_the_last_bar_up_to_2000_including_nxt() -> None:
+    """R17: live no-chase reads kr_quant's unified daily close = NXT after-market last price."""
+    from replay_parity import last_unified_closes  # noqa: PLC0415
+
+    rows = [
+        ("A", dt.datetime(2026, 9, 14, 15, 30), 2900.0),
+        ("A", dt.datetime(2026, 9, 14, 19, 59), 2950.0),
+        ("A", dt.datetime(2026, 9, 14, 20, 1), 2999.0),  # after 20:00
+        ("A", dt.datetime(2026, 9, 15, 8, 0), 3000.0),  # the day itself
+        ("B", dt.datetime(2026, 9, 11, 15, 35), 510.0),  # halted on 09-14
+        ("C", dt.datetime(2026, 9, 14, 20, 0), 70.0),
+    ]
+    assert last_unified_closes(rows, DAY) == {
+        "A": (Decimal(2950), dt.date(2026, 9, 14)),
+        "B": (Decimal(510), dt.date(2026, 9, 11)),
+        "C": (Decimal(70), dt.date(2026, 9, 14)),
+    }
+
+
 def test_vintage_flags_list_closes_off_by_more_than_a_tenth_of_a_percent() -> None:
     from replay_parity import vintage_flags  # noqa: PLC0415
 
@@ -462,7 +481,10 @@ def test_frozen_prev_closes_are_built_once_and_reused(tmp_path: Path) -> None:
 
     def fetch_bars(codes, day):  # noqa: ANN001, ANN202
         calls.append("bars")
-        return [("A", dt.datetime(2026, 9, 14, 15, 30), 2900.0)]
+        return [
+            ("A", dt.datetime(2026, 9, 14, 15, 30), 2900.0),
+            ("A", dt.datetime(2026, 9, 14, 19, 59), 2950.0),
+        ]
 
     def fetch_daily(codes, day):  # noqa: ANN001, ANN202
         calls.append("daily")
@@ -472,7 +494,8 @@ def test_frozen_prev_closes_are_built_once_and_reused(tmp_path: Path) -> None:
     second = frozen_prev_closes(["A", "B"], DAY, tmp_path, fetch_bars, fetch_daily)
     assert calls == ["bars", "daily"]
     assert first == second
-    assert first.prices == {"A": Decimal(2900)} and first.missing == ["B"]
+    assert first.prices == {"A": Decimal(2950)} and first.missing == ["B"]
+    assert first.krx == {"A": (Decimal(2900), dt.date(2026, 9, 14))}
     assert (tmp_path / "2026-09-15.json").exists()
     assert [f["code"] for f in first.flags] == ["A"]
 
