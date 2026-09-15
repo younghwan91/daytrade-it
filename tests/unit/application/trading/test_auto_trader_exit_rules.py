@@ -105,13 +105,13 @@ def test_take_profit_fires_at_threshold() -> None:
     assert exit_rule_hit(at, E, entered, _t("09:02:00"), lim) == "take_profit"
 
 
-def test_trailing_uses_peak_since_entry_minute() -> None:
+def test_trailing_uses_peak_after_entry_minute() -> None:
     lim = TradingLimits(trail_after_gain=Decimal("0.02"), trail_gap=Decimal("0.01"), **_OFF)
     entered = _t("09:00:30")
-    base = [_bar("09:00", 102), _bar("09:01", 101)]
-    assert exit_rule_hit(base, E, entered, _t("09:02:00"), lim) is None  # 101 > 100.98
-    fell = [*base, _bar("09:02", 100.98)]
-    assert exit_rule_hit(fell, E, entered, _t("09:03:00"), lim) == "trailing"
+    base = [_bar("09:00", 100), _bar("09:01", 102), _bar("09:02", 101)]
+    assert exit_rule_hit(base, E, entered, _t("09:03:00"), lim) is None  # 101 > 100.98
+    fell = [*base, _bar("09:03", 100.98)]
+    assert exit_rule_hit(fell, E, entered, _t("09:04:00"), lim) == "trailing"
     # A peak before the entry minute does not arm the trail.
     late = [_bar("09:00", 105), _bar("09:01", 101), _bar("09:02", 100)]
     assert exit_rule_hit(late, E, _t("09:01:10"), _t("09:03:00"), lim) is None
@@ -212,3 +212,11 @@ async def test_default_vwap_break_ledger_row_is_unchanged(tmp_path: Path) -> Non
         broker.bars["005930"], Decimal(70100), clock.now, Decimal("0.01"), Decimal("0.02")
     )
     assert (row["close"], row["vwap"]) == (str(close), str(vwap))
+
+
+def test_trailing_ignores_entry_minute_high_before_entry() -> None:
+    """Ruling S3: the entry-minute bar's high can predate the entry."""
+    lim = TradingLimits(trail_after_gain=Decimal("0.02"), trail_gap=Decimal("0.01"), **_OFF)
+    entered = _t("09:00:30")
+    bars = [_bar("09:00", 100, high=103), _bar("09:01", 100.5)]
+    assert exit_rule_hit(bars, E, entered, _t("09:02:00"), lim) is None

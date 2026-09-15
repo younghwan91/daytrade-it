@@ -56,6 +56,8 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
+from krx_quant_core.market.ticks import tick_size
+
 from daytrade_it.domain.entities.signal import SignalDirection, TradingSignal
 from daytrade_it.domain.services.risk_manager import RiskConfig, RiskManager
 from daytrade_it.infrastructure.brokers.base import (
@@ -133,6 +135,26 @@ class TradingLimits:
     trail_after_gain: Decimal | None = None
     #: Trailing stop gap below the peak (used only with trail_after_gain).
     trail_gap: Decimal = Decimal("0.01")
+    # -- entry timing (`entry_ready`), all off by default --
+    #: Enter only once this long has passed since the signal. None disables.
+    entry_delay: dt.timedelta | None = None
+    #: Enter once a completed close is this far below the price at the signal. None disables.
+    entry_pullback: Decimal | None = None
+    #: Enter on the completed bar that closes back above VWAP after one closed below it.
+    entry_vwap_reclaim: bool = False
+    #: Longest a deferred entry waits for its conditions (then `entry_expired`).
+    entry_max_wait: dt.timedelta = dt.timedelta(minutes=30)
+    #: Entry limit = ask - tick_size(ask) x this; 0 buys at the ask.
+    entry_limit_ticks: int = 0
+
+
+_ENTRY_CLOSING_EVENTS = (
+    "entry_submitted",
+    "entry_unknown",
+    "entry_refused",
+    "entry_dry_run",
+    "entry_expired",
+)
 
 
 @dataclass
@@ -147,6 +169,8 @@ class _DayState:
     exit_attempts: dict[str, int] = field(default_factory=dict)
     add_ons: dict[str, dict[str, Any]] = field(default_factory=dict)
     open_add_on_orders: dict[str, dict[str, Any]] = field(default_factory=dict)
+    #: `entry_deferred` rows still waiting for their timing conditions, by ticker.
+    deferred: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 def rank_batch(items: list[tuple[TradingSignal, int, float]]) -> list[TradingSignal]:
@@ -227,8 +251,9 @@ def exit_rule_hit(
     if lim.take_profit_pct is not None and close >= entry * (1 + lim.take_profit_pct):
         return "take_profit"
     if lim.trail_after_gain is not None:
-        entry_minute = entered_at.replace(tzinfo=None, second=0, microsecond=0)
-        since = [b.high for b in done if b.ts >= entry_minute]
+        # From the minute after entry: the entry minute's high can predate the fill.
+        after = entered_at.replace(tzinfo=None, second=0, microsecond=0) + dt.timedelta(minutes=1)
+        since = [b.high for b in done if b.ts >= after]
         if since:
             peak = max(since)
             if peak >= entry * (1 + lim.trail_after_gain) and close <= peak * (1 - lim.trail_gap):
@@ -238,6 +263,72 @@ def exit_rule_hit(
         if hit:
             return "vwap_break"
     return None
+
+
+def _any_entry_timing(lim: TradingLimits) -> bool:
+    return lim.entry_delay is not None or lim.entry_pullback is not None or lim.entry_vwap_reclaim
+
+
+def entry_ready(
+    bars: list[MinuteBar],
+    ref_price: Decimal,
+    signaled_at: dt.datetime,
+    now: dt.datetime,
+    lim: TradingLimits,
+) -> bool:
+    """True when every enabled timing rule holds on completed regular-session bars.
+
+    Pullback and VWAP reclaim look only at bars from the signal's minute on,
+    so a dip that predates the signal never counts.
+    """
+    now_naive = now.replace(tzinfo=None)
+    sig_naive = signaled_at.replace(tzinfo=None)
+    if lim.entry_delay is not None and now_naive - sig_naive < lim.entry_delay:
+        return False
+    if lim.entry_pullback is None and not lim.entry_vwap_reclaim:
+        return True
+    minute = now_naive.replace(second=0, microsecond=0)
+    sig_minute = sig_naive.replace(second=0, microsecond=0)
+    done = [b for b in bars if b.ts.time() >= dt.time(9, 0) and b.ts < minute]
+    if not done or done[-1].ts < sig_minute:
+        return False
+    close = done[-1].close
+    if lim.entry_pullback is not None and not (
+        ref_price > 0 and close <= ref_price * (1 - lim.entry_pullback)
+    ):
+        return False
+    if lim.entry_vwap_reclaim:
+        pv, vol = Decimal(0), 0
+        below = False
+        above_last = False
+        for b in done:
+            pv += b.close * b.volume
+            vol += b.volume
+            if b.ts < sig_minute or vol <= 0:
+                continue
+            vwap = pv / vol
+            if b is done[-1]:
+                above_last = b.close > vwap
+            elif b.close < vwap:
+                below = True
+        if not (below and above_last):
+            return False
+    return True
+
+
+def _drive(coro: Any) -> Any:
+    """Run a coroutine that never suspends to completion, from sync code.
+
+    `_enter_now` only awaits `execute_trade`, which only awaits
+    `_SignalLookup.get_by_id` (returns at once), so a deferred entry can run
+    from the sync `manage()` even while an event loop is running.
+    """
+    try:
+        coro.send(None)
+    except StopIteration as done:
+        return done.value
+    coro.close()
+    raise RuntimeError("coroutine suspended; cannot run it synchronously")
 
 
 def add_on_hit(bars: list[MinuteBar], entry: Decimal, now: dt.datetime, min_gain: Decimal) -> bool:
@@ -283,6 +374,12 @@ class _SignalLookup:
     def put(self, signal: TradingSignal) -> None:
         self._signals[signal.id] = signal
 
+    def get(self, signal_id: str) -> TradingSignal | None:
+        try:
+            return self._signals.get(UUID(signal_id))
+        except ValueError:
+            return None
+
     async def get_by_id(self, signal_id: UUID) -> TradingSignal | None:
         return self._signals.get(signal_id)
 
@@ -307,6 +404,7 @@ class AutoTrader:
         self._state = _DayState()
         #: In-memory only: after a restart the first check simply runs at once.
         self._last_exit_check: dict[str, dt.datetime] = {}
+        self._last_entry_check: dict[str, dt.datetime] = {}
 
     # -- ledger ----------------------------------------------------------------
 
@@ -343,6 +441,10 @@ class AutoTrader:
                 s.open_add_on_orders[row["order_id"]] = row
         elif ev in ("add_on_cancelled", "add_on_resolved"):
             s.open_add_on_orders.pop(row["order_id"], None)
+        if ev == "entry_deferred":
+            s.deferred[row["ticker"]] = row
+        elif ev in _ENTRY_CLOSING_EVENTS and row.get("ticker") in s.deferred:
+            s.deferred.pop(row["ticker"])
 
     def _today(self) -> dt.date:
         return self._clock().date()
@@ -356,6 +458,12 @@ class AutoTrader:
         if path.exists():
             for line in path.open():
                 self._apply(json.loads(line))
+        # Deferred signals live in memory only: after a restart they can't be entered.
+        for ticker, row in list(self._state.deferred.items()):
+            if self._signals.get(row["signal_id"]) is None:
+                self._record(
+                    "entry_expired", ticker=ticker, signal_id=row["signal_id"], reason="restart"
+                )
 
     def _ensure_baseline(self) -> bool:
         if self._state.baseline is not None:
@@ -394,6 +502,45 @@ class AutoTrader:
         assert self._state.baseline is not None
         if self._state.baseline.get(ticker, 0) > 0:
             return skip("user already holds this ticker")
+        if _any_entry_timing(lim):
+            return self._defer(signal, now)
+        await self._enter_now(signal)
+        return None
+
+    def _defer(self, signal: TradingSignal, now: dt.datetime) -> None:
+        ticker = signal.ticker.value
+        if ticker in self._state.deferred:
+            logger.info(
+                "auto_trader: entry skipped", ticker=ticker, reason="entry already deferred"
+            )
+            return
+        try:
+            quote = self._broker.get_quote(ticker)
+        except Exception:
+            logger.exception("auto_trader: quote failed", ticker=ticker)
+            return
+        ref_price = quote.last_price or quote.ask
+        if not ref_price or ref_price <= 0:
+            logger.info("auto_trader: entry skipped", ticker=ticker, reason="no reference price")
+            return
+        self._signals.put(signal)
+        self._record(
+            "entry_deferred",
+            ticker=ticker,
+            signal_id=str(signal.id),
+            ref_price=str(ref_price),
+            signaled_at=now.isoformat(),
+        )
+        logger.info("auto_trader: entry deferred", ticker=ticker, ref_price=str(ref_price))
+
+    async def _enter_now(self, signal: TradingSignal, *, deferred: bool = False) -> None:
+        """Concurrent cap, quote, notional, cash, then `execute_trade`."""
+        ticker = signal.ticker.value
+        lim = self._limits
+
+        def skip(reason: str) -> None:
+            logger.info("auto_trader: entry skipped", ticker=ticker, reason=reason)
+
         open_count = self._open_position_count()
         if open_count is None:
             return skip("positions lookup failed")
@@ -407,6 +554,8 @@ class AutoTrader:
             return None
         if quote.ask <= 0:
             return skip("no ask (upper limit or empty book)")
+        if deferred and self._extended_at_entry(signal, quote.ask):
+            return None
         if quote.ask > lim.max_order_notional:
             return skip(f"1 share at {quote.ask} exceeds notional cap")
 
@@ -422,11 +571,12 @@ class AutoTrader:
         if cash - committed < quote.ask * Decimal("1.01"):
             return skip(f"insufficient deposit cash ({cash} - {committed} committed)")
 
+        limit = quote.ask
+        if lim.entry_limit_ticks > 0:
+            limit = quote.ask - tick_size(quote.ask) * lim.entry_limit_ticks
         if not self._live:
-            logger.info("auto_trader: DRY RUN would buy", ticker=ticker, limit=str(quote.ask))
-            self._record(
-                "entry_dry_run", ticker=ticker, limit=str(quote.ask), signal_id=str(signal.id)
-            )
+            logger.info("auto_trader: DRY RUN would buy", ticker=ticker, limit=str(limit))
+            self._record("entry_dry_run", ticker=ticker, limit=str(limit), signal_id=str(signal.id))
             return None
 
         from daytrade_it.interfaces.mcp.tools import MCPToolContext, execute_trade  # noqa: PLC0415
@@ -444,7 +594,7 @@ class AutoTrader:
         )
         try:
             result = await execute_trade(
-                signal_id=str(signal.id), order_type="LIMIT", limit_price=float(quote.ask)
+                signal_id=str(signal.id), order_type="LIMIT", limit_price=float(limit)
             )
         except ValueError as exc:
             # Pre-order refusals: kill switch, price band, holdings, risk gate.
@@ -462,7 +612,7 @@ class AutoTrader:
             "entry_submitted",
             ticker=ticker,
             order_id=result.broker_order_id,
-            limit=str(quote.ask),
+            limit=str(limit),
             quantity=result.quantity,
             signal_id=str(signal.id),
         )
@@ -470,9 +620,76 @@ class AutoTrader:
             "auto_trader: ENTRY SUBMITTED",
             ticker=ticker,
             order_id=result.broker_order_id,
-            limit=str(quote.ask),
+            limit=str(limit),
         )
         return None
+
+    def _extended_at_entry(self, signal: TradingSignal, ask: Decimal) -> bool:
+        """No-chase re-applied at deferred entry: ask vs the signal's prev_close."""
+        from daytrade_it.application.signals import entry_filter  # noqa: PLC0415
+
+        prev = signal.metadata.get("prev_close")
+        if not prev or Decimal(str(prev)) <= 0:
+            return False
+        move = ask / Decimal(str(prev)) - 1
+        if move <= entry_filter.MAX_PRE_ENTRY_MOVE:
+            return False
+        self._record(
+            "entry_expired",
+            ticker=signal.ticker.value,
+            signal_id=str(signal.id),
+            reason="extended_at_entry",
+            ask=str(ask),
+            prev_close=str(prev),
+        )
+        return True
+
+    def _deferred_entries(self, now: dt.datetime) -> None:
+        """Enter deferred signals whose timing rules hold; expire the stale ones."""
+        lim = self._limits
+        for ticker, row in list(self._state.deferred.items()):
+            signal = self._signals.get(row["signal_id"])
+
+            def expire(reason: str, ticker: str = ticker, row: dict = row) -> None:
+                self._record(
+                    "entry_expired", ticker=ticker, signal_id=row["signal_id"], reason=reason
+                )
+
+            if signal is None:
+                expire("restart")
+                continue
+            signaled_at = dt.datetime.fromisoformat(row["signaled_at"])
+            if now - signaled_at > lim.entry_max_wait:
+                expire("max_wait")
+                continue
+            if not (lim.entry_start <= now.time() < lim.entry_end):
+                expire("outside entry window")
+                continue
+            if ticker in self._state.entries:
+                expire("already entered today")
+                continue
+            if len(self._state.entries) >= lim.max_entries_per_day:
+                expire("daily entry cap reached")
+                continue
+            if lim.entry_delay is not None and now - signaled_at < lim.entry_delay:
+                continue
+            bars: list[MinuteBar] = []
+            if lim.entry_pullback is not None or lim.entry_vwap_reclaim:
+                last = self._last_entry_check.get(ticker)
+                if last is not None and now - last < lim.exit_check_every:
+                    continue
+                self._last_entry_check[ticker] = now
+                try:
+                    bars = self._broker.get_minute_bars(ticker)
+                except Exception:
+                    logger.exception("auto_trader: minute bars failed", ticker=ticker)
+                    continue
+            if entry_ready(bars, Decimal(row["ref_price"]), signaled_at, now, lim):
+                try:
+                    _drive(self._enter_now(signal, deferred=True))
+                except Exception:
+                    # Never let an entry problem stop exit management this tick.
+                    logger.exception("auto_trader: deferred entry failed", ticker=ticker)
 
     def _committed(self) -> Decimal:
         """Limit value of today's entries and add-ons not yet exited."""
@@ -512,6 +729,8 @@ class AutoTrader:
         for order_id, row in list(self._state.open_add_on_orders.items()):
             if now - dt.datetime.fromisoformat(row["ts"]) >= self._limits.entry_order_ttl:
                 self._cancel_add_on(order_id, row["ticker"], reason="ttl")
+        if self._state.deferred:
+            self._deferred_entries(now)
         if now.time() >= self._limits.flatten_at:
             self.flatten()
         else:
