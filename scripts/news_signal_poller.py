@@ -40,7 +40,6 @@ import datetime as dt
 import json
 import os
 import sys
-from dataclasses import asdict
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
@@ -49,6 +48,13 @@ import httpx
 from kiwoom_client import KiwoomAPI
 from sqlalchemy import select
 
+from daytrade_it.application.news.judging import (  # noqa: F401 -- re-exported
+    SESSION_CLOSE,
+    JudgmentLog,
+    judge_pair,
+    pair_key,
+    session_close_kst,
+)
 from daytrade_it.application.signals.news_entry import (
     SelectionConfig,
     build_entry_candidate,
@@ -61,10 +67,7 @@ from daytrade_it.domain.services.signal_generator import SignalConfig, SignalGen
 from daytrade_it.domain.value_objects import Ticker
 from daytrade_it.infrastructure.brokers.base import KST, BrokerInterface
 from daytrade_it.infrastructure.brokers.kiwoom_broker import KiwoomBroker
-from daytrade_it.infrastructure.external.anthropic_client import (
-    AnthropicClient,
-    ArticleFeatures,
-)
+from daytrade_it.infrastructure.external.anthropic_client import AnthropicClient
 from daytrade_it.infrastructure.external.quant_airflow_db_client import (
     QuantAirflowDBClient,
     StockInfo,
@@ -86,7 +89,6 @@ DEFAULT_STOP_TIME = dt.time(15, 20)  # KST -- news polling stops here
 #: With --execute, the process keeps managing exits until the closing auction
 #: ends (KRX continuous trading ends 15:20; the auction runs to 15:30).
 EXITS_UNTIL = dt.time(15, 30)
-SESSION_CLOSE = dt.time(15, 20)  # signals expire here; day trades are flat by the close
 FIRST_POLL = dt.time(9, 0, 30)
 MANAGE_TICK_SECONDS = 30
 LEDGER_DIR = Path("data/auto_trader")
@@ -101,31 +103,6 @@ DETAIL_HTTP_HEADERS = {
 
 def kill_switch_active() -> bool:
     return KILL_SWITCH_PATH.exists()
-
-
-class JudgmentLog:
-    """Every (article, ticker) judgment, one JSONL per day.
-
-    Kept for all pairs -- not just the ones that became signals -- so a
-    later forward evaluation of v2 vs shadow v4 isn't biased toward what the
-    live rule selected. Also dedups re-judging after a restart.
-    """
-
-    def __init__(self, directory: Path, day: dt.date) -> None:
-        self._path = directory / f"{day.isoformat()}.jsonl"
-        self._keys: set[str] = set()
-        if self._path.exists():
-            for line in self._path.open():
-                self._keys.add(json.loads(line)["key"])
-
-    def seen(self, key: str) -> bool:
-        return key in self._keys
-
-    def append(self, key: str, record: dict) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        with self._path.open("a") as f:
-            f.write(json.dumps({"key": key, **record}, ensure_ascii=False, default=str) + "\n")
-        self._keys.add(key)
 
 
 def load_policy_for_run(path: Path) -> tuple[NewsPolicy, bool]:
@@ -151,10 +128,6 @@ def _policy_parts(policy: NewsPolicy) -> tuple[TradingLimits, SelectionConfig, s
     return policy.limits, policy.selection, policy.selection.rank_key
 
 
-def session_close_kst(day: dt.date) -> dt.datetime:
-    return dt.datetime.combine(day, SESSION_CLOSE, tzinfo=KST)
-
-
 async def process_pair(
     article: NewsArticle,
     ticker: Ticker,
@@ -176,8 +149,7 @@ async def process_pair(
     Every failure is caught and logged, never raised -- one bad pair must
     not stop the loop or the other pairs in the batch.
     """
-    pair_key = f"{article.id}|{ticker.value}"
-    if judgments.seen(pair_key):
+    if judgments.seen(pair_key(article, ticker)):
         return
 
     # Dedup across restarts (TossNewsClient's seen-id cache is in-memory).
@@ -195,66 +167,10 @@ async def process_pair(
         logger.exception("news_signal_poller: dedup lookup failed", article_id=str(article.id))
         return
 
-    try:
-        features = await claude.score_article(
-            code=ticker.value,
-            name=stock.name,
-            market=stock.market,
-            sector=stock.sector,
-            title=article.title,
-            body=article.summary or article.content,
-            category=article.category,
-        )
-    except Exception:
-        logger.exception(
-            "news_signal_poller: scoring failed", article_id=str(article.id), ticker=ticker.value
-        )
+    features = await judge_pair(article, ticker, stock, claude, judgments, full_body_text)
+    if features is None:
         return
-
     sentiment = features.to_sentiment()
-    logger.info(
-        "news_signal_poller: judged",
-        ticker=ticker.value,
-        name=stock.name,
-        subject=features.subject,
-        score=round(sentiment.score, 3),
-        label=sentiment.label.value,
-        title=article.title[:80],
-    )
-
-    # Shadow v4 (full body): recorded for a forward comparison, never used
-    # for signals. See anthropic_client._USER_TEMPLATE_FULL_BODY.
-    shadow: ArticleFeatures | None = None
-    if full_body_text:
-        try:
-            shadow = await claude.score_article(
-                code=ticker.value,
-                name=stock.name,
-                market=stock.market,
-                sector=stock.sector,
-                title=article.title,
-                body=full_body_text,
-                category=article.category,
-                full_body=True,
-            )
-        except Exception:
-            logger.exception("news_signal_poller: shadow v4 scoring failed", ticker=ticker.value)
-
-    judgments.append(
-        pair_key,
-        {
-            "article_id": str(article.id),
-            "ticker": ticker.value,
-            "name": stock.name,
-            "title": article.title,
-            "category": article.category,
-            "published_at": article.published_at.isoformat(),
-            "judged_at": dt.datetime.now(KST).isoformat(),
-            "full_body_chars": len(full_body_text or ""),
-            "v2": {**asdict(features), "score": features.score()},
-            "v4_shadow": {**asdict(shadow), "score": shadow.score()} if shadow else None,
-        },
-    )
     try:
         candidate = build_entry_candidate(
             article, ticker, features, broker, db_client, gen, expires_at, selection=selection
