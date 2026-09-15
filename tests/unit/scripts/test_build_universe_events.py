@@ -10,6 +10,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "scripts" / "eval"))
 
 from build_universe_events import (  # noqa: E402
+    bucket_articles,
     build_day_events,
     day_pairs,
     load_articles,
@@ -183,3 +184,31 @@ def test_run_day_writes_event_file_with_fake_daily_values(c1: Path, tmp_path: Pa
     events = load_events(out / f"{D}.jsonl")
     assert [e.decide_at for e in events] == sorted(e.decide_at for e in events)
     assert all(e.source == "universe" for e in events)
+
+
+def test_all_pairs_of_an_article_share_the_first_related_visit(tmp_path: Path) -> None:
+    root = tmp_path / "u"
+    row = _row("multi", "2026-09-15T10:00:00.5")
+    _write_c1(root, "005930", [row])  # slot 0: even seconds -> own visit 10:00:02
+    _write_c1(root, "000660", [row])  # slot 1: odd seconds -> own visit 10:00:01
+    universe = ["005930", "000660"]
+    pairs = day_pairs(load_articles(root), D, PREV, universe)
+    assert {p["code"] for p in pairs} == {"005930", "000660"}
+    first = dt.datetime(2026, 9, 15, 10, 0, 1, tzinfo=KST)
+    assert [p["visit_at"] for p in pairs] == [first, first]
+    events, _ = build_day_events(
+        pairs, STOCKS, {p["key"]: FEATS for p in pairs}, dt.timedelta(seconds=3)
+    )
+    assert {e.decide_at for e in events} == {first + dt.timedelta(seconds=3)}
+
+
+def test_bucketed_day_pairs_match_full_scan(c1: Path) -> None:
+    arts = load_articles(c1)
+    trading = [dt.date(2026, 9, 11), PREV, D]
+    buckets = bucket_articles(arts, trading)
+    universe = ["005930", "000660", "123456"]
+    for prev, day in [(dt.date(2026, 9, 11), PREV), (PREV, D)]:
+        assert day_pairs(buckets.get(day, []), day, prev, universe) == day_pairs(
+            arts, day, prev, universe
+        )
+    assert sum(len(v) for v in buckets.values()) <= len(arts)

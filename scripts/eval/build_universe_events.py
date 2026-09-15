@@ -11,7 +11,9 @@ For trading day d:
   `daily_bars_adjusted.trade_value`, read-only);
 - pairs = (article, code) with createdAt in [prev 15:20, d 15:20) and code in
   (related codes from the C1 backfill files) ∩ universe;
-- decide_at = next_visit(code, universe, d, max(createdAt, d 08:00)) + judge_lag,
+- decide_at = min over the article's related universe codes of
+  next_visit(code, universe, d, max(createdAt, d 08:00)) + judge_lag -- the same
+  for every pair of the article (live sweep judges all pairs at first discovery),
   batch_at = decide_at + 1s; features = judgment cache v2 (missing -> excluded,
   count printed).
 
@@ -88,27 +90,54 @@ def load_articles(root: Path) -> dict[str, dict]:
     return arts
 
 
+def bucket_articles(
+    articles: dict[str, dict], trading_days: list[dt.date]
+) -> dict[dt.date, list[dict]]:
+    """Assign each article once to the trading day whose window [prev 15:20, d 15:20) holds it.
+
+    Lets the per-day loop look only at its own articles instead of rescanning
+    every article for every day; `day_pairs` still applies the window filter.
+    """
+    days = sorted(trading_days)
+    cutoffs = [dt.datetime.combine(d, CUTOFF, tzinfo=KST) for d in days]
+    out: dict[dt.date, list[dict]] = {}
+    for a in articles.values():
+        i = bisect.bisect_right(cutoffs, a["published_at"])
+        if i < len(days):
+            out.setdefault(days[i], []).append(a)
+    return out
+
+
 def day_pairs(
-    articles: dict[str, dict], day: dt.date, prev_day: dt.date, universe: list[str]
+    articles: dict[str, dict] | Iterable[dict],
+    day: dt.date,
+    prev_day: dt.date,
+    universe: list[str],
 ) -> list[dict]:
-    """(article, code) pairs the sweep would discover on `day`, with the visit time."""
+    """(article, code) pairs the sweep would judge on `day`, with the discovery time.
+
+    Live-sweep parity (C5): a new article is found at the first visit of ANY
+    of its related universe codes after publication, and all of its pairs
+    (detail companyCodes ∩ universe) are judged then -- so every pair of an
+    article shares visit_at = min over related codes of next_visit.
+    """
     lo = dt.datetime.combine(prev_day, CUTOFF, tzinfo=KST)
     hi = dt.datetime.combine(day, CUTOFF, tzinfo=KST)
     start = dt.datetime.combine(day, SWEEP_START, tzinfo=KST)
     open_ = dt.datetime.combine(day, OPEN, tzinfo=KST)
     members = set(universe)
     out = []
-    for a in articles.values():
+    for a in articles.values() if isinstance(articles, dict) else articles:
         pub = a["published_at"]
         if not lo <= pub < hi:
             continue
-        for code in a["codes"]:
-            if code not in members:
-                continue
-            visit = next_visit(code, universe, day, max(pub, start))
-            if visit is None:
-                continue
-            aid = live_article_id(a["news_id"])
+        codes = [c for c in a["codes"] if c in members]
+        visits = [v for c in codes if (v := next_visit(c, universe, day, max(pub, start)))]
+        if not visits:
+            continue
+        visit = min(visits)
+        aid = live_article_id(a["news_id"])
+        for code in codes:
             out.append(
                 {
                     **{
@@ -184,7 +213,7 @@ def pair_rows(pairs: list[dict], stocks: dict) -> list[dict]:
 
 
 def run_day(
-    articles: dict[str, dict],
+    articles: dict[str, dict] | Iterable[dict],
     day: dt.date,
     prev_day: dt.date,
     daily_values: Callable[[dt.date], dict[str, float]],
@@ -287,6 +316,7 @@ def main() -> None:
     trading, daily_values, stocks = _db_sources()
     days = parse_days(args.days, trading)
     articles = load_articles(args.c1_dir)
+    buckets = bucket_articles(articles, trading)
     print(f"{len(articles)} articles from {args.c1_dir}; {len(days)} trading days")
 
     if args.pairs_out:
@@ -301,7 +331,9 @@ def main() -> None:
                 universe = select_universe(daily_values(trading[i - 1]))
                 rows = [
                     r
-                    for r in pair_rows(day_pairs(articles, day, trading[i - 1], universe), stocks)
+                    for r in pair_rows(
+                        day_pairs(buckets.get(day, []), day, trading[i - 1], universe), stocks
+                    )
                     if r["key"] not in seen
                 ]
                 seen.update(r["key"] for r in rows)
@@ -329,7 +361,7 @@ def main() -> None:
             print(f"{day}: no previous trading day in bars -- skipped")
             continue
         n, excluded = run_day(
-            articles, day, trading[i - 1], daily_values, stocks, cache, lag, args.out
+            buckets.get(day, []), day, trading[i - 1], daily_values, stocks, cache, lag, args.out
         )
         print(day, "universe events", n, "excluded (no cached judgment)", excluded)
     args.out.mkdir(parents=True, exist_ok=True)
