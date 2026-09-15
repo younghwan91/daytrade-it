@@ -17,6 +17,15 @@
 set -u
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)" || exit 1
 
+# 2026-09-15: 08:55 크론이 데몬을 두 번 띄워 같은 종목을 2주씩 샀다(기아·이마트).
+# 한 번에 하나만 돈다 -- 락을 못 잡으면 두 번째 실행은 아무것도 안 하고 끝난다.
+mkdir -p data
+exec 9>data/news_signal_daemon.lock
+if ! flock -n 9; then
+  echo "=== [$(date '+%F %T')] 이미 실행 중인 데몬이 있다 -- 이 실행은 종료" >&2
+  exit 0
+fi
+
 export $(grep -E '^KIWOOM_APP_(KEY|SECRET)=' ../quant-airflow/.env | xargs)
 export $(grep -E '^ANTHROPIC_API_KEY=' ../quant-airflow/.env | xargs)
 export GPTQ_DATABASE_URL=$(grep '^GPTQ_DATABASE_URL=' .env | cut -d= -f2-)
