@@ -14,9 +14,10 @@ Constant training columns (std < 1e-6) are masked: their std is stored as
 the model never saw varies nothing.
 
 Live wiring fails closed: when the bandit is on, `news_entry` skips a
-candidate if the 069500 quote or its prior close is unavailable or fewer than
-5 completed regular-session bars exist. `features_for` itself keeps the 0.0
-fallbacks (documented below) for offline dataset building only.
+candidate if the 069500 quote or its prior close is unavailable
+(`features_for`'s `mkt_move` 0.0 fallback is for offline use only). Few or no
+completed bars are not a skip: `ret_5m` uses the bars that exist, so the 09:01
+open batch is judged too. Live and replay run this same code path.
 
 The live selection (`news_entry.build_entry_candidate`) and the replay engine
 call the same `features_for` / `decide`, so a replayed model runs live as is.
@@ -58,9 +59,6 @@ _INTERCEPT_PRIOR = 1e-3
 _RET_BARS = 5
 
 
-RET_BARS = _RET_BARS
-
-
 def completed_bars(bars: list[MinuteBar], decided_at: dt.datetime) -> list[MinuteBar]:
     """Regular-session bars (≥ 09:00) whose minute ended before `decided_at` (naive = KST)."""
     if decided_at.tzinfo is None:
@@ -82,8 +80,9 @@ def features_for(
     """The decision-time feature row. Pure; only data available at `decided_at`.
 
     - `minutes_since_open`: from 09:00 KST of `decided_at`'s day, clipped at 0.
-    - `ret_5m`: last close / first close of the last 5 completed regular-session
-      bars (ts < floor(decided_at) and ≥ 09:00); 0.0 with fewer than 5.
+    - `ret_5m`: over the last (up to) 5 completed regular-session bars
+      (ts < floor(decided_at) and ≥ 09:00): last close / first close − 1 with
+      2..5 bars; last close / its open − 1 with exactly 1; 0.0 with none.
     - `mkt_move`: mkt_price / mkt_prev_close − 1; 0.0 if either is unavailable.
     - A naive `decided_at` is taken to be KST.
     """
@@ -96,11 +95,12 @@ def features_for(
     minutes = max(0.0, (decided_kst - open_at).total_seconds() / 60.0)
 
     done = completed_bars(bars, decided_kst)
+    window = done[-_RET_BARS:]
     ret_5m = 0.0
-    if len(done) >= _RET_BARS:
-        first, last = done[-_RET_BARS].close, done[-1].close
-        if first and first > 0:
-            ret_5m = float(last / first - 1)
+    if window:
+        base = window[0].open if len(window) == 1 else window[0].close
+        if base and base > 0:
+            ret_5m = float(window[-1].close / base - 1)
 
     mkt_move = 0.0
     if mkt_price is not None and mkt_prev_close is not None and mkt_prev_close > 0:

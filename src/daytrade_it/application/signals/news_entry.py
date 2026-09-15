@@ -246,8 +246,8 @@ def _bandit_verdict(
 ) -> dict[str, float] | None:
     """{"bandit_m", "bandit_p"} if the bandit enters, else None.
 
-    Fail-closed: a model-load or bar-fetch error, a missing 069500 price or
-    prior close, or fewer than 5 completed bars skips the candidate (logged).
+    Fail-closed: a model-load or bar-fetch error, or a missing 069500 price or
+    prior close, skips the candidate (logged). Few completed bars do not.
     """
     from daytrade_it.application.trading import bandit
 
@@ -264,9 +264,6 @@ def _bandit_verdict(
     mkt_price, mkt_prev_close = _market_snapshot(broker, db_client, decided_at)
     if mkt_price is None or mkt_prev_close is None or mkt_prev_close <= 0:
         skip("market data unavailable")
-        return None
-    if len(bandit.completed_bars(bars, decided_at)) < bandit.RET_BARS:
-        skip("insufficient bars")
         return None
     try:
         x = bandit.features_for(

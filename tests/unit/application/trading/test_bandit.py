@@ -107,7 +107,7 @@ def test_features_for_fallbacks() -> None:
     assert x["ret_5m"] == 0.0
     assert x["mkt_move"] == 0.0
     assert x["premarket"] == 0.0
-    # fewer than 5 completed regular-session bars
+    # 4 completed bars (09:00..09:03; the 09:04 bar is the current minute)
     x = features_for(
         FEAT,
         0.0,
@@ -118,8 +118,30 @@ def test_features_for_fallbacks() -> None:
         Decimal("100"),
         None,
     )
-    assert x["ret_5m"] == 0.0
+    assert x["ret_5m"] == pytest.approx(103 / 100 - 1)
     assert x["mkt_move"] == 0.0
+
+
+def _ret(bars: list[MinuteBar], decided: dt.datetime) -> float:
+    return features_for(FEAT, 0.0, EXPIRES, EXPIRES, decided, bars, None, None)["ret_5m"]
+
+
+def test_ret_5m_uses_available_completed_bars() -> None:
+    def bar(m: int, o: str, c: str) -> MinuteBar:
+        return MinuteBar(
+            dt.datetime(2026, 9, 15, 9, m), Decimal(o), Decimal(c), Decimal(c), Decimal(c), 1
+        )
+
+    at = lambda m: dt.datetime(2026, 9, 15, 9, m, 20, tzinfo=KST)  # noqa: E731
+    bars = [bar(m, str(99 + m), str(100 + m)) for m in range(10)]  # close 100+m, open 99+m
+    # 0 completed bars (only the current 09:00 bar)
+    assert _ret(bars[:1], at(0)) == 0.0
+    # 1 completed bar: close / open
+    assert _ret(bars[:2], at(1)) == pytest.approx(100 / 99 - 1)
+    # 3 completed bars: last close / first close
+    assert _ret(bars[:4], at(3)) == pytest.approx(102 / 100 - 1)
+    # 5+ completed: last 5 closes only; current-minute bar (09:09, close 109) ignored
+    assert _ret(bars, at(9)) == pytest.approx(108 / 104 - 1)
 
 
 def test_student_t_cdf_matches_known_values() -> None:

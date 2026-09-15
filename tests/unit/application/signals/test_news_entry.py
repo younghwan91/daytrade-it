@@ -383,7 +383,7 @@ def test_rank_batch_bandit_orders_by_m_then_surprise_then_score() -> None:
     ]
 
 
-def test_bandit_missing_market_data_or_bars_fails_closed(tmp_path) -> None:  # noqa: ANN001
+def test_bandit_missing_market_data_fails_closed_few_bars_do_not(tmp_path) -> None:  # noqa: ANN001
     model = _pre_move_model(tmp_path)
     assert _build_bandit("10200", model) is not None
     news_entry._MARKET_CACHE.clear()
@@ -391,7 +391,10 @@ def test_bandit_missing_market_data_or_bars_fails_closed(tmp_path) -> None:  # n
     news_entry._MARKET_CACHE.clear()
     assert _build_bandit("10200", model, db=_NoMktDB()) is None
     news_entry._MARKET_CACHE.clear()
-    assert _build_bandit("10200", model, _BanditBroker("10200", n_bars=4)) is None
+    # few or no completed bars at the open is not a skip (ret_5m uses what exists)
+    assert _build_bandit("10200", model, _BanditBroker("10200", n_bars=0)) is not None
+    news_entry._MARKET_CACHE.clear()
+    assert _build_bandit("10200", model, _BanditBroker("10200", n_bars=2)) is not None
 
 
 def test_bandit_market_quote_fetched_once_per_minute(tmp_path) -> None:  # noqa: ANN001
