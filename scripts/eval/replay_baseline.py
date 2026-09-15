@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import re
 import sys
 from decimal import Decimal
 from pathlib import Path
@@ -15,6 +16,12 @@ from pathlib import Path
 SELL_COST = Decimal("0.00215")  # 0.20% tax + 0.015% commission
 BUY_COST = Decimal("0.00015")
 OUT = Path("data/eval/replay_baseline")
+#: kr_quant carries a few non-equity codes (rights/warrants, e.g. "0013V0") that
+#: are not in the stock master and that the live daemon -- which only ever
+#: matches articles against 6-digit KRX equity codes -- would never judge.
+#: `to_article` raises on these before the stocks-master check runs, so they
+#: are dropped here instead of crashing the whole day's replay.
+VALID_TICKER = re.compile(r"^\d{6}$")
 
 
 def trade_pnl(fills: list[dict]) -> list[dict]:
@@ -75,6 +82,10 @@ def main() -> None:
     for path in sorted(EVENTS.glob("2026-*.jsonl")):
         day = dt.date.fromisoformat(path.stem)
         events = load_events(path)
+        bad = [e.ticker for e in events if not VALID_TICKER.match(e.ticker)]
+        if bad:
+            print(f"{day}: dropping non-equity ticker(s) {sorted(set(bad))}", file=sys.stderr)
+            events = [e for e in events if VALID_TICKER.match(e.ticker)]
         codes = sorted({e.ticker for e in events})
         broker = SimBroker(
             load_session_bars(codes, day), prev_closes(codes, day), lambda: dt.datetime.now(KST)
