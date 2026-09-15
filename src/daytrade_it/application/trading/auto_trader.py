@@ -673,12 +673,13 @@ class AutoTrader:
                 continue
             if lim.entry_delay is not None and now - signaled_at < lim.entry_delay:
                 continue
+            # One attempt per ticker per `exit_check_every`, whatever the rules.
+            last = self._last_entry_check.get(ticker)
+            if last is not None and now - last < lim.exit_check_every:
+                continue
+            self._last_entry_check[ticker] = now
             bars: list[MinuteBar] = []
             if lim.entry_pullback is not None or lim.entry_vwap_reclaim:
-                last = self._last_entry_check.get(ticker)
-                if last is not None and now - last < lim.exit_check_every:
-                    continue
-                self._last_entry_check[ticker] = now
                 try:
                     bars = self._broker.get_minute_bars(ticker)
                 except Exception:
@@ -687,9 +688,19 @@ class AutoTrader:
             if entry_ready(bars, Decimal(row["ref_price"]), signaled_at, now, lim):
                 try:
                     _drive(self._enter_now(signal, deferred=True))
-                except Exception:
-                    # Never let an entry problem stop exit management this tick.
-                    logger.exception("auto_trader: deferred entry failed", ticker=ticker)
+                except (KeyboardInterrupt, SystemExit):
+                    raise
+                except BaseException as exc:
+                    # Suspended or escaped after possibly placing the order: like
+                    # the default path's unknown outcome, close the deferral and
+                    # block the ticker for the day -- never re-send.
+                    logger.exception("auto_trader: deferred entry outcome unknown", ticker=ticker)
+                    self._record(
+                        "entry_unknown",
+                        ticker=ticker,
+                        error=repr(exc),
+                        signal_id=row["signal_id"],
+                    )
 
     def _committed(self) -> Decimal:
         """Limit value of today's entries and add-ons not yet exited."""

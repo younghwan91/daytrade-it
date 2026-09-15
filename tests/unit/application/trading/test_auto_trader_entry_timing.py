@@ -244,3 +244,55 @@ async def test_a_second_signal_while_deferred_is_skipped(tmp_path: Path, env) ->
     await trader.enter(_signal())
     await trader.enter(_signal())
     assert _events(tmp_path) == ["baseline", "entry_deferred"]
+
+
+async def test_suspended_deferred_entry_is_recorded_unknown_and_never_retried(
+    tmp_path: Path,
+    env,  # noqa: ANN001
+) -> None:
+    import asyncio
+
+    broker = _broker()
+    trader = _trader(tmp_path, broker, entry_delay=dt.timedelta(minutes=5))
+    await trader.enter(_signal())
+
+    async def suspending_get_by_id(signal_id):  # noqa: ANN001, ANN202
+        await asyncio.sleep(0)
+        return None
+
+    trader._signals.get_by_id = suspending_get_by_id  # type: ignore[method-assign]
+    for hms in ("09:10:00", "09:11:00", "09:12:00"):
+        env.move_to(_t(hms))
+        trader.manage()
+    rows = _ledger(tmp_path)
+    assert [r["event"] for r in rows].count("entry_unknown") == 1
+    unknown = next(r for r in rows if r["event"] == "entry_unknown")
+    assert unknown["ticker"] == T and unknown["error"]
+    assert "entry_submitted" not in [r["event"] for r in rows]
+    assert not broker.fills and not broker._open
+
+
+class _CountingBroker(SimBroker):
+    quotes = 0
+
+    def get_quote(self, ticker):  # noqa: ANN001, ANN201
+        self.quotes += 1
+        return super().get_quote(ticker)
+
+
+async def test_deferred_retries_are_throttled_by_exit_check_every(tmp_path: Path, env) -> None:  # noqa: ANN001
+    broker = _CountingBroker({T: _session()}, {T: Decimal(10000)}, lambda: dt.datetime.now(KST))
+    # Notional cap below the ask: every attempt quotes, then skips and stays pending.
+    trader = _trader(
+        tmp_path, broker, entry_delay=dt.timedelta(minutes=5), max_order_notional=Decimal(1000)
+    )
+    await trader.enter(_signal())
+    base = broker.quotes
+    env.move_to(_t("09:10:00"))
+    trader.manage()
+    env.move_to(_t("09:10:30"))
+    trader.manage()
+    assert broker.quotes - base == 1
+    env.move_to(_t("09:11:00"))
+    trader.manage()
+    assert broker.quotes - base == 2
