@@ -212,6 +212,7 @@ def day_pairs(
     universe: list[str],
     coverage: dict[str, dict] | None = None,
     stats: dict | None = None,
+    stocks: dict | None = None,
 ) -> list[dict]:
     """(article, code) pairs the sweep would judge on `day`, with the discovery time.
 
@@ -219,6 +220,10 @@ def day_pairs(
     (`covered`) is dropped for that day -- both its pairs and its use as a
     related code for discovery -- and counted in `stats["excluded_pairs"]`.
     `coverage=None` treats every code as covered.
+
+    Pairs need the code in the stock master (`stocks`, like the live
+    `tradable_tickers`); such codes are still swept (they cost requests and can
+    discover an article first). Dropped pairs: `stats["not_in_master"]`.
 
     Live-sweep parity (C5, F3): discovery times come from `simulate_sweep` --
     the live runner's request order (code order, paging, one detail call per
@@ -249,12 +254,16 @@ def day_pairs(
             arrivals.setdefault(code, []).append((a["news_id"], pub))
     found = simulate_sweep(universe, day, arrivals, stale_before=lo, start=SWEEP_START, end=CUTOFF)
     out = []
+    not_in_master = 0
     for a, codes in candidates:
         discovered = found.get(a["news_id"])
         if discovered is None:
             continue
         aid = live_article_id(a["news_id"])
         for code in codes:
+            if stocks is not None and code not in stocks:
+                not_in_master += 1
+                continue
             out.append(
                 {
                     **{
@@ -271,6 +280,7 @@ def day_pairs(
     out.sort(key=lambda p: (p["discovered_at"], p["key"]))
     if stats is not None:
         stats["excluded_pairs"] = stats.get("excluded_pairs", 0) + excluded
+        stats["not_in_master"] = stats.get("not_in_master", 0) + not_in_master
     return out
 
 
@@ -445,11 +455,12 @@ def prepare_day(
     coverage: dict[str, dict],
     allow_incomplete: bool,
     archive: Path = ARCHIVE,
+    stocks: dict | None = None,
 ) -> tuple[list[dict], str]:
     """Coverage-checked pairs for one day plus its summary line (raises `IncompleteDay`)."""
     report = check_day_coverage(universe, coverage, day, prev_day, allow_incomplete)
     stats: dict = {}
-    pairs = day_pairs(articles, day, prev_day, universe, coverage, stats)
+    pairs = day_pairs(articles, day, prev_day, universe, coverage, stats, stocks)
     dash = dashboard_keys(day, archive)
     overlap = "n/a" if dash is None else str(sum(p["key"] in dash for p in pairs))
     empty = sum(not p["summary"] for p in pairs)
@@ -457,6 +468,7 @@ def prepare_day(
         f"{day}: universe {report['universe']} truncated {len(report['truncated'])} "
         f"missing {len(report['missing'])} uncovered {len(report['uncovered'])} "
         f"pairs {len(pairs)} excluded_pairs {stats.get('excluded_pairs', 0)} "
+        f"not_in_master {stats.get('not_in_master', 0)} "
         f"empty_summary {empty} dashboard_overlap {overlap}"
     )
     return pairs, line
@@ -507,6 +519,7 @@ def main() -> None:
                     universe,
                     coverage,
                     args.allow_incomplete,
+                    stocks=stocks,
                 )
             except IncompleteDay as exc:
                 sys.exit(f"REFUSED: {exc}")

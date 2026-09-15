@@ -382,3 +382,18 @@ def test_detail_calls_delay_later_codes_like_the_live_sweep(tmp_path: Path) -> N
     # page1 + 20 details + page2 + 5 details = 27 requests, then 000660 page at 08:00:27,
     # detail 08:00:28, done 08:00:29
     assert other["discovered_at"] == dt.datetime(2026, 9, 15, 8, 0, 29, tzinfo=KST)
+
+
+def test_pairs_require_code_in_stock_master_but_sweep_still_visits_it(tmp_path: Path) -> None:
+    root = tmp_path / "u"
+    row = _row("m", "2026-09-15T07:00:00")
+    _write_c1(root, "999999", [row, _row("only_etf", "2026-09-15T07:10:00")])  # not in STOCKS
+    _write_c1(root, "005930", [row])
+    stats: dict = {}
+    pairs = day_pairs(
+        load_articles(root), D, PREV, ["999999", "005930"], stocks=STOCKS, stats=stats
+    )
+    assert [(p["news_id"], p["code"]) for p in pairs] == [("m", "005930")]
+    assert stats["not_in_master"] == 2
+    # 999999 page at 08:00 finds both (details 08:00:01, :02) -> m discovered 08:00:03 via 999999
+    assert pairs[0]["discovered_at"] == dt.datetime(2026, 9, 15, 8, 0, 3, tzinfo=KST)
