@@ -277,7 +277,8 @@ def build_article(item: dict, detail: dict[str, Any] | None) -> NewsArticle:
         url=build_article_url(news_id),
         published_at=_created_at(item),
         tickers=tickers,
-        category="stock",
+        # Per-company pages have no dashboard category; A3 judges history with "" too.
+        category="",
     )
 
 

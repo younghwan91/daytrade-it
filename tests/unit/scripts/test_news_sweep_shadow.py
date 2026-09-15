@@ -204,7 +204,7 @@ def test_build_article_uses_live_key_and_detail_company_codes() -> None:
     assert str(article.id) == live_article_id("yna_AKR1")
     assert [t.value for t in article.tickers] == ["005930", "000660"]
     assert article.published_at == at(8, 31, 2)
-    assert article.category == "stock"
+    assert article.category == ""
     assert article.summary == "요약"
 
 
@@ -326,9 +326,13 @@ def test_block_statuses(status: int) -> None:
 class FakeClaude:
     def __init__(self) -> None:
         self.calls: list[tuple[str, bool]] = []
+        self.categories: list[object] = []
 
-    async def score_article(self, *, code: str, full_body: bool = False, **_: object):
+    async def score_article(
+        self, *, code: str, category: object = None, full_body: bool = False, **_: object
+    ):
         self.calls.append((code, full_body))
+        self.categories.append(category)
         return _features()
 
 
@@ -455,3 +459,30 @@ async def test_halt_signal_stops_sweep(tmp_path: Path, monkeypatch: pytest.Monke
     runner = _runner(tmp_path, monkeypatch, handler)
     await runner.run()
     assert runner.requests == 1 and runner.stop_reason == "signal SIGTERM"
+
+
+async def test_universe_pairs_judged_with_empty_category_and_shared_visit_seen_at(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    second = {**ITEM, "id": "yna_AKR2", "title": "SK하이닉스 공급 계약"}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "/companies/" in request.url.path:
+            return httpx.Response(200, json={"result": {"body": [ITEM, second]}})
+        news_id = request.url.path.rsplit("/", 1)[-1]
+        # Even if detail carries something category-like, universe pairs use "".
+        kr = {"id": news_id, "companyCodes": ["005930"], "category": "HOT", "newsType": "x"}
+        return httpx.Response(200, json={"result": {"kr": kr}})
+
+    claude = FakeClaude()
+    times = iter(at(10, 0, s) for s in range(60))  # strictly increasing clock
+    runner = _runner(tmp_path, monkeypatch, handler, claude=claude, max_requests=3)
+    runner.now = lambda: next(times, at(10, 0, 9))
+    await runner.run()
+
+    assert claude.categories == ["", ""]
+    rows = _rows(tmp_path / "news_judgments_universe" / f"{DAY}.jsonl")
+    assert [r["category"] for r in rows] == ["", ""]
+    # Both articles came from one visit: they share that visit's timestamp.
+    page_ts = _rows(tmp_path / "news_sweep" / f"{DAY}.jsonl")[0]["ts"]
+    assert [r["sweep_seen_at"] for r in rows] == [page_ts, page_ts]
