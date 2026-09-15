@@ -463,3 +463,38 @@ def test_create_4xx_raises_without_retry(tmp_path: Path) -> None:
         _judge(tmp_path, api).run([_pair(1)], sample=1, stratify=["month"], seed=1)
     assert api.posts == 1
     assert "uncertain_submits" not in json.loads((tmp_path / "state.json").read_text())
+
+
+def test_dry_run_calibrate_counts_tokens_but_never_creates_a_batch(tmp_path: Path) -> None:
+    """--dry-run --calibrate N: only the free count_tokens endpoint, no batch create."""
+    calls: list[str] = []
+
+    def api(request: httpx.Request) -> httpx.Response:
+        calls.append(f"{request.method} {request.url.path}")
+        if request.url.path == "/v1/messages/count_tokens":
+            body = json.loads(request.content)
+            chars = len(body["system"]) + len(body["messages"][0]["content"])
+            return httpx.Response(200, json={"input_tokens": round(chars / 1.32)})
+        raise AssertionError(f"dry run must not call {request.url.path}")
+
+    j = _judge(tmp_path, api, budget=0.0)
+    summary = j.run(
+        [_pair(i) for i in range(20)],
+        sample=5,
+        stratify=["month", "sector", "session"],
+        seed=3,
+        dry_run=True,
+        calibrate=3,
+    )
+    assert calls == ["POST /v1/messages/count_tokens"] * 3
+    assert j.chars_per_token == pytest.approx(1.32 / 1.1, rel=0.02)
+    assert summary["over_budget"] is True
+    assert not (tmp_path / "state.json").exists()
+
+
+def test_cli_dry_run_passes_the_api_key_only_when_calibrating() -> None:
+    from judge_batch import api_key_for
+
+    assert api_key_for(dry_run=True, calibrate=0, lookup=lambda: "k") is None
+    assert api_key_for(dry_run=True, calibrate=20, lookup=lambda: "k") == "k"
+    assert api_key_for(dry_run=False, calibrate=0, lookup=lambda: "k") == "k"

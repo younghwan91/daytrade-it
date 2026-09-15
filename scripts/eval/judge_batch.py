@@ -23,7 +23,7 @@
   prompt, so ~30% conservative) at $1/M + `--est-output-tokens` (default 200;
   measured ~150) at $5/M, times the 50% Batch discount. Abort if over
   `--budget-usd`. `--calibrate N` measures chars/token on N sampled requests
-  with the free count_tokens endpoint first (not in --dry-run).
+  with the free count_tokens endpoint first (also in --dry-run).
 - A batch create is never retried: a 5xx/transport error records the attempt
   and fails loudly (`SubmitUncertain`); a rerun resubmits that chunk only if no
   unrecorded batch of that size is listed, else `--adopt-batch ID` records it.
@@ -559,7 +559,7 @@ class BatchJudge:
         ]
         chosen = stratified_sample(todo, sample, stratify, seed)
         requests = [build_request(p, self.model) for p in chosen]
-        if calibrate and requests and not dry_run:
+        if calibrate and requests:  # count_tokens is free: also in --dry-run
             probe = random.Random(seed).sample(requests, min(calibrate, len(requests)))
             ratio = sum(_chars(r) for r in probe) / sum(self.count_tokens(r) for r in probe)
             self.chars_per_token = ratio / 1.1  # 10% safety margin
@@ -661,6 +661,13 @@ def _api_key() -> str | None:
     return None
 
 
+def api_key_for(
+    dry_run: bool, calibrate: int, lookup: Callable[[], str | None] = _api_key
+) -> str | None:
+    """A dry run gets the key only for --calibrate (free count_tokens); it never creates batches."""
+    return lookup() if (not dry_run or calibrate) else None
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--pairs", type=Path, required=True)
@@ -695,7 +702,7 @@ def main() -> None:
     with httpx.Client() as client:
         judge = BatchJudge(
             client=client,
-            api_key=None if args.dry_run else _api_key(),
+            api_key=api_key_for(args.dry_run, args.calibrate),
             model=args.model,
             cache=args.cache,
             errors=args.errors,
