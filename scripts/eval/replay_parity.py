@@ -11,6 +11,18 @@ judgment no replay decision matched, and every ticker-level difference
 (add-on, exit quantity, entry, fill > ±0.5%) is listed with evidence and a
 causal class (see `divergences`): intra_minute_price, data_vintage, knock_on,
 or other. PASS = no `other` and no errors logged during the replay.
+
+Final-review checks (I5): every sim buy fill must equal SimBroker's own rule
+price at its timestamp (`fill_rule`), and for tickers exited on both sides
+the first exit's submission time must agree within one manage tick (30 s,
+`exit_time`) and the sim sell fill within ±0.5% of the live exit limit
+(`sell_fill`).
+
+Previous closes (I2) come from `data/eval/prev_close/YYYY-MM-DD.json`: the
+prior session's last regular minute bar, frozen once and served to SimBroker
+and the no-chase filter; tickers whose frozen close is > 0.1% off today's
+daily_bars_adjusted are printed. `data_vintage` (R11) is judged against the
+frozen close.
 """
 
 from __future__ import annotations
@@ -26,10 +38,15 @@ from urllib.parse import unquote, urlparse
 import psycopg2
 from krx_quant_core.market.ticks import tick_size
 
-from daytrade_it.application.replay.day_replay import DayConfig, replay_day
+from daytrade_it.application.replay.day_replay import DayConfig, ReplayDataError, replay_day
 from daytrade_it.application.replay.events import load_events
-from daytrade_it.application.trading.auto_trader import TradingLimits, add_on_hit
-from daytrade_it.domain.value_objects import Ticker
+from daytrade_it.application.replay.prev_close import (
+    FrozenPrevCloseDB,
+    FrozenPrevCloses,
+    dump_prev_closes,
+    load_prev_closes,
+)
+from daytrade_it.application.trading.auto_trader import TradingLimits, add_on_hit, vwap_exit_hit
 from daytrade_it.infrastructure.brokers.base import KST, MinuteBar
 from daytrade_it.infrastructure.brokers.sim_broker import SimBroker
 from daytrade_it.infrastructure.external.quant_airflow_db_client import QuantAirflowDBClient
@@ -40,6 +57,13 @@ LIVE_LEDGER = Path("data/auto_trader")
 #: scalp-it's dart.db; simnode's copy may lag trader's (pass --dart).
 DART = Path("../scalp-it/data/dart.db")
 WORK = Path("data/eval/replay_work")
+PREV_CLOSE = Path("data/eval/prev_close")
+#: Regular session (incl. the 15:30 closing auction bar); NXT bars fall outside.
+REGULAR_OPEN, REGULAR_END = dt.time(9, 0), dt.time(15, 31)
+#: No KRX/NXT trading before 08:00: an earlier bar means a timezone mix-up.
+EARLIEST_BAR = dt.time(8, 0)
+PREV_CLOSE_LOOKBACK = dt.timedelta(days=10)  # entry_filter._LOOKBACK_DAYS
+MANAGE_TICK = dt.timedelta(seconds=30)
 #: Copy of trader's data/news_signal_daemon.log (the live daemon's JSON log).
 LIVE_LOG = Path("data/eval/news_signal_daemon_trader_0915.log")
 INTRA = "intra_minute_price"
@@ -92,10 +116,31 @@ def _conn():  # noqa: ANN202
     return psycopg2.connect(os.environ["KR_QUANT_DB"], connect_timeout=5)
 
 
+def to_kst_naive(ts: dt.datetime) -> dt.datetime:
+    """KST wall time. kr_quant `minute_bars.ts` is `timestamp without time zone`
+    holding KST wall time (first bar 09:00); an aware value is converted."""
+    return ts if ts.tzinfo is None else ts.astimezone(KST).replace(tzinfo=None)
+
+
+def check_session_hours(bars: dict[str, list[MinuteBar]]) -> None:
+    """Fail loudly if any bar starts before 08:00 KST (timezone mix-up)."""
+    bad = sorted(c for c, bs in bars.items() if any(b.ts.time() < EARLIEST_BAR for b in bs))
+    if bad:
+        raise ReplayDataError(f"minute bars before {EARLIEST_BAR} KST (timezone?): {bad}")
+
+
 def load_session_bars(codes: list[str], day: dt.date) -> dict[str, list[MinuteBar]]:
     out: dict[str, list[MinuteBar]] = {c: [] for c in codes}
     with _conn() as c, c.cursor() as cur:
         cur.execute("SET max_parallel_workers_per_gather = 0")
+        # Day bounds are KST wall time; an aware column would be compared in UTC.
+        cur.execute(
+            "SELECT data_type FROM information_schema.columns "
+            "WHERE table_name = 'minute_bars' AND column_name = 'ts'"
+        )
+        (kind,) = cur.fetchone()
+        if kind != "timestamp without time zone":
+            raise ReplayDataError(f"minute_bars.ts is {kind}; day bounds assume KST wall time")
         cur.execute(
             "SELECT code, ts, open, high, low, close, volume FROM minute_bars "
             "WHERE code = ANY(%s) AND ts >= %s AND ts < %s ORDER BY code, ts",
@@ -104,7 +149,7 @@ def load_session_bars(codes: list[str], day: dt.date) -> dict[str, list[MinuteBa
         for code, ts, o, h, lo, cl, v in cur.fetchall():
             out[code].append(
                 MinuteBar(
-                    ts=ts.replace(tzinfo=None),
+                    ts=to_kst_naive(ts),
                     open=Decimal(str(o)),
                     high=Decimal(str(h)),
                     low=Decimal(str(lo)),
@@ -114,8 +159,12 @@ def load_session_bars(codes: list[str], day: dt.date) -> dict[str, list[MinuteBa
             )
     return out
 
+    check_session_hours(out)
+    return out
 
-def prev_closes(codes: list[str], day: dt.date) -> dict[str, Decimal]:
+
+def daily_adjusted_closes(codes: list[str], day: dt.date) -> dict[str, Decimal]:
+    """Today's (possibly revised) daily_bars_adjusted prev close -- for flags only."""
     with _conn() as c, c.cursor() as cur:
         cur.execute(
             "SELECT DISTINCT ON (code) code, close FROM daily_bars_adjusted "
@@ -123,6 +172,80 @@ def prev_closes(codes: list[str], day: dt.date) -> dict[str, Decimal]:
             (codes, day),
         )
         return {code: Decimal(str(close)) for code, close in cur.fetchall()}
+
+
+def prior_regular_bars(codes: list[str], day: dt.date) -> list[tuple[str, dt.datetime, float]]:
+    """(code, ts, close) of each code's last regular bar in the lookback before `day`."""
+    with _conn() as c, c.cursor() as cur:
+        cur.execute("SET max_parallel_workers_per_gather = 0")
+        cur.execute(
+            "SELECT DISTINCT ON (code) code, ts, close FROM minute_bars "
+            "WHERE code = ANY(%s) AND ts >= %s AND ts < %s "
+            "AND ts::time >= %s AND ts::time < %s ORDER BY code, ts DESC",
+            (codes, day - PREV_CLOSE_LOOKBACK, day, REGULAR_OPEN, REGULAR_END),
+        )
+        return [(code, to_kst_naive(ts), close) for code, ts, close in cur.fetchall()]
+
+
+def last_regular_closes(
+    rows: list[tuple[str, dt.datetime, float]], day: dt.date
+) -> dict[str, tuple[Decimal, dt.date]]:
+    """Each code's close at its latest regular-session bar strictly before `day`."""
+    best: dict[str, tuple[dt.datetime, float]] = {}
+    for code, ts, close in rows:
+        if ts.date() >= day or not (REGULAR_OPEN <= ts.time() < REGULAR_END):
+            continue
+        if code not in best or ts > best[code][0]:
+            best[code] = (ts, close)
+    return {c: (Decimal(str(cl)), ts.date()) for c, (ts, cl) in best.items()}
+
+
+def vintage_flags(
+    closes: dict[str, tuple[Decimal, dt.date]], daily: dict[str, Decimal]
+) -> list[dict]:
+    """Frozen closes more than VINTAGE_TOL off today's daily_bars_adjusted (or absent there)."""
+    out = []
+    for code in sorted(closes):
+        frozen, date = closes[code]
+        d = daily.get(code)
+        dev = None if d is None else frozen / d - 1
+        if dev is None or abs(dev) > VINTAGE_TOL:
+            out.append(
+                {
+                    "code": code,
+                    "frozen": str(frozen),
+                    "date": date.isoformat(),
+                    "daily_adjusted": str(d),
+                    "dev": None if dev is None else f"{dev:+.4%}",
+                }
+            )
+    return out
+
+
+def frozen_prev_closes(
+    codes: list[str],
+    day: dt.date,
+    out_dir: Path = PREV_CLOSE,
+    fetch_bars=prior_regular_bars,  # noqa: ANN001
+    fetch_daily=daily_adjusted_closes,  # noqa: ANN001
+) -> FrozenPrevCloses:
+    """Load `out_dir/<day>.json`, or build it once from minute bars and freeze it."""
+    path = out_dir / f"{day.isoformat()}.json"
+    if path.exists():
+        frozen = load_prev_closes(path)
+        uncovered = sorted(set(codes) - set(frozen.closes) - set(frozen.missing))
+        if uncovered:
+            raise ValueError(f"{path} was frozen without event codes {uncovered}")
+        return frozen
+    closes = last_regular_closes(fetch_bars(codes, day), day)
+    frozen = FrozenPrevCloses(
+        day=day,
+        closes=closes,
+        flags=vintage_flags(closes, fetch_daily(codes, day)),
+        missing=sorted(set(codes) - set(closes)),
+    )
+    dump_prev_closes(path, frozen)
+    return frozen
 
 
 def first_daemon(ledger: list[dict], day: dt.date) -> list[dict]:
@@ -394,7 +517,7 @@ def _filter_class(
 
     note = (
         f"sim quote {o} {o / kr - 1:+.2%} vs live price {price} {price / kr - 1:+.2%} "
-        f"over kr_quant prev {kr.normalize():f}; live prev {lp} gives {price / lp - 1:+.2%}; "
+        f"over frozen prev {kr.normalize():f}; live prev {lp} gives {price / lp - 1:+.2%}; "
         f"cap {max_move:.2%}"
     )
     if ext(o, kr) != (_filter_side(sim) == "extended") or ext(price, lp) != (
@@ -635,12 +758,174 @@ def divergences(
     return out
 
 
+def _rule_price(bars: dict[str, list[MinuteBar]], f: dict) -> Decimal | None:
+    """SimBroker's buy fill price for `f`: quote at placement, or min(limit, open)
+    of the completed bar that ended at the fill ts."""
+    ts = f["ts"]
+    if not f["resting"]:
+        return _sim_quote(bars, f["ticker"], ts)
+    bar_start = ts.astimezone(KST).replace(tzinfo=None) - dt.timedelta(minutes=1)
+    b = next((x for x in bars.get(f["ticker"], []) if x.ts == bar_start), None)
+    if b is None or b.low > Decimal(f["limit"]):
+        return None
+    return min(Decimal(f["limit"]), b.open)
+
+
+def fill_rule_divergences(fills: list[dict], bars: dict[str, list[MinuteBar]]) -> list[dict]:
+    """Sim buy fills (entries, add-ons) not at SimBroker's own rule price: `other`."""
+    out = []
+    for f in fills:
+        if f["side"] != "buy":
+            continue
+        want = _rule_price(bars, f)
+        if want is not None and Decimal(f["price"]) == want:
+            continue
+        mode = "resting" if f["resting"] else "marketable"
+        out.append(
+            {
+                "kind": "fill_rule",
+                "ticker": f["ticker"],
+                "at": f["ts"],
+                "live": "-",
+                "sim": str(f["price"]),
+                "cls": "other",
+                "note": f"{mode} buy limit {f['limit']} filled {f['price']}, rule price {want}",
+            }
+        )
+    return out
+
+
+def _first_exit(ledger: list[dict]) -> dict[str, dict]:
+    out: dict[str, dict] = {}
+    for r in ledger:
+        if r["event"] == "exit_submitted" and int(r.get("attempt", 0)) == 0:
+            out.setdefault(r["ticker"], r)
+    return out
+
+
+def _entry_limit(ledger: list[dict], t: str) -> Decimal | None:
+    r = next((x for x in ledger if x["event"] == "entry_submitted" and x.get("ticker") == t), None)
+    return Decimal(r["limit"]) if r and r.get("limit") else None
+
+
+def exit_divergences(
+    live_ledger: list[dict],
+    sim_ledger: list[dict],
+    sim_fills: list[dict],
+    bars: dict[str, list[MinuteBar]],
+    limits: TradingLimits,
+) -> list[dict]:
+    """Exit submission time (one manage tick) and sell fill (±0.5%) vs live, per ticker
+    exited on both sides.
+
+    - exit_time: intra_minute_price only if `vwap_exit_hit` at the earlier exit
+      flips between the live and replay entry limits; else other
+    - sell_fill: inherits the ticker's exit_time class; else intra_minute_price
+      if the live limit is not reproducible from the minute open (live bid off
+      the bar), other if it is (the sim fill itself is off)
+    """
+    out = []
+    live_x, sim_x = _first_exit(live_ledger), _first_exit(sim_ledger)
+    for t in sorted(set(live_x) & set(sim_x)):
+        lx, sx = live_x[t], sim_x[t]
+        lt, st = _kst(lx["ts"]), _kst(sx["ts"])
+        time_cls = None
+        if abs(lt - st) > MANAGE_TICK:
+            le, se = _entry_limit(live_ledger, t), _entry_limit(sim_ledger, t)
+            at = min(lt, st)
+            if limits.vwap_exit_gap is not None and le is not None and se is not None:
+                hits = [
+                    vwap_exit_hit(
+                        bars.get(t, []), e, at, limits.vwap_exit_gap, limits.vwap_exit_min_gain
+                    )[0]
+                    for e in (le, se)
+                ]
+                flip = hits[0] != hits[1]
+                note = f"vwap_exit_hit at {at:%H:%M:%S}: live entry {le} -> {hits[0]}, replay entry {se} -> {hits[1]}"
+            else:
+                flip, note = False, "no VWAP exit rule or entry limit missing"
+            time_cls = INTRA if flip else "other"
+            out.append(
+                {
+                    "kind": "exit_time",
+                    "ticker": t,
+                    "at": at,
+                    "live": lt.strftime("%H:%M:%S"),
+                    "sim": st.strftime("%H:%M:%S"),
+                    "cls": time_cls,
+                    "note": note,
+                }
+            )
+        sim_rows = {
+            r.get("order_id"): r
+            for r in sim_ledger
+            if r["event"] == "exit_submitted" and r.get("ticker") == t
+        }
+        live_rows = [
+            r for r in live_ledger if r["event"] == "exit_submitted" and r.get("ticker") == t
+        ]
+        for f in sim_fills:
+            if f["side"] != "sell" or f["ticker"] != t:
+                continue
+            attempt = int(sim_rows.get(f["order_id"], {}).get("attempt", 0))
+            lr = next((r for r in live_rows if int(r.get("attempt", 0)) == attempt), live_rows[-1])
+            limit = Decimal(lr["limit"])
+            dev = float(Decimal(f["price"]) / limit - 1)
+            if abs(dev) <= MAX_FILL_DEV:
+                continue
+            if time_cls is not None:
+                cls, note = time_cls, "follows the exit_time divergence"
+            else:
+                disc = min(limits.exit_discount_step * attempt, limits.exit_discount_cap)
+                q = _sim_quote(bars, t, _kst(lr["ts"]))
+                if q is None:
+                    cls, note = INTRA, f"no bar at live exit {_kst(lr['ts']):%H:%M:%S}"
+                else:
+                    sim_limit = (q - tick_size(q)) * (1 - disc)
+                    live_bid = limit / (1 - disc)
+                    ok = abs(limit - sim_limit) <= tick_size(q) / 2
+                    cls = "other" if ok else INTRA
+                    note = f"live exit limit {limit} (bid {live_bid:.0f}) vs sim bid {q - tick_size(q)} at {_kst(lr['ts']):%H:%M:%S}"
+            out.append(
+                {
+                    "kind": "sell_fill",
+                    "ticker": t,
+                    "at": None,
+                    "live": str(limit),
+                    "sim": f"{f['price']} ({dev:+.3%})",
+                    "cls": cls,
+                    "note": note,
+                }
+            )
+    return out
+
+
+def prepare_day(
+    day: dt.date, events: list
+) -> tuple[dict[str, list[MinuteBar]], FrozenPrevCloses, SimBroker, dt.datetime]:
+    """Bars, frozen prev closes (flags printed), a fresh SimBroker and stale_before."""
+    codes = sorted({e.ticker for e in events})
+    bars = load_session_bars(codes, day)
+    frozen = frozen_prev_closes(codes, day)
+    print(
+        f"  prev close frozen: {len(frozen.closes)} codes (prior session "
+        f"{frozen.prev_session}), no close: {frozen.missing}; "
+        f"> {VINTAGE_TOL:.1%} off daily_bars_adjusted: {len(frozen.flags)}"
+    )
+    for f in frozen.flags:
+        print(f"    PREV_CLOSE_FLAG {f}")
+    broker = SimBroker(bars, frozen.prices, lambda: dt.datetime.now(KST))
+    stale_before = dt.datetime.combine(frozen.prev_session, dt.time(15, 20), tzinfo=KST)
+    return bars, frozen, broker, stale_before
+
+
 def main() -> None:
     require_backtest_host()
     ap = argparse.ArgumentParser()
     ap.add_argument("--days", required=True)
     ap.add_argument("--dart", type=Path, default=DART)
     ap.add_argument("--live-log", type=Path, default=LIVE_LOG)
+    ap.add_argument("--work-root", type=Path, default=WORK)
     args = ap.parse_args()
     _export_quant_airflow_env()
     db = QuantAirflowDBClient()
@@ -655,30 +940,25 @@ def main() -> None:
     for d in args.days.split(","):
         day = dt.date.fromisoformat(d)
         events = load_events(EVENTS / f"{day}.jsonl")
-        codes = sorted({e.ticker for e in events})
-        bars = load_session_bars(codes, day)
-        prev = prev_closes(codes, day)
-        broker = SimBroker(bars, prev, lambda: dt.datetime.now(KST))
-        stale_before = dt.datetime.combine(
-            db.get_adjusted_daily_bars(
-                Ticker(value="005930"),
-                start=day - dt.timedelta(days=14),
-                end=day - dt.timedelta(days=1),
-            )[-1].date,
-            dt.time(15, 20),
-            tzinfo=KST,
-        )
-        res = replay_day(
-            day,
-            events,
-            broker,
-            db,
-            stocks,
-            stale_before,
-            LIVE_CONFIGS[day],
-            WORK / str(day),
-            args.dart,
-        )
+        print(f"== {day}")
+        try:
+            bars, frozen, broker, stale_before = prepare_day(day, events)
+            prev = frozen.prices
+            res = replay_day(
+                day,
+                events,
+                broker,
+                FrozenPrevCloseDB(frozen),
+                stocks,
+                stale_before,
+                LIVE_CONFIGS[day],
+                args.work_root,
+                args.dart,
+            )
+        except ReplayDataError as exc:
+            print(f"== {day} parity FAIL (data): {exc}")
+            ok_all = False
+            continue
         raw_live = [
             json.loads(line) for line in (LIVE_LEDGER / f"{day}.jsonl").open() if line.strip()
         ]
@@ -703,6 +983,8 @@ def main() -> None:
             limits=cfg.limits,
             unmatched_live=unused,
         )
+        divs += fill_rule_divergences(res.fills, bars)
+        divs += exit_divergences(live, res.ledger, res.fills, bars, cfg.limits)
         n_dec = sum(1 for x in divs if x["kind"] == "decision")
         n_other = sum(1 for x in divs if x["cls"] not in PASSING_CLASSES)
         by_cls = {
@@ -724,6 +1006,12 @@ def main() -> None:
             f"ticker-level {len(divs) - n_dec}; by class {by_cls}; errors={len(res.errors)}; "
             f"exact comparison {'MATCH' if exact else 'DIFF'}"
         )
+        print(
+            f"  risk refusals {len(res.refusals)}; cash rejections {len(res.cash_rejections)}; "
+            f"end positions {res.positions}; run dir {res.run_dir}"
+        )
+        for r in res.refusals:
+            print(f"    REFUSED {r['ts'][11:19]} {r['ticker']} {r['reason']}")
         for x in divs:
             at = x["at"].strftime("%H:%M:%S") if x["at"] else "--------"
             print(
@@ -731,7 +1019,7 @@ def main() -> None:
                 f"[{x['cls']}] {x['note']}"
             )
         print("  -- exact comparison --")
-        print(f"  event tickers without bars: {sorted(c for c, b in bars.items() if not b)}")
+        print(f"  event tickers without bars: {res.missing_bars}")
         for kind in ("entry", "add_on", "exit"):
             mark = "ok " if s_live[kind] == s_sim[kind] else "DIFF"
             print(f"  {mark} {kind:6} live={s_live[kind]} sim={s_sim[kind]}")
@@ -754,7 +1042,8 @@ def main() -> None:
             print("   ", {k: v for k, v in e.items() if k != "exception"})
             if e.get("exception"):
                 print("   ", str(e["exception"])[-1500:])
-        (WORK / str(day) / "result.json").write_text(
+        assert res.run_dir is not None
+        (res.run_dir / "result.json").write_text(
             json.dumps(
                 {
                     "ledger": res.ledger,
@@ -763,6 +1052,10 @@ def main() -> None:
                     "errors": res.errors,
                     "decisions": res.decisions,
                     "divergences": divs,
+                    "refusals": res.refusals,
+                    "cash_rejections": res.cash_rejections,
+                    "positions": res.positions,
+                    "prev_close_flags": frozen.flags,
                 },
                 default=str,
                 ensure_ascii=False,

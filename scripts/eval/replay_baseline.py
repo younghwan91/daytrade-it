@@ -1,6 +1,11 @@
 """Live policy replayed over every event day -- the baseline stages 1-4 must beat.
 
-uv run python scripts/eval/replay_baseline.py   # simnode
+uv run python scripts/eval/replay_baseline.py --dart data/eval/dart_trader_20260915.db  # simnode
+
+Net per ticker = sells x (1 - sell cost) - buys x (1 + buy cost). Shares still
+held when the replay ends (leftovers) are valued at the day's last regular
+session close (bar <= 15:30) as if sold there, with the sell cost; a ticker
+whose bought quantity != sold + leftover raises.
 """
 
 from __future__ import annotations
@@ -13,6 +18,7 @@ import sys
 from decimal import Decimal
 from pathlib import Path
 
+REGULAR_LAST_BAR = dt.time(15, 30)
 SELL_COST = Decimal("0.00215")  # 0.20% tax + 0.015% commission
 BUY_COST = Decimal("0.00015")
 OUT = Path("data/eval/replay_baseline")
@@ -24,7 +30,19 @@ OUT = Path("data/eval/replay_baseline")
 VALID_TICKER = re.compile(r"^\d{6}$")
 
 
-def trade_pnl(fills: list[dict]) -> list[dict]:
+def last_regular_close(bars: dict) -> dict[str, Decimal]:
+    """Each ticker's close at its last regular-session bar (ts <= 15:30)."""
+    out = {}
+    for t, bs in bars.items():
+        regular = [b for b in bs if b.ts.time() <= REGULAR_LAST_BAR]
+        if regular:
+            out[t] = max(regular, key=lambda b: b.ts).close
+    return out
+
+
+def trade_pnl(
+    fills: list[dict], positions: dict[str, int], last_close: dict[str, Decimal]
+) -> list[dict]:
     rows: dict[str, dict] = {}
     for f in fills:
         r = rows.setdefault(
@@ -32,8 +50,11 @@ def trade_pnl(fills: list[dict]) -> list[dict]:
             {
                 "ticker": f["ticker"],
                 "buy_qty": 0,
+                "sell_qty": 0,
+                "leftover_qty": 0,
                 "buy_value": Decimal(0),
                 "sell_value": Decimal(0),
+                "leftover_value": Decimal(0),
             },
         )
         value = Decimal(str(f["price"])) * int(f["qty"])
@@ -41,9 +62,21 @@ def trade_pnl(fills: list[dict]) -> list[dict]:
             r["buy_qty"] += int(f["qty"])
             r["buy_value"] += value
         else:
+            r["sell_qty"] += int(f["qty"])
             r["sell_value"] += value
-    for r in rows.values():
-        r["net"] = r["sell_value"] * (1 - SELL_COST) - r["buy_value"] * (1 + BUY_COST)
+    for t, r in rows.items():
+        left = int(positions.get(t, 0))
+        if r["buy_qty"] != r["sell_qty"] + left:
+            raise ValueError(
+                f"{t}: bought {r['buy_qty']} != sold {r['sell_qty']} + leftover {left}"
+            )
+        if left:
+            if t not in last_close:
+                raise ValueError(f"{t}: {left} leftover share(s) but no regular close")
+            r["leftover_qty"] = left
+            r["leftover_value"] = last_close[t] * left
+        proceeds = r["sell_value"] + r["leftover_value"]
+        r["net"] = proceeds * (1 - SELL_COST) - r["buy_value"] * (1 + BUY_COST)
     return list(rows.values())
 
 
@@ -53,16 +86,17 @@ def main() -> None:
         EVENTS,
         WORK,
         _export_quant_airflow_env,
-        load_session_bars,
-        prev_closes,
+        prepare_day,
     )
 
-    from daytrade_it.application.replay.day_replay import DayConfig, replay_day  # noqa: PLC0415
+    from daytrade_it.application.replay.day_replay import (  # noqa: PLC0415
+        DayConfig,
+        ReplayDataError,
+        replay_day,
+    )
     from daytrade_it.application.replay.events import load_events  # noqa: PLC0415
+    from daytrade_it.application.replay.prev_close import FrozenPrevCloseDB  # noqa: PLC0415
     from daytrade_it.application.trading.auto_trader import TradingLimits  # noqa: PLC0415
-    from daytrade_it.domain.value_objects import Ticker  # noqa: PLC0415
-    from daytrade_it.infrastructure.brokers.base import KST  # noqa: PLC0415
-    from daytrade_it.infrastructure.brokers.sim_broker import SimBroker  # noqa: PLC0415
     from daytrade_it.infrastructure.external.quant_airflow_db_client import (  # noqa: PLC0415
         QuantAirflowDBClient,
     )
@@ -70,6 +104,7 @@ def main() -> None:
 
     ap = argparse.ArgumentParser()
     ap.add_argument("--dart", type=Path, default=DART)
+    ap.add_argument("--work-root", type=Path, default=WORK)
     args = ap.parse_args()
 
     require_backtest_host()
@@ -79,6 +114,8 @@ def main() -> None:
     cfg = DayConfig(limits=TradingLimits(), max_pre_entry_move=Decimal("0.03"))
     OUT.mkdir(parents=True, exist_ok=True)
     total_errors = 0
+    failed_days: list[str] = []
+    grand = Decimal(0)
     for path in sorted(EVENTS.glob("2026-*.jsonl")):
         day = dt.date.fromisoformat(path.stem)
         events = load_events(path)
@@ -86,36 +123,67 @@ def main() -> None:
         if bad:
             print(f"{day}: dropping non-equity ticker(s) {sorted(set(bad))}", file=sys.stderr)
             events = [e for e in events if VALID_TICKER.match(e.ticker)]
-        codes = sorted({e.ticker for e in events})
-        broker = SimBroker(
-            load_session_bars(codes, day), prev_closes(codes, day), lambda: dt.datetime.now(KST)
-        )
-        prior = db.get_adjusted_daily_bars(
-            Ticker(value="005930"),
-            start=day - dt.timedelta(days=14),
-            end=day - dt.timedelta(days=1),
-        )[-1].date
-        stale_before = dt.datetime.combine(prior, dt.time(15, 20), tzinfo=KST)
-        res = replay_day(
-            day, events, broker, db, stocks, stale_before, cfg, WORK / f"baseline-{day}", args.dart
-        )
-        pnl = trade_pnl(res.fills)
+        try:
+            bars, frozen, broker, stale_before = prepare_day(day, events)
+            res = replay_day(
+                day,
+                events,
+                broker,
+                FrozenPrevCloseDB(frozen),
+                stocks,
+                stale_before,
+                cfg,
+                args.work_root,
+                args.dart,
+            )
+        except ReplayDataError as exc:
+            print(f"{day} FAILED (data): {exc}", file=sys.stderr)
+            failed_days.append(str(day))
+            continue
+        pnl = trade_pnl(res.fills, res.positions, last_regular_close(bars))
         total = sum((r["net"] for r in pnl), Decimal(0))
+        grand += total
         losers = sum(r["net"] < 0 for r in pnl)
+        leftovers = {r["ticker"]: r["leftover_qty"] for r in pnl if r["leftover_qty"]}
         src = events[0].source if events else "-"
         n_errors = len(res.errors)
         total_errors += n_errors
-        print(f"{day} [{src}] trades={len(pnl)} net={total:,.0f} losers={losers} errors={n_errors}")
+        print(
+            f"{day} [{src}] trades={len(pnl)} net={total:,.0f} losers={losers} "
+            f"leftover_shares={sum(leftovers.values())} {leftovers} "
+            f"refusals={len(res.refusals)} cash_rejections={len(res.cash_rejections)} "
+            f"missing_bars={len(res.missing_bars)} errors={n_errors}"
+        )
+        for r in res.refusals:
+            print(f"    REFUSED {r['ts'][11:19]} {r['ticker']} {r['reason']}")
         (OUT / f"{day}.json").write_text(
             json.dumps(
-                {"day": str(day), "source": src, "trades": pnl, "net": total, "skips": res.skips},
+                {
+                    "day": str(day),
+                    "source": src,
+                    "trades": pnl,
+                    "net": total,
+                    "leftovers": leftovers,
+                    "refusals": res.refusals,
+                    "cash_rejections": res.cash_rejections,
+                    "prev_close_flags": frozen.flags,
+                    "missing_bars": res.missing_bars,
+                    "skips": res.skips,
+                    "run_dir": res.run_dir,
+                },
                 default=str,
                 ensure_ascii=False,
                 indent=1,
             )
         )
+    print(
+        f"total net={grand:,.0f} over {len(sorted(EVENTS.glob('2026-*.jsonl'))) - len(failed_days)} days"
+    )
+    if failed_days:
+        print(f"ERROR: data failures on {failed_days}", file=sys.stderr)
     if total_errors:
         print(f"ERROR: {total_errors} error(s) logged during replay", file=sys.stderr)
+    if failed_days or total_errors:
         sys.exit(1)
 
 

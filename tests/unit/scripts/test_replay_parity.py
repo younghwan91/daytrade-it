@@ -401,3 +401,189 @@ def test_exit_qty_inherits_add_on_class_only_when_quantities_reconcile() -> None
         ("add_on", "intra_minute_price"),
         ("exit_qty", "other"),
     }
+
+
+# -- final review fix wave -----------------------------------------------------
+
+
+def test_minute_bar_ts_is_converted_to_kst_wall_time() -> None:
+    from replay_parity import to_kst_naive  # noqa: PLC0415
+
+    aware_utc = dt.datetime(2026, 9, 15, 0, 1, tzinfo=dt.UTC)
+    assert to_kst_naive(aware_utc) == dt.datetime(2026, 9, 15, 9, 1)
+    naive_kst = dt.datetime(2026, 9, 15, 9, 1)
+    assert to_kst_naive(naive_kst) == naive_kst
+
+
+def test_session_bars_before_0800_fail_loudly() -> None:
+    import pytest  # noqa: PLC0415
+    from replay_parity import check_session_hours  # noqa: PLC0415
+
+    from daytrade_it.application.replay.day_replay import ReplayDataError  # noqa: PLC0415
+
+    check_session_hours({"A": [_bar("08:00", 1), _bar("15:30", 1)]})
+    with pytest.raises(ReplayDataError, match="A"):
+        check_session_hours({"A": [_bar("00:01", 1)]})
+
+
+def test_last_regular_closes_ignore_after_hours_and_the_day_itself() -> None:
+    from replay_parity import last_regular_closes  # noqa: PLC0415
+
+    rows = [
+        ("A", dt.datetime(2026, 9, 14, 15, 30), 2900.0),
+        ("A", dt.datetime(2026, 9, 14, 15, 31), 2950.0),  # NXT after-market
+        ("A", dt.datetime(2026, 9, 14, 19, 59), 2960.0),
+        ("A", dt.datetime(2026, 9, 11, 15, 30), 2800.0),
+        ("B", dt.datetime(2026, 9, 11, 15, 20), 500.0),  # halted on 09-14
+        ("A", dt.datetime(2026, 9, 15, 9, 0), 3000.0),
+    ]
+    got = last_regular_closes(rows, DAY)
+    assert got == {
+        "A": (Decimal(2900), dt.date(2026, 9, 14)),
+        "B": (Decimal(500), dt.date(2026, 9, 11)),
+    }
+
+
+def test_vintage_flags_list_closes_off_by_more_than_a_tenth_of_a_percent() -> None:
+    from replay_parity import vintage_flags  # noqa: PLC0415
+
+    closes = {"A": (Decimal(2900), DAY), "B": (Decimal(10000), DAY), "C": (Decimal(10), DAY)}
+    daily = {"A": Decimal(2720), "B": Decimal(10005)}
+    flags = vintage_flags(closes, daily)
+    assert [(f["code"], f["daily_adjusted"]) for f in flags] == [("A", "2720"), ("C", "None")]
+
+
+def test_frozen_prev_closes_are_built_once_and_reused(tmp_path: Path) -> None:
+    from replay_parity import frozen_prev_closes  # noqa: PLC0415
+
+    calls: list[str] = []
+
+    def fetch_bars(codes, day):  # noqa: ANN001, ANN202
+        calls.append("bars")
+        return [("A", dt.datetime(2026, 9, 14, 15, 30), 2900.0)]
+
+    def fetch_daily(codes, day):  # noqa: ANN001, ANN202
+        calls.append("daily")
+        return {"A": Decimal(2720)}
+
+    first = frozen_prev_closes(["A", "B"], DAY, tmp_path, fetch_bars, fetch_daily)
+    second = frozen_prev_closes(["A", "B"], DAY, tmp_path, fetch_bars, fetch_daily)
+    assert calls == ["bars", "daily"]
+    assert first == second
+    assert first.prices == {"A": Decimal(2900)} and first.missing == ["B"]
+    assert (tmp_path / "2026-09-15.json").exists()
+    assert [f["code"] for f in first.flags] == ["A"]
+
+
+def test_frozen_prev_closes_refuse_a_file_missing_event_codes(tmp_path: Path) -> None:
+    import pytest  # noqa: PLC0415
+    from replay_parity import frozen_prev_closes  # noqa: PLC0415
+
+    frozen_prev_closes(["A"], DAY, tmp_path, lambda _c, _d: [], lambda _c, _d: {})
+    with pytest.raises(ValueError, match="Z"):
+        frozen_prev_closes(["A", "Z"], DAY, tmp_path, lambda _c, _d: [], lambda _c, _d: {})
+
+
+def _fill(hms: str, price: int, limit: int, *, resting: bool, side: str = "buy") -> dict:
+    h, m, s = map(int, hms.split(":"))
+    return {
+        "ts": dt.datetime(2026, 9, 15, h, m, s, tzinfo=KST),
+        "ticker": "A",
+        "side": side,
+        "qty": 1,
+        "price": Decimal(price),
+        "order_id": "S1",
+        "limit": Decimal(limit),
+        "resting": resting,
+    }
+
+
+def _ohlc(hm: str, o: int, lo: int) -> MinuteBar:
+    h, m = map(int, hm.split(":"))
+    return MinuteBar(
+        ts=dt.datetime(2026, 9, 15, h, m),
+        open=Decimal(o),
+        high=Decimal(o),
+        low=Decimal(lo),
+        close=Decimal(o),
+        volume=1,
+    )
+
+
+def test_fill_rule_check_flags_buys_off_simbrokers_own_price_rule() -> None:
+    from replay_parity import fill_rule_divergences  # noqa: PLC0415
+
+    bars = {"A": [_ohlc("09:01", 1005, 1000), _ohlc("09:02", 1010, 980)]}
+    ok = [_fill("09:01:10", 1005, 1010, resting=False), _fill("09:03:00", 985, 985, resting=True)]
+    assert fill_rule_divergences(ok, bars) == []
+    bad = [_fill("09:01:10", 1010, 1010, resting=False), _fill("09:03:00", 980, 985, resting=True)]
+    rows = fill_rule_divergences(bad, bars)
+    assert [(r["kind"], r["cls"]) for r in rows] == [("fill_rule", "other")] * 2
+
+
+def _flat(price: int, n: int = 30) -> list[MinuteBar]:
+    out, t = [], dt.datetime(2026, 9, 15, 9, 0)
+    for _ in range(n):
+        p = Decimal(price)
+        out.append(MinuteBar(ts=t, open=p, high=p, low=p, close=p, volume=100))
+        t += dt.timedelta(minutes=1)
+    return out
+
+
+def _exit_ledgers(live_entry: str, sim_entry: str, live_exit: str, sim_exit: str, live_limit: str):  # noqa: ANN202
+    def led(entry: str, exit_ts: str, limit: str, oid: str) -> list[dict]:
+        return [
+            {
+                "event": "entry_submitted",
+                "ticker": "A",
+                "limit": entry,
+                "ts": "2026-09-15T09:01:00+09:00",
+            },
+            {
+                "event": "exit_submitted",
+                "ticker": "A",
+                "quantity": 1,
+                "attempt": 0,
+                "limit": limit,
+                "order_id": oid,
+                "ts": f"2026-09-15T{exit_ts}+09:00",
+            },
+        ]
+
+    return led(live_entry, live_exit, live_limit, "L1"), led(sim_entry, sim_exit, "10990", "S9")
+
+
+def test_exit_within_one_manage_tick_and_half_percent_is_no_divergence() -> None:
+    from replay_parity import exit_divergences  # noqa: PLC0415
+
+    live, sim = _exit_ledgers("10700", "10700", "09:29:40", "09:30:00", "10990")
+    fills = [{**_fill("09:30:00", 10990, 10990, resting=False, side="sell"), "order_id": "S9"}]
+    assert exit_divergences(live, sim, fills, {"A": _flat(11000)}, TradingLimits()) == []
+
+
+def test_exit_time_gap_is_intra_minute_only_if_entry_limits_flip_the_vwap_trigger() -> None:
+    from replay_parity import exit_divergences  # noqa: PLC0415
+
+    bars = {"A": [*_flat(11000, 29), _ohlc("09:29", 10880, 10880)]}
+    fills = [{**_fill("09:30:00", 10879, 10879, resting=False, side="sell"), "order_id": "S9"}]
+    # close 10880 is +2.06% over 10660 (hit) but +1.68% over 10700 (no hit)
+    live, sim = _exit_ledgers("10660", "10700", "09:30:00", "09:40:00", "10879")
+    rows = exit_divergences(live, sim, fills, bars, TradingLimits())
+    assert [(r["kind"], r["cls"]) for r in rows] == [("exit_time", "intra_minute_price")]
+    live, sim = _exit_ledgers("10700", "10700", "09:30:00", "09:40:00", "10879")
+    rows = exit_divergences(live, sim, fills, bars, TradingLimits())
+    assert [(r["kind"], r["cls"]) for r in rows] == [("exit_time", "other")]
+
+
+def test_sell_fill_over_half_percent_is_intra_minute_only_if_live_bid_is_off_the_open() -> None:
+    from replay_parity import exit_divergences  # noqa: PLC0415
+
+    fills = [{**_fill("09:30:00", 10990, 10990, resting=False, side="sell"), "order_id": "S9"}]
+    live, sim = _exit_ledgers("10700", "10700", "09:30:00", "09:30:00", "10900")
+    rows = exit_divergences(live, sim, fills, {"A": _flat(11000)}, TradingLimits())
+    assert [(r["kind"], r["cls"]) for r in rows] == [("sell_fill", "intra_minute_price")]
+    # live limit equals the sim bid, but the sim sold far above it: engine difference
+    far = [{**fills[0], "price": Decimal(11200)}]
+    live, sim = _exit_ledgers("10700", "10700", "09:30:00", "09:30:00", "10990")
+    rows = exit_divergences(live, sim, far, {"A": _flat(11000)}, TradingLimits())
+    assert [(r["kind"], r["cls"]) for r in rows] == [("sell_fill", "other")]
