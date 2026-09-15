@@ -6,6 +6,7 @@ No network, no DB -- everything below runs on pure helpers or fakes.
 from __future__ import annotations
 
 import ast
+import dataclasses
 import datetime as dt
 import json
 import subprocess
@@ -73,12 +74,20 @@ class TestSchedule:
 # --- dedupe -----------------------------------------------------------------
 
 
-def _write_dashboard(path: Path, news_ids: list[str]) -> None:
+def _write_dashboard(path: Path, news_ids: list[str], ticker: str = "005930") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a") as f:
         for nid in news_ids:
             aid = live_article_id(nid)
-            f.write(json.dumps({"key": f"{aid}|005930", "article_id": aid}) + "\n")
+            row = {
+                "key": f"{aid}|{ticker}",
+                "article_id": aid,
+                "ticker": ticker,
+                "category": "breaking",
+                "v2": {**dataclasses.asdict(_features()), "score": _features().score()},
+                "v4_shadow": None,
+            }
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
 class TestDedupe:
@@ -90,18 +99,27 @@ class TestDedupe:
         assert [i["id"] for i in new2] == ["c"]
         assert dash1 == dash2 == []
 
-    def test_dashboard_archive_keys_are_skipped_and_reloaded(self, tmp_path: Path) -> None:
+    def test_dashboard_articles_stay_in_the_pool_and_are_flagged(self, tmp_path: Path) -> None:
         dash_path = tmp_path / "news_judgments" / f"{DAY}.jsonl"
         _write_dashboard(dash_path, ["yna_1"])
         state = shadow.SweepState(shadow.DashboardKeys(dash_path))
         new, dash = state.new_items([{"id": "yna_1"}, {"id": "yna_2"}])
-        assert [i["id"] for i in new] == ["yna_2"]
+        # Overlap with the dashboard must not shrink the universe pool.
+        assert [i["id"] for i in new] == ["yna_1", "yna_2"]
         assert dash == ["yna_1"]
 
         # The live daemon keeps appending during the day.
         _write_dashboard(dash_path, ["yna_3"])
         new, dash = state.new_items([{"id": "yna_3"}])
-        assert new == [] and dash == ["yna_3"]
+        assert [i["id"] for i in new] == ["yna_3"] and dash == ["yna_3"]
+
+    def test_dashboard_rows_by_pair_key(self, tmp_path: Path) -> None:
+        dash_path = tmp_path / "news_judgments" / f"{DAY}.jsonl"
+        _write_dashboard(dash_path, ["yna_1"])
+        keys = shadow.DashboardKeys(dash_path)
+        aid = live_article_id("yna_1")
+        assert keys.row(f"{aid}|005930")["category"] == "breaking"
+        assert keys.row(f"{aid}|000660") is None
 
     def test_items_without_id_are_ignored(self, tmp_path: Path) -> None:
         state = shadow.SweepState(shadow.DashboardKeys(tmp_path / "x.jsonl"))
@@ -407,21 +425,107 @@ async def test_runner_judges_new_fresh_articles_once_and_logs_requests(
     assert not (tmp_path / "news_sweep_candidates").exists()
 
 
-async def test_runner_skips_articles_the_dashboard_already_judged(
+async def test_dashboard_article_copies_dashboard_pairs_and_judges_missing_ones(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The dashboard judged (yna_AKR1, 005930) only; detail says 000660 is related too.
+    _write_dashboard(tmp_path / "news_judgments" / f"{DAY}.jsonl", ["yna_AKR1"])
+    requests: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        if "/companies/" in request.url.path:
+            return httpx.Response(200, json={"result": {"body": [ITEM]}})
+        kr = {"id": "yna_AKR1", "companyCodes": ["005930", "000660"]}
+        return httpx.Response(200, json={"result": {"kr": kr}})
+
+    claude = FakeClaude()
+    runner = _runner(tmp_path, monkeypatch, handler, claude=claude, max_requests=2)
+    await runner.run()
+
+    assert requests == ["/api/v2/news/companies/005930", "/api/v2/news/yna_AKR1"]
+    assert claude.calls == [("000660", False)]  # 005930 not re-judged
+    assert claude.categories == [""]
+    rows = {r["ticker"]: r for r in _rows(tmp_path / "news_judgments_universe" / f"{DAY}.jsonl")}
+    log = _rows(tmp_path / "news_sweep" / f"{DAY}.jsonl")
+    page_ts = log[0]["ts"]
+    aid = live_article_id("yna_AKR1")
+
+    dash = rows["005930"]
+    assert dash["key"] == f"{aid}|005930"
+    assert dash["pool"] == "dashboard" and dash["sweep_seen_at"] == page_ts
+    assert dash["category"] == "breaking"  # dashboard row copied as is
+    dashboard_row = _rows(tmp_path / "news_judgments" / f"{DAY}.jsonl")[0]
+    assert {k: v for k, v in dash.items() if k not in ("pool", "sweep_seen_at")} == dashboard_row
+
+    uni = rows["000660"]
+    assert uni["pool"] == "universe" and uni["category"] == "" and uni["sweep_seen_at"] == page_ts
+    assert log[0]["dashboard_ids"] == ["yna_AKR1"] and log[0]["new_ids"] == ["yna_AKR1"]
+
+
+async def test_dashboard_copy_is_not_duplicated_on_revisit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _write_dashboard(tmp_path / "news_judgments" / f"{DAY}.jsonl", ["yna_AKR1"])
 
     def handler(request: httpx.Request) -> httpx.Response:
-        assert "/companies/" in request.url.path, "no detail call for a dashboard article"
+        if "/companies/" in request.url.path:
+            return httpx.Response(200, json={"result": {"body": [ITEM]}})
+        return httpx.Response(200, json={"result": {"kr": {"companyCodes": ["005930"]}}})
+
+    runner = _runner(tmp_path, monkeypatch, handler, max_requests=2)
+    await runner.run()
+    runner2 = _runner(tmp_path, monkeypatch, handler, max_requests=2)  # restart
+    await runner2.run()
+    assert len(_rows(tmp_path / "news_judgments_universe" / f"{DAY}.jsonl")) == 1
+
+
+async def test_no_detail_call_after_1520(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = [at(15, 19, 59)]
+    requests: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        clock[0] = at(15, 20)  # the page response lands at the cutoff
         return httpx.Response(200, json={"result": {"body": [ITEM]}})
 
-    claude = FakeClaude()
-    runner = _runner(tmp_path, monkeypatch, handler, claude=claude, max_requests=2)
+    runner = _runner(tmp_path, monkeypatch, handler)
+    runner.now = lambda: clock[0]
     await runner.run()
-    assert claude.calls == []
-    log = _rows(tmp_path / "news_sweep" / f"{DAY}.jsonl")
-    assert log[0]["dashboard_ids"] == ["yna_AKR1"] and log[0]["new_ids"] == []
+    assert len(requests) == 1 and "/companies/" in requests[0]  # new article, but no detail
+    assert runner.stop_reason == "15:20 KST"
+
+
+def test_judging_body_mirrors_live_mapping() -> None:
+    from daytrade_it.infrastructure.external.toss_news_client import map_toss_article_to_domain
+
+    long = "본문" * 400
+    cases = [
+        ({"summary": "요약", "contentText": long}, "요약"),
+        ({"summary": "", "contentText": long}, long[:500]),
+        ({"summary": None}, ITEM["title"]),
+    ]
+    for extra, expected in cases:
+        article = shadow.build_article({**ITEM, **extra}, None)
+        assert (article.summary or article.content) == expected
+
+        class Lib:  # krx_news_client NewsArticle stand-in with the same fields
+            id = "toss:x"
+            title = ITEM["title"]
+            content = extra.get("contentText") or ""
+            summary = extra.get("summary") or ""
+            tickers: list[str] = []
+            url = "https://tossinvest.com/news?x=1"
+            published_at = at(8, 0)
+
+            class source:  # noqa: N801
+                value = "toss"
+
+            class category:  # noqa: N801
+                value = "stock"
+
+        live = map_toss_article_to_domain(Lib)  # type: ignore[arg-type]
+        assert (live.summary or live.content) == expected
 
 
 async def test_runner_stops_after_three_consecutive_blocks(

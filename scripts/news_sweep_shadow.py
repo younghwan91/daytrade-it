@@ -10,6 +10,12 @@ earlier in the sweep and not already judged by the live dashboard daemon
 (same 1 req/s budget) gives the article's `companyCodes`. Articles published
 before the previous session close are skipped (the live stale rule).
 
+Articles the dashboard daemon already judged stay in the pool (backtest pool =
+sweep pool): they still get the detail call, pairs the dashboard archive has
+are copied with `"pool": "dashboard"` (not re-judged), and missing related
+pairs are judged with `"pool": "universe"`. Universe pairs are judged with
+category "" (per-company pages carry no dashboard category; A3 parity).
+
 Judging reuses the live path (`application/news/judging.judge_pair`: same
 prompt, same v2 score, same archive row); v4 shadow is off (spec). Rows go to
 `data/news_judgments_universe/{day}.jsonl` in the live archive format plus
@@ -19,6 +25,11 @@ measuring detection delay. Unless `--no-broker`, the live entry filter
 (`build_entry_candidate`, broker quotes/minute bars only) is evaluated from
 09:00:30 and written to `data/news_sweep_candidates/{day}.jsonl` -- nothing
 is persisted to gptquant and no trader is ever constructed.
+
+Logging: judging goes through `application/news/judging.py`, so its structlog
+events keep the live strings ("news_signal_poller: judged", "... scoring
+failed") under that module's logger name; this script's own events are
+"news_sweep_shadow: ...".
 
 SAFETY -- read before running:
   * Running this during market hours from the trader's IP competes with the
@@ -193,12 +204,13 @@ class BlockGuard:
 
 
 class DashboardKeys:
-    """Article ids the live dashboard daemon already judged today (re-read when the file grows)."""
+    """Rows the live dashboard daemon already judged today (re-read when the file grows)."""
 
     def __init__(self, path: Path) -> None:
         self._path = path
         self._size = -1
         self._ids: set[str] = set()
+        self._rows: dict[str, dict[str, Any]] = {}
 
     def _refresh(self) -> None:
         try:
@@ -207,14 +219,21 @@ class DashboardKeys:
             return
         if size == self._size:
             return
-        ids: set[str] = set()
+        rows: dict[str, dict[str, Any]] = {}
         with self._path.open() as f:
             for line in f:
                 try:
-                    ids.add(json.loads(line)["key"].split("|", 1)[0])
-                except (ValueError, KeyError):
+                    row = json.loads(line)
+                    rows.setdefault(row["key"], row)  # first judgment of a pair wins
+                except (ValueError, KeyError, TypeError):
                     continue  # a half-written last line
-        self._ids, self._size = ids, size
+        self._rows, self._size = rows, size
+        self._ids = {key.split("|", 1)[0] for key in rows}
+
+    def row(self, key: str) -> dict[str, Any] | None:
+        """The dashboard archive row for a pair key, if the dashboard judged that pair."""
+        self._refresh()
+        return self._rows.get(key)
 
     def __contains__(self, article_id: str) -> bool:
         self._refresh()
@@ -227,7 +246,11 @@ class SweepState:
     seen: set[str] = field(default_factory=set)
 
     def new_items(self, items: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[str]]:
-        """(items new to the sweep and not judged by the dashboard, dashboard-duplicate ids)."""
+        """(items new to the sweep, ids among them the dashboard already judged).
+
+        Dashboard articles stay in the returned items: overlap with the
+        dashboard must not shrink the universe pool (backtest pool = sweep pool).
+        """
         new: list[dict[str, Any]] = []
         dashboard_dups: list[str] = []
         for item in items:
@@ -235,10 +258,9 @@ class SweepState:
             if not news_id or news_id in self.seen:
                 continue
             self.seen.add(news_id)
+            new.append(item)
             if live_article_id(news_id) in self.dashboard:
                 dashboard_dups.append(news_id)
-            else:
-                new.append(item)
         return new, dashboard_dups
 
 
@@ -267,11 +289,14 @@ def build_article(item: dict, detail: dict[str, Any] | None) -> NewsArticle:
     for code in codes:
         with contextlib.suppress(ValueError):
             tickers.append(Ticker(value=str(code)))
-    summary = item.get("summary") or None
+    # Mirrors `toss_news_client.map_toss_article_to_domain`, so the judged body
+    # (`summary or content`) is summary, else content[:500], else title.
+    text = item.get("contentText") or ""
+    summary = item.get("summary") or (text[:500] if text else None)
     return NewsArticle(
         id=UUID(live_article_id(news_id)),
         title=item["title"],
-        content=item.get("contentText") or summary or item["title"],
+        content=text or summary or item["title"],
         summary=summary,
         source="toss",
         url=build_article_url(news_id),
@@ -292,16 +317,21 @@ class UniverseJudgmentLog(JudgmentLog):
     def set_context(self, article_id: UUID | str, sweep_seen_at: dt.datetime) -> None:
         self._seen_at[str(article_id)] = sweep_seen_at
 
-    def append(self, key: str, record: dict[str, Any]) -> None:
+    def append(self, key: str, record: dict[str, Any], pool: str = "universe") -> None:
         seen_at = self._seen_at.get(key.split("|", 1)[0])
         super().append(
             key,
             {
                 **record,
-                "pool": "universe",
+                "pool": pool,
                 "sweep_seen_at": seen_at.isoformat() if seen_at else None,
             },
         )
+
+    def append_dashboard_copy(self, dashboard_row: dict[str, Any]) -> None:
+        """The dashboard's row for a pair, unchanged, tagged `pool: "dashboard"` (no re-judging)."""
+        record = {k: v for k, v in dashboard_row.items() if k != "key"}
+        self.append(dashboard_row["key"], record, pool="dashboard")
 
 
 def append_jsonl(path: Path, row: dict[str, Any]) -> None:
@@ -355,6 +385,18 @@ def prior_day_trade_values(db_client: Any, day: dt.date) -> tuple[dt.date, dict[
     return rows[0][1], {r[0]: float(r[2] or 0) for r in rows}
 
 
+def _features_from_row(row: dict[str, Any]) -> Any:
+    """v2 features back from an archive row (for the shadow entry filter), or None."""
+    from daytrade_it.infrastructure.external.anthropic_client import ArticleFeatures
+
+    v2 = dict(row.get("v2") or {})
+    v2.pop("score", None)
+    try:
+        return ArticleFeatures(**v2)
+    except TypeError:
+        return None
+
+
 class ShadowRunner:
     def __init__(
         self,
@@ -398,6 +440,9 @@ class ShadowRunner:
     async def _request(self) -> bool:
         """Wait for the 1 req/s budget; False if the sweep must stop instead."""
         if self.stop.is_set():
+            return False
+        if self.now().time() >= self.schedule.stop:
+            self._halt("15:20 KST")
             return False
         if self.max_requests is not None and self.requests >= self.max_requests:
             self._halt(f"max_requests {self.max_requests} reached")
@@ -499,9 +544,18 @@ class ShadowRunner:
         known = tradable_tickers(article, self.stocks, self.stale_before, self.expires_at, now)
         self.judgments.set_context(article.id, queued.seen_at)
         for ticker, stock in known:
-            if self.judgments.seen(pair_key(article, ticker)):
+            key = pair_key(article, ticker)
+            if self.judgments.seen(key):
                 continue
-            features = await judge_pair(article, ticker, stock, self.claude, self.judgments, None)
+            dashboard_row = self.state.dashboard.row(key)
+            features: Any
+            if dashboard_row is not None:
+                self.judgments.append_dashboard_copy(dashboard_row)
+                features = _features_from_row(dashboard_row)
+            else:
+                features = await judge_pair(
+                    article, ticker, stock, self.claude, self.judgments, None
+                )
             if features is None or self.candidate_ctx is None:
                 continue
             if self.now().time() < CANDIDATES_FROM:
