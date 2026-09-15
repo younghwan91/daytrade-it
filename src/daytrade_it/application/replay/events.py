@@ -128,6 +128,8 @@ def median_detect_delay(rows: list[dict]) -> dt.timedelta:
         pub = dt.datetime.fromisoformat(r["published_at"])
         if pub.timetz().replace(tzinfo=None) >= FIRST_POLL:
             delays.append((dt.datetime.fromisoformat(r["judged_at"]) - pub).total_seconds())
+    if not delays:
+        raise ValueError("no post-open articles to measure detect delay")
     return dt.timedelta(seconds=statistics.median(delays))
 
 

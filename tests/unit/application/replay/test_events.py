@@ -3,6 +3,8 @@
 import datetime as dt
 from pathlib import Path
 
+import pytest
+
 from daytrade_it.application.replay.events import (
     dump_events,
     events_from_archive,
@@ -78,6 +80,15 @@ def test_median_detect_delay_ignores_premarket() -> None:
         _row(A, "3", "2026-09-15T11:00:00+09:00", "2026-09-15T11:30:00+09:00"),
     ]
     assert median_detect_delay(rows) == dt.timedelta(minutes=20)
+
+
+def test_median_detect_delay_raises_when_all_premarket() -> None:
+    rows = [
+        _row(A, "1", "2026-09-15T08:00:00+09:00", "2026-09-15T08:30:00+09:00"),
+        _row(A, "2", "2026-09-15T08:10:00+09:00", "2026-09-15T08:40:00+09:00"),
+    ]
+    with pytest.raises(ValueError, match="no post-open articles to measure detect delay"):
+        median_detect_delay(rows)
 
 
 def test_schedule_detected_snaps_to_poll_grid() -> None:
