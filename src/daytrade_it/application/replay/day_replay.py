@@ -110,13 +110,14 @@ def replay_day(
     ledger_dir = work_dir / "ledger"
     expires_at = dt.datetime.combine(day, SESSION_CLOSE, tzinfo=KST)
     saved = (entry_filter.MAX_PRE_ENTRY_MOVE, tools._DART_DB_PATH, tools._KILL_SWITCH_PATH)
-    entry_filter.MAX_PRE_ENTRY_MOVE = config.max_pre_entry_move
-    tools._DART_DB_PATH = snapshot_dart(dart_db, day, work_dir / "dart_snapshot.db")
-    tools._KILL_SWITCH_PATH = work_dir / "no_kill_switch"
+    snapshot = snapshot_dart(dart_db, day, work_dir / "dart_snapshot.db")
     if clock_holder is not None:
         clock_holder["now"] = lambda: dt.datetime.now(KST)
     timeline = _timeline(day, events, config)
     try:
+        entry_filter.MAX_PRE_ENTRY_MOVE = config.max_pre_entry_move
+        tools._DART_DB_PATH = snapshot
+        tools._KILL_SWITCH_PATH = work_dir / "no_kill_switch"
         with time_machine.travel(timeline[0][0], tick=False) as traveller, capture_logs() as logs:
             asyncio.run(
                 _run(
@@ -134,7 +135,11 @@ def replay_day(
     finally:
         entry_filter.MAX_PRE_ENTRY_MOVE, tools._DART_DB_PATH, tools._KILL_SWITCH_PATH = saved
     path = ledger_dir / f"{day.isoformat()}.jsonl"
-    ledger = [json.loads(line) for line in path.open()] if path.exists() else []
+    ledger = (
+        [json.loads(line) for line in path.read_text().splitlines() if line]
+        if path.exists()
+        else []
+    )
     skips = [
         {"ticker": r.get("ticker"), "reason": r.get("reason", "extended")}
         for r in logs
