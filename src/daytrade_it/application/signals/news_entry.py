@@ -42,7 +42,8 @@ class SelectionConfig:
     - `subjects` / `exclude_persistence` / `exclude_material`: v2 feature gates.
     - `min_pre_move` / `max_pre_move`: bounds on the move vs. the prior close;
       `max_pre_move=None` uses `entry_filter.MAX_PRE_ENTRY_MOVE` at call time.
-    - `sessions`: `premarket` if published before 09:00 KST, else `intraday`.
+    - `sessions`: `premarket` if published before 09:00 KST of the trading day
+      (including the previous evening), else `intraday`.
     - `rank_key`: `auto_trader.rank_batch` key (surprise | persistence | score).
     """
 
@@ -56,12 +57,24 @@ class SelectionConfig:
     rank_key: str = "surprise"
 
 
-def article_session(published_at: dt.datetime) -> str:
-    return "premarket" if published_at.astimezone(KST).time() < _REGULAR_OPEN else "intraday"
+def article_session(published_at: dt.datetime, expires_at: dt.datetime) -> str:
+    """`premarket` iff published before 09:00 KST on `expires_at`'s trading day.
+
+    The previous evening's articles (after the prior close) count as premarket.
+    A naive `published_at` is taken to be KST.
+    """
+    if published_at.tzinfo is None:
+        published_at = published_at.replace(tzinfo=KST)
+    open_at = dt.datetime.combine(expires_at.astimezone(KST).date(), _REGULAR_OPEN, tzinfo=KST)
+    return "premarket" if published_at < open_at else "intraday"
 
 
 def _selection_reject(
-    article: NewsArticle, features: ArticleFeatures, score: float, selection: SelectionConfig
+    article: NewsArticle,
+    features: ArticleFeatures,
+    score: float,
+    selection: SelectionConfig,
+    expires_at: dt.datetime,
 ) -> str | None:
     if score <= selection.min_score:
         return "score"
@@ -71,7 +84,7 @@ def _selection_reject(
         return "persistence"
     if features.material_type in selection.exclude_material:
         return "material_type"
-    if article_session(article.published_at) not in selection.sessions:
+    if article_session(article.published_at, expires_at) not in selection.sessions:
         return "session"
     return None
 
@@ -113,7 +126,7 @@ def build_entry_candidate(
     # Entries are BUY-only: KRX retail can't short.
     if sentiment.score <= 0:
         return None
-    reason = _selection_reject(article, features, sentiment.score, selection)
+    reason = _selection_reject(article, features, sentiment.score, selection, expires_at)
     if reason is not None:
         # Below the live threshold was always a silent skip; keep it silent.
         if sentiment.is_bullish:

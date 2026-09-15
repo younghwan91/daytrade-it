@@ -53,3 +53,34 @@ async def test_enter_batch_enters_by_surprise_and_survives_a_failure() -> None:
         trader, [(sig("000001"), 0, 0.9), (sig("000002"), 2, 0.3), (sig("000003"), 1, 0.4)]
     )  # type: ignore[arg-type]
     assert trader.entered == ["000002", "000003", "000001"]
+
+
+def test_malformed_policy_falls_back_to_defaults_with_entries_disabled(tmp_path: Path) -> None:
+    from news_signal_poller import load_policy_for_run
+    from structlog.testing import capture_logs
+
+    from daytrade_it.application.trading.policy import NewsPolicy
+
+    bad = tmp_path / "news_policy.json"
+    bad.write_text('{"limits": {"bogus": 1}}')
+    with capture_logs() as logs:
+        policy, entries_enabled = load_policy_for_run(bad)
+    assert policy == NewsPolicy()
+    assert entries_enabled is False
+    crit = [r for r in logs if r["log_level"] == "critical"]
+    assert crit and "bogus" in crit[0]["error"]
+
+    bad.write_text("{not json")
+    assert load_policy_for_run(bad) == (NewsPolicy(), False)
+
+
+def test_policy_for_run_missing_or_valid_file_enables_entries(tmp_path: Path) -> None:
+    from news_signal_poller import load_policy_for_run
+
+    from daytrade_it.application.trading.policy import NewsPolicy
+
+    assert load_policy_for_run(tmp_path / "absent.json") == (NewsPolicy(), True)
+    good = tmp_path / "p.json"
+    good.write_text('{"selection": {"min_score": 0.3}}')
+    policy, enabled = load_policy_for_run(good)
+    assert enabled and policy.selection.min_score == 0.3

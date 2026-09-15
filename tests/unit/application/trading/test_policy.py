@@ -85,3 +85,30 @@ def test_poller_policy_parts_default_when_file_absent(tmp_path: Path, monkeypatc
     assert limits == TradingLimits()
     assert selection == SelectionConfig()
     assert rank_key == "surprise"
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        '{"selection": {"min_score": NaN}}',
+        '{"selection": {"min_score": Infinity}}',
+        '{"selection": {"max_pre_move": "NaN"}}',
+        '{"limits": {"stop_loss_pct": "-Infinity"}}',
+        '{"limits": {"stop_loss_pct": NaN}}',
+        '{"limits": {"stop_time": Infinity}}',
+    ],
+)
+def test_non_finite_numbers_raise(tmp_path: Path, raw: str) -> None:
+    path = tmp_path / "p.json"
+    path.write_text(raw)
+    with pytest.raises(ValueError):
+        load_policy(path)
+
+
+def test_unknown_subject_raises(tmp_path: Path) -> None:
+    path = tmp_path / "p.json"
+    path.write_text(json.dumps({"selection": {"subjects": ["main", "headline"]}}))
+    with pytest.raises(ValueError):
+        load_policy(path)
+    path.write_text(json.dumps({"selection": {"subjects": ["mention"]}}))
+    assert load_policy(path).selection.subjects == ("mention",)

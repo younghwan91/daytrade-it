@@ -14,6 +14,7 @@ from __future__ import annotations
 import dataclasses
 import datetime as dt
 import json
+import math
 import types
 import typing
 from dataclasses import dataclass, field
@@ -23,6 +24,7 @@ from typing import Any
 
 from daytrade_it.application.signals.news_entry import SESSIONS, SelectionConfig
 from daytrade_it.application.trading.auto_trader import RANK_KEYS, TradingLimits
+from daytrade_it.infrastructure.external.anthropic_client import SUBJECT_LEVELS
 
 
 @dataclass(frozen=True)
@@ -57,10 +59,15 @@ def _decode(tp: Any, value: Any, name: str) -> Any:
         if tp is Decimal:
             if isinstance(value, bool) or not isinstance(value, str | int | float):
                 raise TypeError
-            return Decimal(str(value))
+            number = Decimal(str(value))
+            if not number.is_finite():
+                raise ValueError
+            return number
         if tp is dt.timedelta:
             if isinstance(value, bool) or not isinstance(value, int | float):
                 raise TypeError
+            if not math.isfinite(value):
+                raise ValueError
             return dt.timedelta(seconds=value)
         if tp is dt.time:
             return dt.time.fromisoformat(value)
@@ -75,6 +82,8 @@ def _decode(tp: Any, value: Any, name: str) -> Any:
         if tp is float:
             if isinstance(value, bool) or not isinstance(value, int | float):
                 raise TypeError
+            if not math.isfinite(value):
+                raise ValueError
             return float(value)
         if tp is str:
             if not isinstance(value, str):
@@ -84,7 +93,7 @@ def _decode(tp: Any, value: Any, name: str) -> Any:
             if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
                 raise TypeError
             return tuple(value)
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, ArithmeticError) as exc:
         raise ValueError(f"{name}: invalid value {value!r}") from exc
     raise ValueError(f"{name}: unsupported field type {tp!r}")
 
@@ -107,6 +116,9 @@ def _validate(policy: NewsPolicy) -> None:
     bad = set(sel.sessions) - set(SESSIONS)
     if bad:
         raise ValueError(f"selection.sessions: unknown {sorted(bad)}")
+    bad = set(sel.subjects) - set(SUBJECT_LEVELS)
+    if bad:
+        raise ValueError(f"selection.subjects: unknown {sorted(bad)}")
 
 
 def load_policy(path: Path) -> NewsPolicy:

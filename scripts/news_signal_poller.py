@@ -128,6 +128,24 @@ class JudgmentLog:
         self._keys.add(key)
 
 
+def load_policy_for_run(path: Path) -> tuple[NewsPolicy, bool]:
+    """(policy, entries_enabled). A malformed file must not stop exit management.
+
+    A mid-day restart after a bad edit still has to manage positions opened
+    earlier, so a load error falls back to the default policy (default
+    `TradingLimits` for exits) with new signals and entries off for the day.
+    """
+    try:
+        return load_policy(path), True
+    except Exception as exc:
+        logger.critical(
+            "news_signal_poller: policy file invalid -- default limits, NO new entries today",
+            path=str(path),
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        return NewsPolicy(), False
+
+
 def _policy_parts(policy: NewsPolicy) -> tuple[TradingLimits, SelectionConfig, str]:
     """What `run()` hands on: AutoTrader limits, entry selection, batch rank key."""
     return policy.limits, policy.selection, policy.selection.rank_key
@@ -331,12 +349,13 @@ async def run(
     exits_until: dt.time = EXITS_UNTIL,
 ) -> None:
     policy_exists = POLICY_PATH.exists()
-    policy = load_policy(POLICY_PATH)
+    policy, entries_enabled = load_policy_for_run(POLICY_PATH)
     limits, selection, rank_key = _policy_parts(policy)
     logger.info(
         "news_signal_poller: policy loaded",
         path=str(POLICY_PATH),
         file_exists=policy_exists,
+        entries_enabled=entries_enabled,
         policy=policy_to_dict(policy),
     )
     db = DatabaseManager(database_url=os.environ["GPTQ_DATABASE_URL"])
@@ -416,7 +435,10 @@ async def run(
                     except Exception:
                         logger.exception("news_signal_poller: trader.manage failed")
 
-                if kill_switch_active():
+                if not entries_enabled:
+                    # Invalid policy file: behaves like the kill switch (logged at startup).
+                    pass
+                elif kill_switch_active():
                     if not kill_logged:
                         logger.warning(
                             "news_signal_poller: kill switch active -- no new signals or "

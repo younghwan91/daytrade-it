@@ -241,3 +241,22 @@ def test_rank_batch_keys() -> None:
         "000003",
         "000002",
     ]
+
+
+def test_article_session_uses_the_trading_day_not_time_of_day() -> None:
+    from daytrade_it.application.signals.news_entry import article_session
+
+    prior_evening = dt.datetime(2026, 9, 14, 18, 0, tzinfo=KST)
+    assert article_session(prior_evening, EXPIRES) == "premarket"
+    assert article_session(dt.datetime(2026, 9, 15, 8, 59, tzinfo=KST), EXPIRES) == "premarket"
+    assert article_session(dt.datetime(2026, 9, 15, 9, 0, tzinfo=KST), EXPIRES) == "intraday"
+    # UTC-aware and naive (treated as KST) inputs
+    assert article_session(dt.datetime(2026, 9, 14, 23, 59, tzinfo=dt.UTC), EXPIRES) == "premarket"
+    assert article_session(dt.datetime(2026, 9, 15, 0, 0, tzinfo=dt.UTC), EXPIRES) == "intraday"
+    assert article_session(dt.datetime(2026, 9, 15, 8, 59), EXPIRES) == "premarket"
+
+
+def test_selection_prior_evening_article_is_premarket() -> None:
+    evening = dt.datetime(2026, 9, 14, 18, 0, tzinfo=KST)
+    assert _build(BULL, "10000", SelectionConfig(sessions=("intraday",)), published=evening) is None
+    assert _build(BULL, "10000", SelectionConfig(sessions=("premarket",)), published=evening)
