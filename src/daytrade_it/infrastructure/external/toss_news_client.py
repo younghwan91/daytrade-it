@@ -32,8 +32,9 @@ from typing import TYPE_CHECKING
 from uuid import UUID, uuid5
 
 import httpx
+from krx_news_client import Deduplicator, TossScraper
 from krx_news_client import NewsArticle as KrxNewsArticle
-from krx_news_client import TossScraper
+from krx_news_client.scrapers.toss import NEWS_DETAIL_URL, extract_body_text, news_id_from_url
 
 from daytrade_it.domain.entities.news import NewsArticle
 from daytrade_it.domain.value_objects import Ticker
@@ -55,6 +56,15 @@ TOSS_NEWS_NAMESPACE = UUID("b6a0f6a0-8e3b-4b1a-9b8a-6a2f2f2b9a1a")
 #: Fallback used when both the library's content and summary are empty, so
 #: the domain NewsArticle's ``content`` (min_length=1) is never violated.
 _EMPTY_CONTENT_FALLBACK = "(no content provided by Toss)"
+
+
+def _new_seen_cache() -> Deduplicator[KrxNewsArticle]:
+    """Dedup cache keyed by the library's stable ``NewsArticle.id``.
+
+    The key is pinned explicitly (not the library default) so the dedup key
+    and the uuid5 domain id stay derived from the same value.
+    """
+    return Deduplicator(key=lambda a: a.id)
 
 
 def map_toss_article_to_domain(article: KrxNewsArticle) -> NewsArticle:
@@ -123,7 +133,7 @@ class TossNewsClient:
             poll_interval if poll_interval is not None else settings.toss_poll_interval_seconds
         )
         self._scraper = scraper or TossScraper()
-        self._seen_ids: set[str] = set()
+        self._seen = _new_seen_cache()
 
         logger.info("TossNewsClient initialized", poll_interval=self.poll_interval)
 
@@ -139,12 +149,12 @@ class TossNewsClient:
 
     def clear_seen_ids(self) -> None:
         """Clear the dedup cache. Useful for tests or a deliberate resync."""
-        self._seen_ids.clear()
+        self._seen = _new_seen_cache()
 
     @property
     def seen_count(self) -> int:
         """Number of distinct article ids seen so far this session."""
-        return len(self._seen_ids)
+        return len(self._seen)
 
     async def poll_once(self) -> list[NewsArticle]:
         """Fetch the current Toss dashboard snapshot and return only new articles.
@@ -166,15 +176,13 @@ class TossNewsClient:
                 error_code=error_codes.TOSS_NEWS_API_ERROR,
             ) from exc
 
-        new_articles = [a for a in raw_articles if a.id not in self._seen_ids]
-        for a in new_articles:
-            self._seen_ids.add(a.id)
+        new_articles = self._seen.filter_new(raw_articles)
 
         logger.info(
             "Toss news poll complete",
             fetched=len(raw_articles),
             new=len(new_articles),
-            seen_total=len(self._seen_ids),
+            seen_total=len(self._seen),
         )
 
         return [map_toss_article_to_domain(a) for a in new_articles]
@@ -203,35 +211,32 @@ class TossNewsClient:
 
 # --- Article detail (full body) ---------------------------------------------
 
-#: Toss's article-modal endpoint. Unlike the dashboard feed (~300-char
-#: summaries), it returns the full body as typed blocks plus the
-#: publisher's original URL, Toss's own sentiment label, and all related
-#: stock codes -- the same shape for every publisher. Found 2026-09-13; `v1`
-#: returns the same article unnested, `v2` nests it under a language key.
-TOSS_NEWS_DETAIL_URL = "https://wts-info-api.tossinvest.com/api/v2/news/{news_id}"
+#: Toss's article-modal endpoint (owned by ``krx_news_client`` since 0.4.0).
+#: Unlike the dashboard feed (~300-char summaries), it returns the full body
+#: as typed blocks plus the publisher's original URL, Toss's own sentiment
+#: label, and all related stock codes -- the same shape for every publisher.
+TOSS_NEWS_DETAIL_URL = NEWS_DETAIL_URL
 
-_BODY_BLOCK_TYPES = ("summary", "sub_headline", "text")
-
-
-def news_id_from_article_url(url: str) -> str | None:
-    """Toss newsId (e.g. "yna_AKR20260913056700017") from an article URL."""
-    import json  # noqa: PLC0415
-    import urllib.parse  # noqa: PLC0415
-
-    try:
-        params = urllib.parse.parse_qs(urllib.parse.urlparse(str(url)).query)
-        return str(json.loads(params["contentParams"][0])["id"])
-    except (KeyError, IndexError, ValueError, TypeError):
-        return None
+#: Toss newsId (e.g. "yna_AKR20260913056700017") from an article URL, or None.
+news_id_from_article_url = news_id_from_url
 
 
 async def fetch_article_detail(client: httpx.AsyncClient, url: str) -> dict | None:
-    """Full Toss article detail for an article URL, or None if unavailable."""
-    news_id = news_id_from_article_url(url)
+    """Raw Toss article detail payload for an article URL, or None if unavailable.
+
+    Deliberately returns the *raw* ``result.kr`` dict (plus ``news_id``) rather
+    than ``TossScraper.fetch_article_detail``'s parsed ``NewsArticle``: the
+    live poller archives this payload under ``data/toss_detail/`` in the same
+    shape as the eval cache (typed body blocks included), which the parsed
+    model does not preserve. It also keeps the live path free of the
+    scraper's request throttle and retry sleeps. URL/id parsing and the
+    endpoint come from the library.
+    """
+    news_id = news_id_from_url(url)
     if news_id is None:
         return None
     try:
-        resp = await client.get(TOSS_NEWS_DETAIL_URL.format(news_id=news_id))
+        resp = await client.get(NEWS_DETAIL_URL.format(news_id=news_id))
     except httpx.HTTPError as exc:
         logger.warning("Toss news detail request failed", news_id=news_id, error=str(exc))
         return None
@@ -243,12 +248,4 @@ async def fetch_article_detail(client: httpx.AsyncClient, url: str) -> dict | No
 
 def extract_full_body(detail: dict, max_chars: int = 3000) -> str:
     """Article text from a detail payload: body blocks only, HTML tags stripped."""
-    import re  # noqa: PLC0415
-
-    parts = [
-        (block.get("content") or "").strip()
-        for block in detail.get("content") or []
-        if block.get("type") in _BODY_BLOCK_TYPES
-    ]
-    text = re.sub(r"<[^>]+>", "", "\n".join(p for p in parts if p))
-    return text[:max_chars]
+    return extract_body_text(detail.get("content"))[:max_chars]

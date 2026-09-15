@@ -8,35 +8,66 @@ the publisher's original URL -- uniformly across all ~25 publishers, so no
 per-publisher HTML scraping is needed.
 
 Reads newsIds from kr_quant.news_articles.url, writes one JSON per article
-to data/eval/toss_detail/. Sequential with a delay; existing files are
-skipped, so it resumes.
+to data/eval/toss_detail/ via krx_news_client's TossScraper (headers,
+retries). Sequential with a delay; existing files are skipped, so it resumes.
 
 Usage: uv run python scripts/eval/fetch_toss_details.py
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
-import time
-import urllib.parse
 from pathlib import Path
 
 import httpx
 import psycopg2
+from krx_news_client import TossScraper
+from krx_news_client.scrapers.toss import NEWS_DETAIL_URL, news_id_from_url
 
 EVAL_SET = Path("data/eval/news_eval_set.jsonl")
 OUT_DIR = Path("data/eval/toss_detail")
-DETAIL_URL = "https://wts-info-api.tossinvest.com/api/v2/news/{news_id}"
 DELAY_SECONDS = 0.8
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124 Safari/537.36"
-}
 
 
-def news_id_from_url(url: str) -> str:
-    params = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
-    return json.loads(params["contentParams"][0])["id"]
+async def fetch_all(urls: dict[str, str], article_ids: list[str]) -> None:
+    # The raw payload is cached (not TossScraper.fetch_article_detail's parsed
+    # NewsArticle): eval_news_prompts.full_body reads the typed body blocks.
+    # Going through the scraper still gives its headers, pacing and 429/5xx
+    # retries.
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    ok = missing = failed = 0
+    async with TossScraper() as scraper:
+        scraper.min_delay = scraper.max_delay = DELAY_SECONDS
+        for article_id in article_ids:
+            news_id = news_id_from_url(urls[article_id])
+            path = OUT_DIR / f"{article_id.replace(':', '_')}.json"
+            if path.exists():
+                ok += 1
+                continue
+            if news_id is None:
+                failed += 1
+                print(f"no newsId in url for {article_id}")
+                continue
+            try:
+                resp = await scraper.fetch(NEWS_DETAIL_URL.format(news_id=news_id))
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 404:
+                    missing += 1
+                else:
+                    failed += 1
+                    print(f"HTTP {exc.response.status_code} for {news_id}")
+                continue
+            result = resp.json().get("result") or {}
+            payload = result.get("kr")  # v2 nests the article per language
+            if not payload:
+                missing += 1
+                print(f"empty result for {news_id}: {resp.text[:120]}")
+            else:
+                path.write_text(json.dumps({"news_id": news_id, **payload}, ensure_ascii=False))
+                ok += 1
+    print(f"articles={len(article_ids)} cached={ok} not_found={missing} failed={failed}")
 
 
 def main() -> None:
@@ -54,32 +85,7 @@ def main() -> None:
         cur.execute("SELECT id, url FROM news_articles WHERE id = ANY(%s)", (article_ids,))
         urls = dict(cur.fetchall())
 
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
-    ok = missing = failed = 0
-    with httpx.Client(headers=HEADERS, timeout=15) as client:
-        for article_id in article_ids:
-            news_id = news_id_from_url(urls[article_id])
-            path = OUT_DIR / f"{article_id.replace(':', '_')}.json"
-            if path.exists():
-                ok += 1
-                continue
-            resp = client.get(DETAIL_URL.format(news_id=news_id))
-            if resp.status_code == 404:
-                missing += 1
-            elif resp.is_success:
-                result = resp.json().get("result") or {}
-                payload = result.get("kr")  # v2 nests the article per language
-                if not payload:
-                    missing += 1
-                    print(f"empty result for {news_id}: {resp.text[:120]}")
-                else:
-                    path.write_text(json.dumps({"news_id": news_id, **payload}, ensure_ascii=False))
-                    ok += 1
-            else:
-                failed += 1
-                print(f"HTTP {resp.status_code} for {news_id}")
-            time.sleep(DELAY_SECONDS)
-    print(f"articles={len(article_ids)} cached={ok} not_found={missing} failed={failed}")
+    asyncio.run(fetch_all(urls, article_ids))
 
 
 if __name__ == "__main__":

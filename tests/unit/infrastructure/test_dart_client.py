@@ -129,6 +129,26 @@ class TestDartClientDedup:
         assert len(first_result) == 2
         assert len(second_result) == 1
 
+    async def test_same_id_twice_in_one_batch_is_emitted_once(self) -> None:
+        d = make_krx_disclosure(rcept_no="7")
+        scraper = FakeDartScraper(responses=[[d, make_krx_disclosure(rcept_no="8"), d]])
+        client = DartClient(api_key="k", scraper=scraper)
+
+        result = await client.poll_once()
+
+        assert len(result) == 2
+        assert client.seen_count == 2
+
+    async def test_clear_seen_ids_allows_re_emission(self) -> None:
+        batch = [make_krx_disclosure(rcept_no="1")]
+        scraper = FakeDartScraper(responses=[batch, batch])
+        client = DartClient(api_key="k", scraper=scraper)
+
+        await client.poll_once()
+        client.clear_seen_ids()
+
+        assert len(await client.poll_once()) == 1
+
 
 # =============================================================================
 # Failure propagation
