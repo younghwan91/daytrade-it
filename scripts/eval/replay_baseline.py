@@ -41,7 +41,14 @@ def trade_pnl(fills: list[dict]) -> list[dict]:
 
 
 def main() -> None:
-    from replay_parity import DART, EVENTS, WORK, load_session_bars, prev_closes  # noqa: PLC0415
+    from replay_parity import (  # noqa: PLC0415
+        DART,
+        EVENTS,
+        WORK,
+        _export_quant_airflow_env,
+        load_session_bars,
+        prev_closes,
+    )
 
     from daytrade_it.application.replay.day_replay import DayConfig, replay_day  # noqa: PLC0415
     from daytrade_it.application.replay.events import load_events  # noqa: PLC0415
@@ -59,6 +66,7 @@ def main() -> None:
     args = ap.parse_args()
 
     require_backtest_host()
+    _export_quant_airflow_env()
     db = QuantAirflowDBClient()
     stocks = db.get_stock_master()
     cfg = DayConfig(limits=TradingLimits(), max_pre_entry_move=Decimal("0.03"))
