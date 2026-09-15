@@ -145,3 +145,15 @@ def test_progress_line_reports_counts_and_eta():
     assert "codes 50/150" in line and "articles 1234" in line
     assert "requests 80" in line and "errors 2" in line
     assert "eta 0h03m" in line  # 100 codes left at 2 s/code = 200 s
+
+
+# --- non-200 page outcome ------------------------------------------------------------------
+
+
+def test_page_error_outcome():
+    # Toss serves at most 100 pages x 100 (verified 2026-09-16: 000660 page 101 -> HTTP 400),
+    # so a 400 past page 1 is the end of the window, not a failure to retry forever.
+    assert bf.page_error_outcome(400, page_number=101) == "page_cap"
+    assert bf.page_error_outcome(400, page_number=1) == "failed"
+    assert bf.page_error_outcome(404, page_number=1) == "done"
+    assert bf.page_error_outcome(418, page_number=3) == "failed"

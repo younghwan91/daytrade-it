@@ -6,7 +6,8 @@
 `GET wts-info-api.tossinvest.com/api/v2/news/companies/{6자리}?number=1..&size=100`, 대략 최신순,
 `result.body[]`에 id(newsId)·title·summary·createdAt(KST, tz 없음)·stockCodes(항상 null)·
 newsType·ticsTitles·source. 정렬이 느슨하고(2026-09-16 확인: 005930 한 페이지에 역전 45회)
-`lastPage` 도 믿을 수 없다(005930 1페이지가 lastPage=true 인데 2페이지에 100건). 그래서 페이지에
+최대 100페이지(1만 건)까지만 준다(101페이지는 HTTP 400 → `page_cap` 으로 끝냄; 000660 급 대형주는
+6개월을 다 못 채운다). `lastPage` 도 믿을 수 없다(005930 1페이지가 lastPage=true 인데 2페이지에 100건). 그래서 페이지에
 `--since` 이후 기사가 하나도 없거나 빈 페이지일 때만 멈춘다. 관련 종목은 같은 newsId 가 어느 종목 목록에 나오는지로 복원한다
 (`news_universe_pairs.py`).
 
@@ -112,6 +113,15 @@ def page_rows(
     return rows, more
 
 
+def page_error_outcome(status_code: int, page_number: int) -> str:
+    """Outcome of a non-200 page: 404 = no list; 400 past page 1 = Toss's 100-page cap."""
+    if status_code == 404:
+        return "done"
+    if status_code == 400 and page_number > 1:
+        return "page_cap"
+    return "failed"
+
+
 def progress_line(
     done: int,
     total: int,
@@ -204,7 +214,7 @@ class Collector:
         return None
 
     def fetch_code(self, code: str) -> tuple[str, int]:
-        """Fetch one code to completion. Returns (status, rows). status in done|max_pages|failed."""
+        """Fetch one code to completion. Returns (status, rows). status in done|page_cap|max_pages|failed."""
         partial = self.out_dir / f"{code}.partial.jsonl"
         state_path = self.out_dir / f"{code}.state.json"
         page = json.loads(state_path.read_text())["page"] if state_path.exists() else 0
@@ -213,13 +223,13 @@ class Collector:
             r = self.get(URL.format(code=code), {"number": page + 1, "size": 100})
             if r is None:
                 return "failed", 0
-            if r.status_code == 404:
-                status = "done"
-                break
             if r.status_code != 200:
-                self.errors += 1
-                log.warning("%s page %d: HTTP %d, skipping code", code, page + 1, r.status_code)
-                return "failed", 0
+                status = page_error_outcome(r.status_code, page + 1)
+                if status == "failed":
+                    self.errors += 1
+                    log.warning("%s page %d: HTTP %d, skipping code", code, page + 1, r.status_code)
+                    return "failed", 0
+                break
             result = (r.json() or {}).get("result") or {}
             rows, more = page_rows(result.get("body") or [], self.since, code)
             with partial.open("a") as f:
