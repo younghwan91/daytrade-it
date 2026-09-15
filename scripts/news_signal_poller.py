@@ -49,8 +49,13 @@ import httpx
 from kiwoom_client import KiwoomAPI
 from sqlalchemy import select
 
-from daytrade_it.application.signals.news_entry import build_entry_candidate, tradable_tickers
-from daytrade_it.application.trading.auto_trader import AutoTrader, rank_batch
+from daytrade_it.application.signals.news_entry import (
+    SelectionConfig,
+    build_entry_candidate,
+    tradable_tickers,
+)
+from daytrade_it.application.trading.auto_trader import AutoTrader, TradingLimits, rank_batch
+from daytrade_it.application.trading.policy import NewsPolicy, load_policy, policy_to_dict
 from daytrade_it.domain.entities.news import NewsArticle
 from daytrade_it.domain.services.signal_generator import SignalConfig, SignalGenerator
 from daytrade_it.domain.value_objects import Ticker
@@ -87,6 +92,8 @@ MANAGE_TICK_SECONDS = 30
 LEDGER_DIR = Path("data/auto_trader")
 JUDGMENT_DIR = Path("data/news_judgments")
 DETAIL_ARCHIVE_DIR = Path("data/toss_detail")
+#: Limits + selection shared with replay; absent = built-in defaults (live rules).
+POLICY_PATH = Path("config/news_policy.json")
 DETAIL_HTTP_HEADERS = {
     "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124 Safari/537.36"
 }
@@ -121,6 +128,11 @@ class JudgmentLog:
         self._keys.add(key)
 
 
+def _policy_parts(policy: NewsPolicy) -> tuple[TradingLimits, SelectionConfig, str]:
+    """What `run()` hands on: AutoTrader limits, entry selection, batch rank key."""
+    return policy.limits, policy.selection, policy.selection.rank_key
+
+
 def session_close_kst(day: dt.date) -> dt.datetime:
     return dt.datetime.combine(day, SESSION_CLOSE, tzinfo=KST)
 
@@ -139,6 +151,7 @@ async def process_pair(
     judgments: JudgmentLog,
     full_body_text: str | None,
     pending: list | None = None,
+    selection: SelectionConfig = SelectionConfig(),
 ) -> None:
     """Judge one (article, company) pair; persist a BUY signal if one emerges.
 
@@ -226,7 +239,7 @@ async def process_pair(
     )
     try:
         candidate = build_entry_candidate(
-            article, ticker, features, broker, db_client, gen, expires_at
+            article, ticker, features, broker, db_client, gen, expires_at, selection=selection
         )
     except Exception:
         logger.exception("news_signal_poller: entry filter failed", ticker=ticker.value)
@@ -265,11 +278,11 @@ async def process_pair(
             logger.exception("news_signal_poller: trader.enter failed", ticker=ticker.value)
 
 
-async def enter_batch(trader: AutoTrader, pending: list) -> None:
+async def enter_batch(trader: AutoTrader, pending: list, rank_key: str = "surprise") -> None:
     """Enter one poll's signals in `rank_batch` order; one failure never stops the rest."""
-    ranked = rank_batch(pending)
+    ranked = rank_batch(pending, key=rank_key)
     logger.info(
-        "news_signal_poller: entering batch by surprise", order=[s.ticker.value for s in ranked]
+        f"news_signal_poller: entering batch by {rank_key}", order=[s.ticker.value for s in ranked]
     )
     for signal in ranked:
         try:
@@ -317,6 +330,15 @@ async def run(
     confirm_real: bool,
     exits_until: dt.time = EXITS_UNTIL,
 ) -> None:
+    policy_exists = POLICY_PATH.exists()
+    policy = load_policy(POLICY_PATH)
+    limits, selection, rank_key = _policy_parts(policy)
+    logger.info(
+        "news_signal_poller: policy loaded",
+        path=str(POLICY_PATH),
+        file_exists=policy_exists,
+        policy=policy_to_dict(policy),
+    )
     db = DatabaseManager(database_url=os.environ["GPTQ_DATABASE_URL"])
     api = KiwoomAPI(
         app_key=os.environ["KIWOOM_APP_KEY"],
@@ -359,7 +381,7 @@ async def run(
 
     trader: AutoTrader | None = None
     if execute:
-        trader = AutoTrader(broker, LEDGER_DIR, live=confirm_real)
+        trader = AutoTrader(broker, LEDGER_DIR, live=confirm_real, limits=limits)
         logger.warning(
             "news_signal_poller: auto-trading enabled",
             live=confirm_real,
@@ -427,9 +449,10 @@ async def run(
                             judgments=judgments,
                             http=http,
                             pending=pending,
+                            selection=selection,
                         )
                     if trader is not None and pending:
-                        await enter_batch(trader, pending)
+                        await enter_batch(trader, pending, rank_key)
 
                 if once:
                     break

@@ -173,13 +173,35 @@ class _DayState:
     deferred: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
-def rank_batch(items: list[tuple[TradingSignal, int, float]]) -> list[TradingSignal]:
-    """Entry order for one poll's signals: v2 `surprise` desc, then news score desc.
+RANK_KEYS: tuple[str, ...] = ("surprise", "persistence", "score")
+_PERSISTENCE_RANK = {"one_off": 0, "multi_quarter": 1, "structural": 2}
 
-    At the open one poll yields more BUYs than there are slots; ranking by
-    surprise beat random picks out-of-fold (+1.92 vs +1.37%p per trade).
+
+def rank_batch(
+    items: list[tuple[TradingSignal, int, float]], key: str = "surprise"
+) -> list[TradingSignal]:
+    """Entry order for one poll's signals (sorted stably, best first).
+
+    - `surprise` (default): v2 `surprise` desc, then news score desc. At the
+      open one poll yields more BUYs than there are slots; ranking by
+      surprise beat random picks out-of-fold (+1.92 vs +1.37%p per trade).
+    - `score`: news score desc, then surprise desc.
+    - `persistence`: `signal.metadata["persistence"]` desc (structural >
+      multi_quarter > one_off; missing ranks last), then surprise, then score.
     """
-    return [s for s, _, _ in sorted(items, key=lambda x: (-x[1], -x[2]))]
+    if key == "surprise":
+        sort_key = lambda x: (-x[1], -x[2])  # noqa: E731
+    elif key == "score":
+        sort_key = lambda x: (-x[2], -x[1])  # noqa: E731
+    elif key == "persistence":
+        sort_key = lambda x: (  # noqa: E731
+            -_PERSISTENCE_RANK.get(x[0].metadata.get("persistence"), -1),
+            -x[1],
+            -x[2],
+        )
+    else:
+        raise ValueError(f"unknown rank key {key!r}; expected one of {RANK_KEYS}")
+    return [s for s, _, _ in sorted(items, key=sort_key)]
 
 
 def vwap_exit_hit(

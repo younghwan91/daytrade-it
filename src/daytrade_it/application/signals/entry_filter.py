@@ -51,8 +51,13 @@ def generate_no_chase_confirmation(
     broker: BrokerInterface,
     db_client: QuantAirflowDBClient,
     expires_at: dt.datetime,
+    max_move: Decimal | None = None,
 ) -> TradingSignal | None:
-    """TECHNICAL BUY if the price is not already up > MAX_PRE_ENTRY_MOVE, else None."""
+    """TECHNICAL BUY if the price is not already up > the cap, else None.
+
+    `max_move=None` uses the module's `MAX_PRE_ENTRY_MOVE`, read at call time.
+    """
+    cap = MAX_PRE_ENTRY_MOVE if max_move is None else max_move
     quote = broker.get_quote(ticker.value)
     current_price = quote.last_price or quote.mid_price
     if not current_price or current_price <= 0:
@@ -69,7 +74,7 @@ def generate_no_chase_confirmation(
 
     prev_close = Decimal(str(bars[-1].close))
     move = (current_price - prev_close) / prev_close
-    if move > MAX_PRE_ENTRY_MOVE:
+    if move > cap:
         logger.info(
             "entry_filter: extended, no entry", ticker=ticker.value, pre_entry_move=str(move)
         )
@@ -87,6 +92,6 @@ def generate_no_chase_confirmation(
             "prev_close_date": str(bars[-1].date),
             "current_price": str(current_price),
             "pre_entry_move": str(move),
-            "max_pre_entry_move": str(MAX_PRE_ENTRY_MOVE),
+            "max_pre_entry_move": str(cap),
         },
     )
