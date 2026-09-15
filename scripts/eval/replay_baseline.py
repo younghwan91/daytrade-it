@@ -4,7 +4,7 @@ uv run python scripts/eval/replay_baseline.py --dart data/eval/dart_trader_20260
 
 Net per ticker = sells x (1 - sell cost) - buys x (1 + buy cost). Shares still
 held when the replay ends (leftovers) are valued at the day's last regular
-session close (bar <= 15:30) as if sold there, with the sell cost; a ticker
+session close (bar <= 15:32) as if sold there, with the sell cost; a ticker
 whose bought quantity != sold + leftover raises.
 """
 
@@ -18,7 +18,8 @@ import sys
 from decimal import Decimal
 from pathlib import Path
 
-REGULAR_LAST_BAR = dt.time(15, 30)
+#: Closing auction prints at 15:30, or 15:32 when extended by a VI; NXT from 15:35.
+REGULAR_LAST_BAR = dt.time(15, 32)
 SELL_COST = Decimal("0.00215")  # 0.20% tax + 0.015% commission
 BUY_COST = Decimal("0.00015")
 OUT = Path("data/eval/replay_baseline")
@@ -31,7 +32,7 @@ VALID_TICKER = re.compile(r"^\d{6}$")
 
 
 def last_regular_close(bars: dict) -> dict[str, Decimal]:
-    """Each ticker's close at its last regular-session bar (ts <= 15:30)."""
+    """Each ticker's close at its last regular-session bar (ts <= 15:32)."""
     out = {}
     for t, bs in bars.items():
         regular = [b for b in bs if b.ts.time() <= REGULAR_LAST_BAR]

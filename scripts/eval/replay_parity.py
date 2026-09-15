@@ -63,8 +63,10 @@ LIVE_LEDGER = Path("data/auto_trader")
 DART = Path("../scalp-it/data/dart.db")
 WORK = Path("data/eval/replay_work")
 PREV_CLOSE = Path("data/eval/prev_close")
-#: Regular session (incl. the 15:30 closing auction bar); NXT bars fall outside.
-REGULAR_OPEN, REGULAR_END = dt.time(9, 0), dt.time(15, 31)
+#: Regular session incl. the closing auction print: 15:30, or 15:32 when a VI
+#: extends the auction (09-01..09-15: 2,895 bars at 15:30, 22 at 15:32, none
+#: at 15:31/15:33/15:34). NXT after-market bars start at 15:35.
+REGULAR_OPEN, REGULAR_END = dt.time(9, 0), dt.time(15, 33)
 #: No KRX/NXT trading before 08:00: an earlier bar means a timezone mix-up.
 EARLIEST_BAR = dt.time(8, 0)
 PREV_CLOSE_LOOKBACK = dt.timedelta(days=10)  # entry_filter._LOOKBACK_DAYS

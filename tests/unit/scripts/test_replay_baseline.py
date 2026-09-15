@@ -46,7 +46,12 @@ def test_last_regular_close_ignores_after_hours_bars() -> None:
     bars = {
         "A": [
             MinuteBar(ts=dt.datetime(2026, 9, 15, h, m), open=p, high=p, low=p, close=p, volume=1)
-            for h, m, p in ((15, 29, Decimal(1)), (15, 30, Decimal(2)), (15, 31, Decimal(3)))
-        ]
+            for h, m, p in ((15, 29, Decimal(1)), (15, 30, Decimal(2)), (15, 35, Decimal(3)))
+        ],
+        # closing auction extended by VI prints at 15:32
+        "B": [
+            MinuteBar(ts=dt.datetime(2026, 9, 15, h, m), open=p, high=p, low=p, close=p, volume=1)
+            for h, m, p in ((15, 19, Decimal(1)), (15, 32, Decimal(2)), (15, 35, Decimal(3)))
+        ],
     }
-    assert last_regular_close(bars) == {"A": Decimal(2)}
+    assert last_regular_close(bars) == {"A": Decimal(2), "B": Decimal(2)}

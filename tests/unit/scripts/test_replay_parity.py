@@ -431,16 +431,18 @@ def test_last_regular_closes_ignore_after_hours_and_the_day_itself() -> None:
 
     rows = [
         ("A", dt.datetime(2026, 9, 14, 15, 30), 2900.0),
-        ("A", dt.datetime(2026, 9, 14, 15, 31), 2950.0),  # NXT after-market
+        ("A", dt.datetime(2026, 9, 14, 15, 35), 2950.0),  # NXT after-market
         ("A", dt.datetime(2026, 9, 14, 19, 59), 2960.0),
         ("A", dt.datetime(2026, 9, 11, 15, 30), 2800.0),
-        ("B", dt.datetime(2026, 9, 11, 15, 20), 500.0),  # halted on 09-14
+        ("B", dt.datetime(2026, 9, 11, 15, 19), 500.0),  # halted on 09-14
+        ("B", dt.datetime(2026, 9, 11, 15, 32), 510.0),  # closing auction extended by VI
+        ("B", dt.datetime(2026, 9, 11, 15, 35), 520.0),  # NXT after-market
         ("A", dt.datetime(2026, 9, 15, 9, 0), 3000.0),
     ]
     got = last_regular_closes(rows, DAY)
     assert got == {
         "A": (Decimal(2900), dt.date(2026, 9, 14)),
-        "B": (Decimal(500), dt.date(2026, 9, 11)),
+        "B": (Decimal(510), dt.date(2026, 9, 11)),
     }
 
 

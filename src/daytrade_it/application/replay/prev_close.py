@@ -4,7 +4,8 @@
 adjustment, intraday snapshots overwritten by the final close), so a replay
 reading it today could use a close nobody could see on the trade date. The
 replay instead takes each ticker's prior-session close from its last regular
-minute bar (09:00 <= ts < 15:31) before the day, freezes it to
+minute bar (09:00 <= ts < 15:33, the
+closing auction prints at 15:30 or, VI-extended, 15:32) before the day, freezes it to
 `data/eval/prev_close/YYYY-MM-DD.json` once, and serves it both to SimBroker
 (price limits) and to the no-chase filter through `FrozenPrevCloseDB`.
 """
@@ -20,7 +21,7 @@ from pathlib import Path
 from daytrade_it.domain.value_objects import Ticker
 from daytrade_it.infrastructure.external.quant_airflow_db_client import AdjustedDailyBar
 
-SOURCE = "kr_quant minute_bars: last bar 09:00 <= ts < 15:31 before the day"
+SOURCE = "kr_quant minute_bars: last bar 09:00 <= ts < 15:33 before the day"
 
 
 @dataclass(frozen=True)
