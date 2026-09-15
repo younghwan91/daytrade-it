@@ -116,6 +116,23 @@ class TradingLimits:
     #: RiskManager account-exposure check that gates entries (was ~500k).
     #: The deposit-cash check still applies (cash is shared with scalp-it).
     max_trader_exposure: Decimal = Decimal("1000000")
+    # -- stop-loss / profit-taking exit rules (`exit_rule_hit`), all off by default --
+    #: Stop-loss: sell when the last completed close <= entry x (1 - pct). None disables.
+    stop_loss_pct: Decimal | None = None
+    #: VWAP stop: close below entry and more than this gap below session VWAP. None disables.
+    stop_vwap_gap: Decimal | None = None
+    #: Time stop: held this long and still below entry x (1 + stop_time_min_gain). None disables.
+    stop_time: dt.timedelta | None = None
+    #: Minimum gain the time stop requires to keep holding (used only with stop_time).
+    stop_time_min_gain: Decimal = Decimal("0")
+    #: Opening-range stop: close below the low of 09:00 + this window, after it. None disables.
+    stop_orb: dt.timedelta | None = None
+    #: Take-profit: sell when the last completed close >= entry x (1 + pct). None disables.
+    take_profit_pct: Decimal | None = None
+    #: Trailing stop armed once the peak since entry reaches this gain. None disables.
+    trail_after_gain: Decimal | None = None
+    #: Trailing stop gap below the peak (used only with trail_after_gain).
+    trail_gap: Decimal = Decimal("0.01")
 
 
 @dataclass
@@ -155,6 +172,72 @@ def vwap_exit_hit(
     close = done[-1].close
     hit = close / entry - 1 >= min_gain and close / vwap - 1 < -gap
     return hit, close, vwap
+
+
+def _any_exit_rule(lim: TradingLimits) -> bool:
+    return any(
+        v is not None
+        for v in (
+            lim.stop_loss_pct,
+            lim.stop_vwap_gap,
+            lim.stop_time,
+            lim.stop_orb,
+            lim.take_profit_pct,
+            lim.trail_after_gain,
+            lim.vwap_exit_gap,
+        )
+    )
+
+
+def exit_rule_hit(
+    bars: list[MinuteBar],
+    entry: Decimal,
+    entered_at: dt.datetime,
+    now: dt.datetime,
+    lim: TradingLimits,
+) -> str | None:
+    """Name of the first exit rule that fires on completed regular-session bars, else None.
+
+    Order: stop_loss, stop_vwap, stop_time, stop_orb, take_profit, trailing, vwap_break.
+    """
+    minute = now.replace(tzinfo=None, second=0, microsecond=0)
+    done = [b for b in bars if b.ts.time() >= dt.time(9, 0) and b.ts < minute]
+    volume = sum(b.volume for b in done)
+    if not done or volume <= 0 or entry <= 0:
+        return None
+    close = done[-1].close
+    vwap = sum(b.close * b.volume for b in done) / volume
+
+    if lim.stop_loss_pct is not None and close <= entry * (1 - lim.stop_loss_pct):
+        return "stop_loss"
+    if lim.stop_vwap_gap is not None and close < entry and close < vwap * (1 - lim.stop_vwap_gap):
+        return "stop_vwap"
+    if (
+        lim.stop_time is not None
+        and now.replace(tzinfo=None) - entered_at.replace(tzinfo=None) >= lim.stop_time
+        and close < entry * (1 + lim.stop_time_min_gain)
+    ):
+        return "stop_time"
+    if lim.stop_orb is not None:
+        orb_end = dt.datetime.combine(done[-1].ts.date(), dt.time(9, 0)) + lim.stop_orb
+        window = [b for b in done if b.ts < orb_end]
+        # done[-1] after the window (so every window bar is complete) and below its low.
+        if window and done[-1].ts >= orb_end and close < min(b.low for b in window):
+            return "stop_orb"
+    if lim.take_profit_pct is not None and close >= entry * (1 + lim.take_profit_pct):
+        return "take_profit"
+    if lim.trail_after_gain is not None:
+        entry_minute = entered_at.replace(tzinfo=None, second=0, microsecond=0)
+        since = [b.high for b in done if b.ts >= entry_minute]
+        if since:
+            peak = max(since)
+            if peak >= entry * (1 + lim.trail_after_gain) and close <= peak * (1 - lim.trail_gap):
+                return "trailing"
+    if lim.vwap_exit_gap is not None:
+        hit, _, _ = vwap_exit_hit(bars, entry, now, lim.vwap_exit_gap, lim.vwap_exit_min_gain)
+        if hit:
+            return "vwap_break"
+    return None
 
 
 def add_on_hit(bars: list[MinuteBar], entry: Decimal, now: dt.datetime, min_gain: Decimal) -> bool:
@@ -435,9 +518,9 @@ class AutoTrader:
             self._early_exits(now)
 
     def _early_exits(self, now: dt.datetime) -> None:
-        """VWAP-break exits before `flatten_at`; re-price unfilled early sells."""
+        """Rule exits (`exit_rule_hit`) before `flatten_at`; re-price unfilled early sells."""
         lim = self._limits
-        if lim.vwap_exit_gap is None or not self._state.entries:
+        if not _any_exit_rule(lim) or not self._state.entries:
             return
         own = self._own_holdings()
         if not own:
@@ -460,10 +543,9 @@ class AutoTrader:
             except Exception:
                 logger.exception("auto_trader: minute bars failed", ticker=ticker)
                 continue
-            hit, close, vwap = vwap_exit_hit(
-                bars, Decimal(entry_limit), now, lim.vwap_exit_gap, lim.vwap_exit_min_gain
-            )
-            if not hit:
+            entered_at = dt.datetime.fromisoformat(self._state.entries[ticker]["ts"])
+            rule = exit_rule_hit(bars, Decimal(entry_limit), entered_at, now, lim)
+            if rule is None:
                 if (
                     lim.add_on_min_gain is not None
                     and ticker not in self._state.add_ons
@@ -472,17 +554,30 @@ class AutoTrader:
                 ):
                     self._add_on(ticker, bars)
                 continue
-            if hit:
+            else:
+                # Last completed close and session VWAP, for the ledger row.
+                _, close, vwap = vwap_exit_hit(
+                    bars, Decimal(entry_limit), now, Decimal(0), lim.vwap_exit_min_gain
+                )
                 self._record(
                     "exit_signal",
                     ticker=ticker,
-                    reason="vwap_break",
+                    reason=rule,
                     close=str(close),
                     vwap=str(vwap),
                 )
-                logger.info(
-                    "auto_trader: VWAP EXIT", ticker=ticker, close=str(close), vwap=str(vwap)
-                )
+                if rule == "vwap_break":
+                    logger.info(
+                        "auto_trader: VWAP EXIT", ticker=ticker, close=str(close), vwap=str(vwap)
+                    )
+                else:
+                    logger.info(
+                        "auto_trader: RULE EXIT",
+                        ticker=ticker,
+                        rule=rule,
+                        close=str(close),
+                        vwap=str(vwap),
+                    )
                 self._cancel_pending_add_ons(ticker, reason="exit")
                 qty = self._own_holdings_for(ticker) or qty
                 self._sell(ticker, qty)
