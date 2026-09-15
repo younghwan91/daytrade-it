@@ -85,6 +85,20 @@ class SubmitUncertain(RuntimeError):
 #: How far before a failed create a listed batch may claim to be created (clock skew).
 UNCERTAIN_SKEW = dt.timedelta(minutes=10)
 
+#: A 429 on a batch create is a rejection (nothing queued, nothing billed), so -- unlike a
+#: 5xx -- it is safe to retry: the concurrent-batch quota frees as earlier batches end.
+CREATE_429_DELAY = 60.0
+CREATE_429_MAX_DELAY = 600.0
+CREATE_429_RETRIES = 60
+
+
+def retry_after_seconds(resp: httpx.Response, default: float) -> float:
+    """`retry-after` in seconds, or `default` when the header is absent or unparsable."""
+    try:
+        return max(float(resp.headers.get("retry-after")), 1.0)
+    except (TypeError, ValueError):
+        return default
+
 
 def custom_id_of(key: str) -> str:
     """`uuid|code` -> API-safe custom_id (^[a-zA-Z0-9_-]{1,64}$)."""
@@ -293,20 +307,30 @@ class BatchJudge:
         attempted_at = dt.datetime.now(dt.UTC).isoformat()
         custom_ids = {r["custom_id"]: keys[r["custom_id"]] for r in requests}
         hashes = {r["custom_id"]: request_input_hash(r) for r in requests}
-        try:
-            resp = self.client.request(
-                "POST",
-                f"{API}/v1/messages/batches",
-                headers=self._headers(),
-                timeout=120.0,
-                json={"requests": requests},
-            )
-        except httpx.TransportError as exc:
-            self._uncertain(chunk, custom_ids, hashes, attempted_at, f"{type(exc).__name__}: {exc}")
-            raise AssertionError("unreachable") from exc
-        if resp.status_code >= 500:
-            self._uncertain(chunk, custom_ids, hashes, attempted_at, f"HTTP {resp.status_code}")
-        resp.raise_for_status()  # 4xx (incl. 429): rejected, nothing was created
+        delay = CREATE_429_DELAY
+        for attempt in range(CREATE_429_RETRIES + 1):
+            try:
+                resp = self.client.request(
+                    "POST",
+                    f"{API}/v1/messages/batches",
+                    headers=self._headers(),
+                    timeout=120.0,
+                    json={"requests": requests},
+                )
+            except httpx.TransportError as exc:
+                self._uncertain(
+                    chunk, custom_ids, hashes, attempted_at, f"{type(exc).__name__}: {exc}"
+                )
+                raise AssertionError("unreachable") from exc
+            if resp.status_code >= 500:
+                self._uncertain(chunk, custom_ids, hashes, attempted_at, f"HTTP {resp.status_code}")
+            if resp.status_code != 429 or attempt == CREATE_429_RETRIES:
+                break
+            wait = retry_after_seconds(resp, delay)
+            self.log(f"HTTP 429 creating chunk {chunk} -- retry in {wait:.0f}s")
+            self.sleep(wait)
+            delay = min(delay * 2, CREATE_429_MAX_DELAY)
+        resp.raise_for_status()  # other 4xx: rejected, nothing was created
         batch = resp.json()
         self._record_batch(batch["id"], chunk, custom_ids, hashes)
         return batch["id"]

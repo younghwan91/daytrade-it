@@ -10,6 +10,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "scripts" / "eval"))
 
+import judge_batch  # noqa: E402
 from judge_batch import (  # noqa: E402
     BatchJudge,
     BudgetExceeded,
@@ -18,6 +19,7 @@ from judge_batch import (  # noqa: E402
     custom_id_of,
     estimate_cost,
     pair_input_hash,
+    retry_after_seconds,
     stratified_sample,
 )
 
@@ -498,3 +500,64 @@ def test_cli_dry_run_passes_the_api_key_only_when_calibrating() -> None:
     assert api_key_for(dry_run=True, calibrate=0, lookup=lambda: "k") is None
     assert api_key_for(dry_run=True, calibrate=20, lookup=lambda: "k") == "k"
     assert api_key_for(dry_run=False, calibrate=0, lookup=lambda: "k") == "k"
+
+
+# --- a 429 on create is a rejection, so it is retried (a 5xx never is) ---------
+
+
+class RateLimitedCreates(FakeAPI):
+    """Rejects the first `refusals` creates with 429: nothing queued, nothing billed."""
+
+    def __init__(self, refusals: int = 2, retry_after: str | None = None) -> None:
+        super().__init__()
+        self.refusals = refusals
+        self.retry_after = retry_after
+        self.rejected = 0
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        if (
+            request.method == "POST"
+            and request.url.path == "/v1/messages/batches"
+            and self.rejected < self.refusals
+        ):
+            self.rejected += 1
+            headers = {"retry-after": self.retry_after} if self.retry_after else {}
+            return httpx.Response(429, json={"type": "error"}, headers=headers)
+        return super().__call__(request)
+
+
+def test_create_retries_a_429_honouring_retry_after_without_double_creating(
+    tmp_path: Path,
+) -> None:
+    pairs = [_pair(i) for i in range(4)]
+    api = RateLimitedCreates(refusals=2, retry_after="30")
+    j = _judge(tmp_path, api)
+    waits: list[float] = []
+    j.sleep = waits.append
+    summary = j.run(pairs, sample=4, stratify=["month"], seed=1)
+    assert api.rejected == 2
+    assert len(api.created) == 1 and len(api.created[0]["requests"]) == 4
+    assert waits[:2] == [30.0, 30.0]
+    assert summary["succeeded"] == 4
+    log = [json.loads(line) for line in (tmp_path / "state.batches.log").open()]
+    assert len(log) == 1  # the rejected attempts are not billable and are not logged
+
+
+def test_create_backs_off_then_gives_up_on_a_persistent_429(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(judge_batch, "CREATE_429_RETRIES", 2)
+    api = RateLimitedCreates(refusals=99)
+    j = _judge(tmp_path, api)
+    waits: list[float] = []
+    j.sleep = waits.append
+    with pytest.raises(httpx.HTTPStatusError):
+        j.run([_pair(i) for i in range(2)], sample=2, stratify=["month"], seed=1)
+    assert api.created == []
+    assert waits == [judge_batch.CREATE_429_DELAY, judge_batch.CREATE_429_DELAY * 2]
+
+
+def test_retry_after_seconds_falls_back_when_the_header_is_missing_or_junk() -> None:
+    assert retry_after_seconds(httpx.Response(429, headers={"retry-after": "12"}), 60.0) == 12.0
+    assert retry_after_seconds(httpx.Response(429), 60.0) == 60.0
+    assert retry_after_seconds(httpx.Response(429, headers={"retry-after": "soon"}), 60.0) == 60.0
