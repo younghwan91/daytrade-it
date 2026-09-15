@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from uuid import UUID, uuid5
 
-from krx_news_client import DartQuotaExceededError, DartScraper
+from krx_news_client import DartQuotaExceededError, DartScraper, Deduplicator
 from krx_news_client import Disclosure as KrxDisclosure
 
 from daytrade_it.domain.entities.news import NewsArticle
@@ -38,6 +38,17 @@ logger = get_logger(__name__)
 DART_DISCLOSURE_NAMESPACE = UUID("2f1e9c2a-2b3a-4c5d-8e6f-1a2b3c4d5e6f")
 
 _EMPTY_CONTENT_FALLBACK = "(no content provided by DART)"
+
+
+def _new_seen_cache() -> Deduplicator[KrxDisclosure]:
+    """Dedup cache keyed by the library's ``Disclosure.id``.
+
+    Pinned explicitly: the library's default key for disclosures is
+    ``dart:{rcept_no}``, but the uuid5 domain id here is derived from ``id``,
+    so dedup keeps using the same value.
+    """
+    return Deduplicator(key=lambda d: d.id)
+
 
 # Re-exported so callers of this module don't need to import from
 # krx_news_client directly to catch quota exhaustion.
@@ -114,7 +125,7 @@ class DartClient:
         settings = get_settings().krx_news
         self.api_key = api_key or settings.dart_api_key.get_secret_value()
         self._scraper = scraper or DartScraper(api_key=self.api_key)
-        self._seen_ids: set[str] = set()
+        self._seen = _new_seen_cache()
 
         logger.info(
             "DartClient initialized",
@@ -133,12 +144,12 @@ class DartClient:
 
     def clear_seen_ids(self) -> None:
         """Clear the dedup cache. Useful for tests or a deliberate resync."""
-        self._seen_ids.clear()
+        self._seen = _new_seen_cache()
 
     @property
     def seen_count(self) -> int:
         """Number of distinct disclosure ids seen so far this session."""
-        return len(self._seen_ids)
+        return len(self._seen)
 
     async def poll_once(self) -> list[NewsArticle]:
         """Fetch today's/yesterday's DART disclosures and return only new ones.
@@ -165,15 +176,13 @@ class DartClient:
                 error_code=error_codes.DART_API_ERROR,
             ) from exc
 
-        new_disclosures = [d for d in raw_disclosures if d.id not in self._seen_ids]
-        for d in new_disclosures:
-            self._seen_ids.add(d.id)
+        new_disclosures = self._seen.filter_new(raw_disclosures)
 
         logger.info(
             "DART disclosure poll complete",
             fetched=len(raw_disclosures),
             new=len(new_disclosures),
-            seen_total=len(self._seen_ids),
+            seen_total=len(self._seen),
         )
 
         return [map_dart_disclosure_to_domain(d) for d in new_disclosures]

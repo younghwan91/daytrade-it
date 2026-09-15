@@ -163,6 +163,19 @@ class TestTossNewsClientDedup:
 
         assert len(second_result) == 1
 
+    async def test_same_id_twice_in_one_snapshot_is_emitted_once(self) -> None:
+        """Toss's three dashboard feeds overlap; one poll must not emit the
+        same article (and so the same uuid5 domain id) twice."""
+        article = make_krx_article(news_id="dup")
+        scraper = FakeTossScraper(responses=[[article, make_krx_article(news_id="x"), article]])
+        client = TossNewsClient(scraper=scraper)
+
+        result = await client.poll_once()
+
+        assert len(result) == 2
+        assert len({a.id for a in result}) == 2
+        assert client.seen_count == 2
+
 
 # =============================================================================
 # Failure propagation
@@ -211,3 +224,88 @@ def test_extract_full_body_keeps_text_blocks_and_strips_tags() -> None:
     }
     assert extract_full_body(detail) == "요약 문장\n소제목\n본문 강조 끝"
     assert extract_full_body(detail, max_chars=4) == "요약 문장"[:4]
+
+
+def test_extract_full_body_drops_tag_only_blocks() -> None:
+    from daytrade_it.infrastructure.external.toss_news_client import extract_full_body
+
+    detail = {
+        "content": [
+            {"type": "text", "content": "<br/>"},
+            {"type": "text", "content": "<p> 첫 문단 </p>"},
+            {"type": "text", "content": "둘째 문단"},
+        ]
+    }
+    assert extract_full_body(detail) == "첫 문단\n둘째 문단"
+    assert extract_full_body({}) == ""
+
+
+def test_detail_helpers_delegate_to_library() -> None:
+    from krx_news_client.scrapers import toss
+
+    from daytrade_it.infrastructure.external import toss_news_client
+
+    assert toss_news_client.news_id_from_article_url is toss.news_id_from_url
+    assert toss_news_client.TOSS_NEWS_DETAIL_URL == toss.NEWS_DETAIL_URL
+
+
+class TestFetchArticleDetail:
+    URL = (
+        "https://tossinvest.com/news?contentType=news&contentParams="
+        "%7B%22id%22%3A%22yna_AKR20260913056700017%22%7D"
+    )
+
+    @staticmethod
+    def _client(handler):  # type: ignore[no-untyped-def]
+        import httpx
+
+        return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+    async def test_returns_raw_kr_payload_with_news_id(self) -> None:
+        import httpx
+
+        from daytrade_it.infrastructure.external.toss_news_client import fetch_article_detail
+
+        seen: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(str(request.url))
+            blocks = [{"type": "text", "content": "본문"}]
+            return httpx.Response(200, json={"result": {"kr": {"title": "t", "content": blocks}}})
+
+        async with self._client(handler) as client:
+            detail = await fetch_article_detail(client, self.URL)
+
+        assert seen == ["https://wts-info-api.tossinvest.com/api/v2/news/yna_AKR20260913056700017"]
+        assert detail == {
+            "news_id": "yna_AKR20260913056700017",
+            "title": "t",
+            "content": [{"type": "text", "content": "본문"}],
+        }
+
+    async def test_missing_article_and_errors_return_none(self) -> None:
+        import httpx
+
+        from daytrade_it.infrastructure.external.toss_news_client import fetch_article_detail
+
+        responses = iter(
+            [httpx.Response(200, json={"result": None}), httpx.Response(404), httpx.Response(500)]
+        )
+
+        async with self._client(lambda _req: next(responses)) as client:
+            assert await fetch_article_detail(client, self.URL) is None
+            assert await fetch_article_detail(client, self.URL) is None
+            assert await fetch_article_detail(client, self.URL) is None
+            # No newsId in the URL: no request at all.
+            assert await fetch_article_detail(client, "https://tossinvest.com/news") is None
+
+    async def test_transport_error_returns_none(self) -> None:
+        import httpx
+
+        from daytrade_it.infrastructure.external.toss_news_client import fetch_article_detail
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("down", request=request)
+
+        async with self._client(handler) as client:
+            assert await fetch_article_detail(client, self.URL) is None
