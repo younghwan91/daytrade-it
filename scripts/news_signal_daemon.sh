@@ -83,7 +83,22 @@ while [ "$(date +%s)" -lt "$END" ]; do
   [ "$REMAIN" -lt 1 ] && break
   echo "=== [$(date '+%F %T')] 뉴스 신호 데몬 시작 (남은 ${REMAIN}분)"
   # ⚠️ --confirm-real 켜짐 → 진짜 주문이 나간다.
-  /home/young/.local/bin/uv run python scripts/news_signal_poller.py --stop-at 15:20 --exits-until 15:30 --execute --confirm-real
+  # 2026-09-17 부터 종이매매(--paper)로 돌린다. 실주문은 나가지 않는다.
+  #
+  # 이유: 실매매를 `data/live_STOP` 으로 멈춘 상태인데(뉴스 선정의 초과수익이
+  # 매칭 대조군 대비 +1.6bp(se 3.4)인 반면 왕복 비용이 36.7bp), 그 스위치는
+  # 뉴스 폴링까지 멈춰서 판정 기록이 하루도 안 쌓인다. 그런데 지금 이 프로젝트의
+  # 병목이 바로 그 기록이다 -- 신뢰할 수 있는 아카이브 날짜가 09-14, 09-15
+  # 이틀뿐이고, 나머지 5 일은 데몬이 본 것의 ~25% 만 담은 재구성 데이터다.
+  # 세션의 유일했던 채택 후보도 그 재구성일이 만들어 낸 것이라 철회됐다.
+  #
+  # 종이매매는 같은 사전필터·같은 프롬프트로 같은 쌍을 판정하고
+  # `data/news_judgments_paper/` 에 기록하되, 주문은 PaperBroker 로 간다.
+  # 즉 **멈춘 날을 데이터 없는 날로 버리지 않는다.** 하루에 아카이브 하루씩.
+  #
+  # 실매매 재개: --paper 를 빼고 --confirm-real 을 되살린 뒤(둘은 상호배타)
+  # data/live_STOP 을 지운다. 우위가 확인되기 전에는 재개하지 않는다.
+  /home/young/.local/bin/uv run python scripts/news_signal_poller.py --stop-at 15:20 --exits-until 15:30 --execute --paper
   echo "=== [$(date '+%F %T')] 데몬 종료 -- $((REMAIN > 1 ? 5 : 0))초 후 재시작 시도"
   sleep 5
 done

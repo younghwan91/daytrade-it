@@ -610,11 +610,22 @@ async def _run_locked(
                     except Exception:
                         logger.exception("news_signal_poller: trader.manage failed")
 
-                if kill_switch_active():
+                # 모드별 스위치를 본다. 종이매매는 `data/paper_STOP` 만 따르므로,
+                # 실매매가 `data/live_STOP` 으로 멈춰 있는 동안에도 판정·기록은
+                # 계속 쌓인다. 그 기록이 지금 이 프로젝트의 병목이다 -- 신뢰할 수
+                # 있는 아카이브 날짜가 09-14, 09-15 이틀뿐이라 모든 판단이 거기서
+                # 막힌다. 멈춘 날을 데이터 없는 날로 버리지 않기 위한 구분이다.
+                stop_now = (
+                    kill_switch_active() if paper_seen is None else PAPER_KILL_SWITCH_PATH.exists()
+                )
+                if stop_now:
                     if not kill_logged:
                         logger.warning(
                             "news_signal_poller: kill switch active -- no new signals or "
-                            "entries; exits still managed"
+                            "entries; exits still managed",
+                            switch=str(
+                                KILL_SWITCH_PATH if paper_seen is None else PAPER_KILL_SWITCH_PATH
+                            ),
                         )
                         kill_logged = True
                 elif news_open and now >= next_news_poll:

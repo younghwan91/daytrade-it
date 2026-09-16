@@ -90,8 +90,20 @@ class TestScoringFailureGuard:
         """
         src = Path(poller.__file__).read_text()
         manage = src.index("trader.manage()")
-        check = src.index("if kill_switch_active():")
+        check = src.index("if stop_now:")
         assert manage < check
+
+    def test_stop_switch_is_mode_aware(self) -> None:
+        """종이매매는 `paper_STOP` 만 본다 -- 실매매가 멈춰 있어도 판정은 쌓인다.
+
+        신뢰할 수 있는 아카이브 날짜가 이틀뿐이라 모든 판단이 거기서 막힌다.
+        멈춘 날을 데이터 없는 날로 버리지 않기 위한 구분.
+        """
+        src = Path(poller.__file__).read_text()
+        gate = src[src.index("stop_now = (") : src.index("if stop_now:")]
+        assert "kill_switch_active()" in gate
+        assert "PAPER_KILL_SWITCH_PATH.exists()" in gate
+        assert "paper_seen is None" in gate
 
     def test_counter_resets_on_success(self, isolated_switch: Path) -> None:
         """연속 실패만 센다 -- 한 건 성공하면 0 으로 돌아간다."""
