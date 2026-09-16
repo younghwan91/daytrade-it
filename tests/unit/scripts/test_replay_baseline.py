@@ -9,7 +9,16 @@ from daytrade_it.infrastructure.brokers.base import MinuteBar
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "scripts" / "eval"))
 
-from replay_baseline import last_regular_close, trade_pnl  # noqa: E402
+from replay_baseline import OUT, last_regular_close, resolve_out, trade_pnl  # noqa: E402
+
+
+def test_resolve_out_defaults_to_shared_dir() -> None:
+    assert resolve_out(None) == OUT
+
+
+def test_resolve_out_uses_given_dir() -> None:
+    custom = Path("data/eval/replay_baseline_run1")
+    assert resolve_out(custom) == custom
 
 
 def test_trade_pnl_nets_costs_per_ticker() -> None:

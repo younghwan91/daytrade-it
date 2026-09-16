@@ -31,6 +31,17 @@ OUT = Path("data/eval/replay_baseline")
 VALID_TICKER = re.compile(r"^\d{6}$")
 
 
+def resolve_out(out: Path | None) -> Path:
+    """Per-day-file output directory for this run.
+
+    Defaults to the shared `OUT` (unchanged behaviour) so an explicit `--out`
+    is the only way to opt into a run-private directory -- parallel runs that
+    do not pass it keep merging into the same shared pool they always have,
+    but a run that does pass it can no longer clobber another run's files.
+    """
+    return out if out is not None else OUT
+
+
 def last_regular_close(bars: dict) -> dict[str, Decimal]:
     """Each ticker's close at its last regular-session bar (ts <= 15:32)."""
     out = {}
@@ -112,6 +123,14 @@ def main() -> None:
         help="Events directory (default data/eval/replay_events; task-8 passes "
         "data/eval/replay_events_v4 to replay the v4-shadow-judged days).",
     )
+    ap.add_argument(
+        "--out",
+        type=Path,
+        default=None,
+        help="Per-day output directory (default data/eval/replay_baseline, the "
+        "shared pool every run merges into). Pass a run-private directory so "
+        "parallel runs cannot overwrite each other's day files.",
+    )
     args = ap.parse_args()
 
     require_backtest_host()
@@ -119,7 +138,8 @@ def main() -> None:
     db = QuantAirflowDBClient()
     stocks = db.get_stock_master()
     cfg = DayConfig()  # NewsPolicy() = the live policy
-    OUT.mkdir(parents=True, exist_ok=True)
+    out_dir = resolve_out(args.out)
+    out_dir.mkdir(parents=True, exist_ok=True)
     total_errors = 0
     failed_days: list[str] = []
     grand = Decimal(0)
@@ -163,7 +183,7 @@ def main() -> None:
         )
         for r in res.refusals:
             print(f"    REFUSED {r['ts'][11:19]} {r['ticker']} {r['reason']}")
-        (OUT / f"{day}.json").write_text(
+        (out_dir / f"{day}.json").write_text(
             json.dumps(
                 {
                     "day": str(day),
