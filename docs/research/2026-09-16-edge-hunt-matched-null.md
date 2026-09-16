@@ -842,6 +842,35 @@ That is what makes the labelling question in §8.7 worth funding rather than a h
 
 ---
 
+### 8.11 Limit entry, and why the retry that was supposed to fix it breaks it
+
+We send marketable orders on news, so we pay the spread on every entry — 14 to 31 bp by measurement (§2.5), the largest controllable line in the toll. Joining the bid instead of lifting the ask saves it, and at a multi-day horizon the saving stays in the position. scalp-it proposed that the usual objection — you miss the winners — is weak at ten days, because we can simply retry the next day.
+
+**The retry is the part that does not work, and it is the part that was supposed to make it work.**
+
+Alpha in bp, 97,271 pairs over 86 common days, matched null, moving-block errors:
+
+| | n | same day | +5d | +10d | +20d | +40d |
+|---|---:|---:|---:|---:|---:|---:|
+| **market** (today's policy) | 97,271 | +5.9 | +19.0 | +27.4 | +23.6 | +96.6 |
+| **limit, any retry** | 97,271 | **+6.2** | +18.1 | **+26.6** | **+23.2** | **+96.4** |
+| filled day 0 | 94,105 | +10.8 | +23.3 | +32.0 | +28.2 | +103.5 |
+| **filled on a retry** | 3,166 | **−133.8** | −151.4 | −167.7 | −183.0 | −158.1 |
+| through-fill | 93,608 | −0.5 | +11.9 | +19.4 | +13.3 | +84.2 |
+| rested-fill | 3,663 | +203.0 | +198.2 | +186.9 | +313.4 | +449.4 |
+
+A retry acquires almost everything — 96.7% on day 0, 99.9% by day 1, 100% by day 3 — and acquires it at **−134 to −183 bp**. The reason is mechanical: a name that did not dip to our price on day 0 and does dip on day 1 is a name that has turned. We do not get the asset we wanted late; we get a different and worse asset. **Limit-with-retry is indistinguishable from market at every horizon** (+6.2 vs +5.9; +26.6 vs +27.4; +96.4 vs +96.6).
+
+So §8.11's predecessor measurement was right for the wrong reason. Its +4.5 bp came from *declining to buy* the names a bid missed, not from buying them cheaper. Skipping is worth ~+4.5 bp before the queue correction and ~+2.8 after; retrying is worth nothing.
+
+**Through-fills are not a special subset — they are the normal case.** 96.2% of fills happen because price traded *through* our limit rather than resting on it, and they run 5 to 10 bp below market at every horizon. scalp-it's short-horizon finding that dips revert (+14 bp against random at five minutes) does not survive to ours.
+
+**Which answers the question this experiment existed to ask.** Does the spread/adverse-selection cancellation decay with horizon? **No.** It holds from the same session out to forty days. The adverse selection in a limit fill is not a short-horizon artifact that a patient holder can wait out.
+
+The one striking cell is the 3.8% of fills that rested — price touched our limit exactly and never went below — at +203 to +449 bp. That is essentially the same population as §8.9's "never dipped" names, and it is not knowable in advance: "the order that filled without the price going through it" is a description of what happened, not a signal.
+
+---
+
 ## 9. Reproduction
 
 From `~/git/daytrade-it-edge` on simnode, `data` symlinked to `~/git/daytrade-it/data`. Credentials come from `~/git/quant-airflow/.env` via `edge_db.py`; nothing is written into the repo.
