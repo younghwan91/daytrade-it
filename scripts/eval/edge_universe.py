@@ -55,6 +55,34 @@ def ew(day: dict[str, tuple[float, float, float]], codes: list[str]) -> float | 
     return statistics.fmean(rets) if rets else None
 
 
+#: KRX price bands (2023 revision), won. The narrowest possible spread is one
+#: of these, and crossing it costs one tick per round trip.
+TICKS = ((2_000, 1), (5_000, 5), (20_000, 10), (50_000, 50), (200_000, 100), (500_000, 500))
+TOP_TICK = 1_000
+#: sell tax + commission both sides; the spread is what varies by universe
+TAX_AND_COMMISSION = 0.0020 + 2 * 0.00015
+
+
+def tick_cost(day: dict[str, tuple[float, float, float]], codes: list[str]) -> float | None:
+    """Mean tick/price over the universe -- the spread floor it would pay.
+
+    A cheaper universe is not a free universe: thinner, lower-priced names sit
+    on a coarser relative tick grid, so a universe that drifts less can easily
+    cost more to trade. This prices that directly from the entry prices rather
+    than assuming it.
+    """
+    out = []
+    for c in codes:
+        if c not in day:
+            continue
+        px = day[c][0]
+        if px <= 0:
+            continue
+        tick = next((t for bound, t in TICKS if px < bound), TOP_TICK)
+        out.append(tick / px)
+    return statistics.fmean(out) if out else None
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--start", default="2026-03-17")
@@ -70,6 +98,8 @@ def main() -> None:
 
     cal = sorted(bars)
     series: dict[str, list[float]] = defaultdict(list)
+    ticks: dict[str, list[float]] = defaultdict(list)
+    months: dict[str, list[str]] = defaultdict(list)
     for i, day in enumerate(cal):
         if i == 0 or day < lo:
             continue
@@ -91,9 +121,18 @@ def main() -> None:
             r = ew(today, codes)
             if r is not None:
                 series[name].append(r)
+                months[name].append(day.strftime("%Y-%m"))
+                t = tick_cost(today, codes)
+                if t is not None:
+                    ticks[name].append(t)
 
-    print(f"\nequal-weight open-to-close, {args.start}..{args.end}\n")
-    print(f"{'universe':<42}{'days':>6}{'mean bp':>10}{'se':>8}{'median':>9}{'days>=0':>10}")
+    all_months = sorted({m for v in months.values() for m in v})
+    print(f"\nequal-weight open-to-close, {args.start}..{args.end}")
+    print("cost = 0.20% sell tax + 0.03% commission + one tick of spread, per round trip\n")
+    print(
+        f"{'universe':<42}{'days':>5}{'drift':>8}{'se':>6}{'spread':>8}{'cost':>7}"
+        f"{'net':>8}   " + "".join(f"{m[5:]:>7}" for m in all_months) + "  +/-"
+    )
     order = [
         "all",
         "top300 (ours)",
@@ -107,11 +146,24 @@ def main() -> None:
         if not v:
             continue
         se = statistics.stdev(v) / (len(v) ** 0.5)
+        spread = statistics.fmean(ticks[name])
+        cost = TAX_AND_COMMISSION + spread
+        drift = statistics.fmean(v)
+        per_month = []
+        for m in all_months:
+            sel = [x for x, mm in zip(v, months[name], strict=True) if mm == m]
+            per_month.append(statistics.fmean(sel) if sel else None)
+        cells = "".join(f"{x * BP:>+7.0f}" if x is not None else f"{'.':>7}" for x in per_month)
+        pos = sum(1 for x in per_month if x is not None and x > 0)
+        have = sum(1 for x in per_month if x is not None)
         print(
-            f"{name:<42}{len(v):>6}{statistics.fmean(v) * BP:>+10.1f}{se * BP:>8.1f}"
-            f"{statistics.median(v) * BP:>+9.1f}{sum(x >= 0 for x in v):>6}/{len(v):<3}"
+            f"{name:<42}{len(v):>5}{drift * BP:>+8.1f}{se * BP:>6.1f}{spread * BP:>8.1f}"
+            f"{cost * BP:>7.1f}{(drift - cost) * BP:>+8.1f}   {cells}  {pos}/{have}"
         )
-    print()
+    print(
+        "\n`net` is a long-only round trip in that universe with zero selection skill:\n"
+        "the drift it hands you, minus what it costs to take it.\n"
+    )
 
 
 if __name__ == "__main__":
