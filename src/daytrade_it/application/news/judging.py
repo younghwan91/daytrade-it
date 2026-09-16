@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 
 from krx_quant_core.market.session import KST
 
+from daytrade_it.application.news.mention_prefilter import roundup_tag, should_judge
 from daytrade_it.shared.logging import get_logger
 
 if TYPE_CHECKING:
@@ -34,6 +35,10 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 SESSION_CLOSE = dt.time(15, 20)  # signals expire here; day trades are flat by the close
+
+#: Pairs the pre-LLM filter dropped since process start, for the run summary.
+#: Counted (not silently discarded) so a misfiring filter is visible in the log.
+prefilter_skips: int = 0
 
 
 def session_close_kst(day: dt.date) -> dt.datetime:
@@ -80,11 +85,34 @@ async def judge_pair(
     claude: AnthropicClient,
     judgments: JudgmentLog,
     full_body_text: str | None,
+    *,
+    prefilter: bool | None = None,
 ) -> ArticleFeatures | None:
     """Score one (article, company) pair with v2 (+ shadow v4) and archive it.
 
-    Returns the v2 features, or None if scoring failed (logged, never raised).
+    Returns the v2 features, or None if scoring failed (logged, never raised) or
+    the pre-LLM filter dropped the pair (off by default).
     """
+    if not should_judge(stock.name, ticker.value, article.title, None, enabled=prefilter):
+        global prefilter_skips
+        prefilter_skips += 1
+        tag = roundup_tag(article.title)
+        logger.info(
+            "news_signal_poller: prefilter skipped",
+            ticker=ticker.value,
+            name=stock.name,
+            tag=tag,
+            title=article.title[:80],
+            total_skips=prefilter_skips,
+        )
+        # Archived like any other pair so a backtest replaying this archive sees
+        # the same universe the live daemon judged.
+        judgments.append(
+            pair_key(article, ticker),
+            prefilter_skipped_record(article, ticker, stock, tag),
+        )
+        return None
+
     try:
         features = await claude.score_article(
             code=ticker.value,
@@ -135,6 +163,34 @@ async def judge_pair(
         judgment_record(article, ticker, stock, features, shadow, full_body_text),
     )
     return features
+
+
+def prefilter_skipped_record(
+    article: NewsArticle,
+    ticker: Ticker,
+    stock: StockInfo,
+    tag: str | None,
+    judged_at: dt.datetime | None = None,
+) -> dict:
+    """Archive row for a pair the pre-LLM filter dropped.
+
+    Same shape as `judgment_record` minus the model output, so readers can tell a
+    skipped pair (`prefilter_skipped: true`, `v2: None`) from a judged one.
+    """
+    return {
+        "article_id": str(article.id),
+        "ticker": ticker.value,
+        "name": stock.name,
+        "title": article.title,
+        "category": article.category,
+        "published_at": article.published_at.isoformat(),
+        "judged_at": (judged_at or dt.datetime.now(KST)).isoformat(),
+        "full_body_chars": 0,
+        "prefilter_skipped": True,
+        "prefilter_tag": tag,
+        "v2": None,
+        "v4_shadow": None,
+    }
 
 
 def judgment_record(

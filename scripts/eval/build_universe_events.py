@@ -48,6 +48,7 @@ from pathlib import Path
 
 from judge_batch import cache_row_valid
 
+from daytrade_it.application.news.mention_prefilter import should_judge
 from daytrade_it.application.news.universe import (
     judge_queue,
     live_article_id,
@@ -222,6 +223,7 @@ def day_pairs(
     coverage: dict[str, dict] | None = None,
     stats: dict | None = None,
     stocks: dict | None = None,
+    prefilter: bool | None = None,
 ) -> list[dict]:
     """(article, code) pairs the sweep would judge on `day`, with the discovery time.
 
@@ -247,6 +249,7 @@ def day_pairs(
     open_ = dt.datetime.combine(day, OPEN, tzinfo=KST)
     members = set(universe)
     excluded = 0
+    prefiltered = 0
     candidates: list[tuple[dict, list[str]]] = []
     arrivals: dict[str, list[tuple[str, dt.datetime]]] = {}
     for a in articles.values() if isinstance(articles, dict) else articles:
@@ -273,6 +276,12 @@ def day_pairs(
             if stocks is not None and code not in stocks:
                 not_in_master += 1
                 continue
+            s = stocks.get(code) if stocks is not None else None
+            if not should_judge(
+                s.name if s else code, code, a["title"], a.get("summary"), enabled=prefilter
+            ):
+                prefiltered += 1
+                continue
             out.append(
                 {
                     **{
@@ -290,6 +299,7 @@ def day_pairs(
     if stats is not None:
         stats["excluded_pairs"] = stats.get("excluded_pairs", 0) + excluded
         stats["not_in_master"] = stats.get("not_in_master", 0) + not_in_master
+        stats["prefiltered"] = stats.get("prefiltered", 0) + prefiltered
     return out
 
 
@@ -512,11 +522,12 @@ def prepare_day(
     allow_incomplete: bool,
     archive: Path = ARCHIVE,
     stocks: dict | None = None,
+    prefilter: bool | None = None,
 ) -> tuple[list[dict], str]:
     """Coverage-checked pairs for one day plus its summary line (raises `IncompleteDay`)."""
     report = check_day_coverage(universe, coverage, day, prev_day, allow_incomplete)
     stats: dict = {}
-    pairs = day_pairs(articles, day, prev_day, universe, coverage, stats, stocks)
+    pairs = day_pairs(articles, day, prev_day, universe, coverage, stats, stocks, prefilter)
     dash = dashboard_keys(day, archive)
     overlap = "n/a" if dash is None else str(sum(p["key"] in dash for p in pairs))
     empty = sum(not p["summary"] for p in pairs)
@@ -525,7 +536,8 @@ def prepare_day(
         f"missing {len(report['missing'])} uncovered {len(report['uncovered'])} "
         f"pairs {len(pairs)} excluded_pairs {stats.get('excluded_pairs', 0)} "
         f"not_in_master {stats.get('not_in_master', 0)} "
-        f"empty_summary {empty} dashboard_overlap {overlap}"
+        f"empty_summary {empty} prefiltered {stats.get('prefiltered', 0)} "
+        f"dashboard_overlap {overlap}"
     )
     return pairs, line
 
@@ -550,6 +562,16 @@ def main() -> None:
         "--pairs-out", type=Path, default=None, help="write C4 pairs file instead of events"
     )
     ap.add_argument("--model", default=DEFAULT_MODEL, help="judge model (cache input hash)")
+    ap.add_argument(
+        "--prefilter",
+        dest="prefilter",
+        action="store_true",
+        default=None,
+        help="drop pairs the pre-LLM filter rejects (default: DAYTRADE_NEWS_PREFILTER, else off)",
+    )
+    ap.add_argument(
+        "--no-prefilter", dest="prefilter", action="store_false", help="force the filter off"
+    )
     ap.add_argument(
         "--allow-incomplete",
         action="store_true",
@@ -582,6 +604,7 @@ def main() -> None:
                     coverage,
                     args.allow_incomplete,
                     stocks=stocks,
+                    prefilter=args.prefilter,
                 )
             except IncompleteDay as exc:
                 sys.exit(f"REFUSED: {exc}")

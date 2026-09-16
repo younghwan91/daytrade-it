@@ -77,6 +77,7 @@ import httpx
 from krx_news_client.scrapers.toss import COMPANY_NEWS_URL, build_article_url
 from krx_quant_core.market.session import KST
 
+from daytrade_it.application.news import judging
 from daytrade_it.application.news.judging import (
     JudgmentLog,
     judge_pair,
@@ -628,6 +629,9 @@ class ShadowRunner:
             reason=self.stop_reason,
             requests=self.requests,
             seen=len(self.cursor.seen),
+            # Judging runs through the live `judge_pair`, so the sweep inherits
+            # the same pre-LLM filter the daemon uses (off by default).
+            prefilter_skipped=judging.prefilter_skips,
         )
 
 

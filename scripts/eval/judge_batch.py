@@ -55,6 +55,7 @@ from pathlib import Path
 
 import httpx
 
+from daytrade_it.application.news.mention_prefilter import should_judge
 from daytrade_it.application.news.universe import judgment_input_hash
 from daytrade_it.infrastructure.external.anthropic_client import (
     _MAX_OUTPUT_TOKENS,
@@ -658,6 +659,14 @@ class BatchJudge:
             for k, p in unique.items()
             if failures[k] < MAX_ATTEMPTS and not self.is_cached(p, cached)
         ]
+        # Pre-LLM filter (off by default): drop pairs that can never be a BUY
+        # before they cost anything. Same function the live daemon calls.
+        kept = [p for p in todo if should_judge(p.get("name"), p.get("code"), p.get("title"), None)]
+        prefiltered = len(todo) - len(kept)
+        if prefiltered:
+            self.log(f"prefilter skipped {prefiltered} of {len(todo)} eligible pairs")
+        summary["prefiltered"] = prefiltered
+        todo = kept
         chosen = stratified_sample(todo, sample, stratify, seed)
         requests = [build_request(p, self.model) for p in chosen]
         if calibrate and requests:  # count_tokens is free: also in --dry-run
