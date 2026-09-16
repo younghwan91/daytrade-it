@@ -179,6 +179,8 @@ def load(
                 "alpha": ret - base,
                 "mkt": n.get("mkt_ret"),
                 "pre_move_raw": label.get("pre_move"),
+                "act_min": label["act_min"],
+                "score_raw": v2.get("score") if (v2 := m.get("v2") or {}) else None,
                 "sigma": (s or {}).get("sigma"),
                 "f": features(m, label, s),
             }

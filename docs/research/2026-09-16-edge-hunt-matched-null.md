@@ -5,7 +5,7 @@ Everything ran on simnode in `~/git/daytrade-it-edge` (branch `feat/edge-hunt`),
 - No Anthropic calls, no Toss calls, no Kiwoom calls. Nothing was written outside `data/eval/edge/`.
 - Nothing in `~/git/daytrade-it`, the live daemon or the running backfill was touched.
 
-**Answer, up front.** There is no demonstrated edge in the selection. Against a null matched on the day, the acting minute, the volatility bucket and the liquidity bucket, the whole judged pool is worth **+1.6 bp per pair (se 3.4) over 125 days** — zero, against a round trip that costs 21.5 bp. The dashboard pool's celebrated +18 bp is two-thirds calendar and one-third reconstructed data: on the only two days that are genuine live archive it is **−33.4 bp**. One conditioning rule survives honest validation, it is an exclusion rather than a pick, and it is not nearly large enough to pay for the trade.
+**Answer, up front.** There is no demonstrated edge in the selection. Against a null matched on the day, the acting minute, the volatility bucket and the liquidity bucket, the whole judged pool is worth **+1.6 bp per pair (se 3.4) over 125 days** — zero, against a round trip that costs 21.5 bp. The dashboard pool's celebrated +18 bp is two-thirds calendar and one-third reconstructed data: on the only two days that are genuine live archive it is **−33.4 bp**. One conditioning rule survives the search, it is an exclusion rather than a pick, and it then fails `bayes_judge` at p(μ>0)=0.8635.
 
 The single most useful number in this document is not about selection at all. Buying any top-300 name at the 09:00 open and holding it to the close lost **56.8 bp** per name per day, averaged over 125 days. 42% of our pairs act at that minute. That headwind, not our stock picking, is what the system has been fighting.
 
@@ -234,13 +234,38 @@ Sign is consistent everywhere and the loser ratio improves everywhere. The seven
 
 It is **not** an edge. The kept half still loses 43.8 bp per pair. Alpha at +7.5 ± 4.2 bp is a third of the round trip. This is harm reduction, and it should be adopted as harm reduction or not at all.
 
+#### The adoption verdict: no
+
+Pair-level bp is not what the adoption rule asks about, so `scripts/eval/edge_budget.py` spends both gates through the live capital budget — 100,000 KRW flat notional on at most 5 BUY signals (`score > 0.15`) per day, selected in the live order (earliest acting minute, higher score breaking ties, which is the ordering already known to be 35 bp/trade worse than random and is used here only because candidate and baseline must differ *solely* in the gate). It is a budget model, not the replay engine: no fill model, no VWAP exit, no add-on, no contention, and it should not be read against replay KRW figures.
+
+101 common days. The 5/day cap binds, so both gates take exactly **505 trades** — the gate changes *which* five, not how many.
+
+| | net KRW | trades | losers |
+|---|---:|---:|---:|
+| candidate, cap +1% | **−592,680** | 505 | 322 |
+| baseline, cap +3% (live) | −741,227 | 505 | 330 |
+
+`scripts/eval/bayes_judge.py`:
+
+```
+p_mu_gt_0             0.8635      <- the only failing criterion (needs >= 0.90)
+mu_mean               +623 KRW/day
+days_ge_0             73 / 101    (floor 73)              pass
+worst_day_candidate   -60,955  =  worst_day_baseline      pass
+loser_ratio           0.6376   <=  0.6535                 pass
+adopt                 false
+reasons               ["p_mu_gt_0=0.8635 < 0.90"]
+```
+
+**Three of four criteria pass and the fourth misses at 0.8635.** So the verdict on the only survivor of the whole search is: **not adopted**, narrowly, on 101 days. It improves the worst day not at all and the loser ratio by 1.6 points. If it is taken up anyway it should be as a config change justified by the 6/6-month sign stability of the excluded half, with the failed adoption test stated alongside — not as an edge.
+
 There is a second, smaller directional finding inside the same table that the current one-sided cap ignores: the **down** buckets are the good ones. `< −3%` has the best net of any bucket (−21.1) and positive alpha in 5 of 6 months. The live filter only refuses upward extension; a version that also *prefers* weakness is untested and is the natural next hypothesis, stated here so that it is pre-registered rather than mined later.
 
 ### 4.5 Ranked list of everything tested
 
 | rank | conditioning | verdict |
 |---|---|---|
-| 1 | **pre-entry move ≤ +1%** | survives — monotone, exclusion side negative 6/6 months, transfers in sign to the dashboard. Harm reduction of 17.5 bp, not an edge. |
+| 1 | **pre-entry move ≤ +1%** | survives the scan — monotone, exclusion side negative 6/6 months, transfers in sign to the dashboard — and then **fails `bayes_judge` at p(μ>0)=0.8635**. Harm reduction of 17.5 bp per pair, not an edge, not adopted. |
 | 2 | publisher / wire (`특징` −31.1 alpha 0/7 months, `윤서` −48.8 1/7) | exclusion-only, n = 1,290–1,529, no positive counterpart. Worth a prefilter line, not a strategy. |
 | 3 | title tag (`오늘의 IR` −73.6, `오늘의 주요공시` −36.2, `표` +22.3) | the big positive (`표`) is 3/7 months and is the same anti-correlated tail the oracle mining already warned about. Exclusions only. |
 | — | sector | **fails** — best training sectors transfer 2/5 folds; `건설` +30.2 and `보험` +27.1 have se 19 and 16. |
@@ -306,4 +331,7 @@ uv run python scripts/eval/edge_cond.py   --dump data/eval/edge/rows_sweep.jsonl
 uv run python scripts/eval/edge_folds.py  --rows data/eval/edge/rows_sweep.jsonl
 uv run python scripts/eval/edge_regime.py
 uv run python scripts/eval/edge_gate.py   --rows data/eval/edge/rows_sweep.jsonl --label "SWEEP 125d"
+uv run python scripts/eval/edge_budget.py --rows data/eval/edge/rows_sweep.jsonl
+uv run python scripts/eval/bayes_judge.py --candidate data/eval/edge/budget_candidate.json \
+                                          --baseline  data/eval/edge/budget_baseline.json
 ```
