@@ -31,9 +31,24 @@ than we have been treating it.
 through 09-15.
 
 Trading days where both pools are present: **10** — 09-01, 09-03, 09-04, 09-07, 09-08, 09-09,
-09-10, 09-11, 09-14, 09-15. Excluded: weekends (09-05, 06, 12, 13), 09-16 (the sweep has not
-run), and **09-02, where kr_quant holds no dashboard article at all** — a one-day collection
-gap worth someone checking separately.
+09-10, 09-11, 09-14, 09-15. Weekends and 09-16 (sweep not yet run) are excluded.
+
+**Correction to an earlier note of mine.** I first read 09-02's zero dashboard rows as a one-day
+collector gap. It is not. Every row's `collected_at` is 2026-09-05 22:13 or later, and the
+per-publication-day counts ramp 1, 0, 2, 29, 29, 45, then 129-188 from 09-07:
+
+| pub day | 09-01 | 09-02 | 09-03 | 09-04 | 09-05 | 09-06 | 09-07 | 09-08 | … | 09-15 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| rows | 1 | **0** | 2 | 29 | 29 | 45 | 141 | 159 | … | 176 |
+
+So **the dashboard archive effectively begins 2026-09-07**; 09-01..09-06 are partial artifacts of
+when collection started, not a market signal and not a single dropped day. 09-01/09-03/09-04
+contribute 5 of the 232 dashboard ∩ pool articles between them.
+
+**The effective comparison window is therefore 7 trading days (09-07..09-15), not 10.** The three
+early days survive in the tables below but contribute almost nothing; the day-level `bayes_judge`
+nominally runs on 9 days, of which only 7 carry a meaningful dashboard group. This makes the
+power statement worse, not better, and does not change the direction of any result.
 
 ## 2. Containment: 17% headline, 75% on the assumption that matters
 
