@@ -109,6 +109,21 @@ class TradingLimits:
     exit_check_every: dt.timedelta = dt.timedelta(minutes=1)
     #: Pyramiding: out-of-fold over 6 days with the +3% no-chase cap, +144.9%p
     #: vs +92.4%p without it, better on 5 of 6 days; +1% chosen in 6/6 folds.
+    #: 본절 손절: 한 번 이 이상 올랐던 포지션은 손실로 끝내지 않는다. 되돌아와
+    #: 본전선(진입가 + `breakeven_buffer`)에 닿으면 판다. 사용자 지시
+    #: 2026-09-16 -- 09-16 실매매에서 다섯 종목 모두 +1.51%~+14.19% 까지 갔다가
+    #: 전부 마이너스로 끝났다. None 이면 끔.
+    #: 트레일링(운영 풀 7일에서 +39,915 -> -547)과 달리 진입가 아래로는 자르지
+    #: 않고 이익이 난 뒤에만 켜지므로, 되돌림에 털리는 폭이 훨씬 좁다.
+    breakeven_after_gain: Decimal | None = None
+    #: 왕복 수수료·거래세(매도 ~0.18% + 수수료)를 덮는 만큼 본전선을 올린다.
+    breakeven_buffer: Decimal = Decimal("0.003")
+    #: 주춤 익절: 이익 구간에서 `stall_minutes` 분 동안 고점을 새로 못 쓰면 판다.
+    #: 사용자 지시 2026-09-16 -- "저항에 부딪치거나 주춤거리면 그냥 익절해,
+    #: 오르면 피라미딩이고." 오르는 동안에는 고점이 갱신되어 걸리지 않는다.
+    #: None 이면 끔.
+    stall_exit_min_gain: Decimal | None = None
+    stall_exit_minutes: int = 5
     add_on_min_gain: Decimal | None = Decimal("0.01")
     add_on_price_band: Decimal = Decimal("0.03")
     #: 1,000,000 KRW, user-approved 2026-09-15 for pyramiding. Caps add-ons
@@ -155,6 +170,66 @@ def vwap_exit_hit(
     close = done[-1].close
     hit = close / entry - 1 >= min_gain and close / vwap - 1 < -gap
     return hit, close, vwap
+
+
+def breakeven_stop_hit(
+    bars: list[MinuteBar],
+    entry: Decimal,
+    now: dt.datetime,
+    arm_gain: Decimal,
+    buffer: Decimal,
+) -> tuple[bool, Decimal | None, Decimal | None]:
+    """(hit, peak gain so far, last completed close) for the break-even stop.
+
+    사용자 원칙(2026-09-16): "익절이 될 걸 손실로 바꾸진 않아 절대." 한 번
+    `arm_gain` 이상 올랐던 포지션은 손실로 끝내지 않는다 -- 되돌아와 본전선에
+    닿으면 판다. `buffer` 는 왕복 수수료·세금만큼 본전선을 위로 올려, 본전에
+    팔았는데 실제로는 마이너스가 되는 것을 막는다.
+
+    트레일링과 다른 점: 진입가 아래로는 절대 자르지 않고, 이익이 난 뒤에만
+    켜진다. 완료된 1분봉만 본다(vwap_exit_hit 과 같은 규칙).
+    """
+    minute = now.replace(tzinfo=None, second=0, microsecond=0)
+    done = [b for b in bars if b.ts.time() >= dt.time(9, 0) and b.ts < minute]
+    if not done or entry <= 0:
+        return False, None, None
+    peak = max(b.high for b in done)
+    peak_gain = peak / entry - 1
+    close = done[-1].close
+    if peak_gain < arm_gain:
+        return False, peak_gain, close
+    return close <= entry * (1 + buffer), peak_gain, close
+
+
+def stall_exit_hit(
+    bars: list[MinuteBar],
+    entry: Decimal,
+    now: dt.datetime,
+    min_gain: Decimal,
+    stall_minutes: int,
+) -> tuple[bool, Decimal | None]:
+    """(hit, gain at the last completed close) for the stall / resistance exit.
+
+    사용자 원칙(2026-09-16): "저항에 부딪치거나 주춤거리면 그냥 익절해, 오르면
+    피라미딩이고." 이익 구간에서 고점을 `stall_minutes` 분 동안 새로 못 쓰면
+    움직임이 멈춘 것으로 보고 익절한다. 오르는 동안에는 고점이 계속 갱신되므로
+    걸리지 않는다 -- 그때는 `add_on_hit` 이 피라미딩을 맡는다.
+
+    손실 구간에서는 켜지지 않는다(그쪽은 `breakeven_stop_hit` 과 손절의 몫).
+    완료된 1분봉만 본다.
+    """
+    minute = now.replace(tzinfo=None, second=0, microsecond=0)
+    done = [b for b in bars if b.ts.time() >= dt.time(9, 0) and b.ts < minute]
+    if len(done) <= stall_minutes or entry <= 0 or stall_minutes <= 0:
+        return False, None
+    close = done[-1].close
+    gain = close / entry - 1
+    if gain < min_gain:
+        return False, gain
+    recent = done[-stall_minutes:]
+    earlier_peak = max(b.high for b in done[:-stall_minutes])
+    # 최근 stall_minutes 분 안에 이전 고점을 넘지 못했다 = 주춤.
+    return max(b.high for b in recent) <= earlier_peak, gain
 
 
 def add_on_hit(bars: list[MinuteBar], entry: Decimal, now: dt.datetime, min_gain: Decimal) -> bool:
@@ -437,7 +512,12 @@ class AutoTrader:
     def _early_exits(self, now: dt.datetime) -> None:
         """VWAP-break exits before `flatten_at`; re-price unfilled early sells."""
         lim = self._limits
-        if lim.vwap_exit_gap is None or not self._state.entries:
+        rules_on = (
+            lim.vwap_exit_gap is not None
+            or lim.breakeven_after_gain is not None
+            or lim.stall_exit_min_gain is not None
+        )
+        if not rules_on or not self._state.entries:
             return
         own = self._own_holdings()
         if not own:
@@ -460,9 +540,27 @@ class AutoTrader:
             except Exception:
                 logger.exception("auto_trader: minute bars failed", ticker=ticker)
                 continue
-            hit, close, vwap = vwap_exit_hit(
-                bars, Decimal(entry_limit), now, lim.vwap_exit_gap, lim.vwap_exit_min_gain
-            )
+            entry_px = Decimal(entry_limit)
+            hit, close, vwap = (False, None, None)
+            reason = ""
+            if lim.vwap_exit_gap is not None:
+                hit, close, vwap = vwap_exit_hit(
+                    bars, entry_px, now, lim.vwap_exit_gap, lim.vwap_exit_min_gain
+                )
+                reason = "vwap_break" if hit else ""
+            # 주춤 익절이 본절보다 먼저다: 아직 이익일 때 나가는 쪽이 낫다.
+            if not hit and lim.stall_exit_min_gain is not None:
+                hit, gain = stall_exit_hit(
+                    bars, entry_px, now, lim.stall_exit_min_gain, lim.stall_exit_minutes
+                )
+                if hit:
+                    reason, close = "stall", gain
+            if not hit and lim.breakeven_after_gain is not None:
+                hit, peak_gain, close = breakeven_stop_hit(
+                    bars, entry_px, now, lim.breakeven_after_gain, lim.breakeven_buffer
+                )
+                if hit:
+                    reason, vwap = "breakeven", peak_gain
             if not hit:
                 if (
                     lim.add_on_min_gain is not None
@@ -476,12 +574,16 @@ class AutoTrader:
                 self._record(
                     "exit_signal",
                     ticker=ticker,
-                    reason="vwap_break",
+                    reason=reason,
                     close=str(close),
                     vwap=str(vwap),
                 )
                 logger.info(
-                    "auto_trader: VWAP EXIT", ticker=ticker, close=str(close), vwap=str(vwap)
+                    "auto_trader: EARLY EXIT",
+                    ticker=ticker,
+                    reason=reason,
+                    close=str(close),
+                    vwap=str(vwap),
                 )
                 self._cancel_pending_add_ons(ticker, reason="exit")
                 qty = self._own_holdings_for(ticker) or qty
