@@ -74,6 +74,8 @@ def main() -> None:
     ap.add_argument("--buys-only", action="store_true", help="restrict to the live BUY gate")
     ap.add_argument("--bayes-cut", type=float, help="write bayes_judge day records for this cut")
     ap.add_argument("--out-dir", default="data/eval/edge")
+    ap.add_argument("--days", help="comma-separated subset of days")
+    ap.add_argument("--label", default="")
     args = ap.parse_args()
 
     pct: dict[tuple[str, str], float] = {}
@@ -82,12 +84,15 @@ def main() -> None:
             m = json.loads(line)
             pct[(m["day"], m["code"])] = abs(m["prev_move"])
 
+    keep_days = set(args.days.split(",")) if args.days else None
     rows = []
     with Path(args.rows).open() as f:
         for line in f:
             r = json.loads(line)
             v = pct.get((r["day"], r["code"]))
             if v is None:
+                continue
+            if keep_days and r["day"] not in keep_days:
                 continue
             r["absmove"] = v
             rows.append(r)
@@ -105,7 +110,7 @@ def main() -> None:
 
     cap = args.max_positions
     print(
-        f"\n{len(rows):,} candidates over {len(by_day)} days, "
+        f"\n{args.label}{' — ' if args.label else ''}{len(rows):,} candidates over {len(by_day)} days, "
         f"book capped at {cap}/day{'  (BUY gate only)' if args.buys_only else ''}\n"
     )
     print(

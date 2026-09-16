@@ -316,6 +316,27 @@ Sign is consistent everywhere and the loser ratio improves everywhere. The seven
 
 It is **not** an edge. The kept half still loses 43.8 bp per pair. Alpha at +7.5 ± 4.2 bp is a third of the round trip. This is harm reduction, and it should be adopted as harm reduction or not at all.
 
+#### It does not validate on the pool live trades
+
+Everything above is the **sweep pool**. Five exit families were retracted tonight for passing there and reversing on the dashboard pool, so the candidate was frozen and run on the dashboard days before being proposed. Per pair, all judged dashboard pairs (more power than the 35-trade book), provenance split:
+
+| | n | alpha | se | net |
+|---|---:|---:|---:|---:|
+| all 7 days — all | 579 | +32.3 | 18.7 | +34.9 |
+| calm two-thirds | 385 | **+15.1** | 16.2 | +16.7 |
+| movers third | 194 | **+65.8** | 52.0 | +70.5 |
+| archive 2 days — all | 271 | +19.0 | 17.6 | −33.6 |
+| calm two-thirds | 181 | **+13.2** | 9.5 | −41.0 |
+| movers third | 90 | **+30.3** | 72.1 | −18.9 |
+
+**The sign reverses.** On the sweep pool the movers third is worse; on the dashboard pool it is better, in both the full and archive-only cuts. The book agrees: drop-top-33% takes all-7-days net from +189.5 to +172.0 and archive-only from +347.8 to +152.2.
+
+With n = 194 and 90 and se 52 and 72 bp, this does not *refute* the filter — the difference is inside noise in both directions. But the burden was on the candidate and it did not clear it, and an underpowered test pointing the wrong way is not neutral evidence. Adopting on the sweep-pool result alone would repeat exactly what the five retracted exit families did.
+
+**And the dashboard baselines are themselves unusable.** A 7-day book baseline of +189.5 bp net, and +347.8 bp on **ten** archive-day trades, are not plausible figures; they are the 09:00 batch on a favourable window, which §3.1 showed was +134.8 bp on those days and is a September artifact. The book fills earliest-minute-first, so it loads precisely the trades that artifact inflates.
+
+**The larger point, which outranks the filter.** The dashboard pool cannot currently validate anything: seven days, two real, 35 trades in a capped book, measured against a baseline that is itself an artifact. That is the binding constraint on every candidate this project produces — ahead of labelling, compute or modelling. Twenty real archive days would make it an instrument instead of a rumour, and they accrue at one per trading day for free.
+
 #### The adoption verdict: no
 
 Pair-level bp is not what the adoption rule asks about, so `scripts/eval/edge_budget.py` spends both gates through the live capital budget — 100,000 KRW flat notional on at most 5 BUY signals (`score > 0.15`) per day, selected in the live order (earliest acting minute, higher score breaking ties, which is the ordering already known to be 35 bp/trade worse than random and is used here only because candidate and baseline must differ *solely* in the gate). It is a budget model, not the replay engine: no fill model, no VWAP exit, no add-on, no contention, and it should not be read against replay KRW figures.
@@ -386,7 +407,7 @@ Six cut points were scanned and the best one won. That is a search and it should
 
 | rank | conditioning | verdict |
 |---|---|---|
-| 1 | **drop yesterday's top-third movers** (§4.6) | the strongest candidate here (§4.5). Ten years behind it, three independent routes to the same cut, live-expressible from prior-day bars. Book net +40.8 bp, worst day +371 bp, loser ratio −3.2pt. `bayes_judge` passes p(μ>0)=0.958, worst day and loser ratio; **fails days_ge_0 at 77/125**, so `adopt=false`. |
+| 1 | **drop yesterday's top-third movers** (§4.6) | the strongest strongest sweep-pool candidate here (§4.5) — book net +40.8 bp, worst day +371 bp, `bayes_judge` 3 of 4 — and then **the sign reverses on the dashboard pool**. Not adopted, and not proposed. |
 | 2 | **pre-entry move ≤ +1%** | survives the scan — monotone, exclusion side negative 6/6 months, transfers in sign to the dashboard — and then **fails `bayes_judge` at p(μ>0)=0.8635**. Harm reduction of 17.5 bp per pair, not an edge, not adopted. Note it is intraday-only: the separation is gone by +40d (§8.5), so it does not compose with the multi-day result. |
 | 3 | publisher / wire (`특징` −31.1 alpha 0/7 months, `윤서` −48.8 1/7) | exclusion-only, n = 1,290–1,529, no positive counterpart. Worth a prefilter line, not a strategy. |
 | 4 | title tag (`오늘의 IR` −73.6, `오늘의 주요공시` −36.2, `표` +22.3) | the big positive (`표`) is 3/7 months and is the same anti-correlated tail the oracle mining already warned about. Exclusions only. |

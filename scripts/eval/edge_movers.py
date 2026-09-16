@@ -34,6 +34,12 @@ def main() -> None:
     ap.add_argument("--labels", default="data/eval/prompt_v3/labels.jsonl")
     ap.add_argument("--out", default="data/eval/edge/movers.jsonl")
     ap.add_argument("--size", type=int, default=300)
+    ap.add_argument(
+        "--all-codes",
+        action="store_true",
+        help="rank every traded code, not just the top `size` -- needed for the "
+        "dashboard pool, whose tickers are not confined to the sweep universe",
+    )
     args = ap.parse_args()
 
     days = set()
@@ -67,7 +73,9 @@ def main() -> None:
             ranked = sorted(
                 (c for c, (_o, _c, v) in prev.items() if v > 0),
                 key=lambda c: (-prev[c][2], c),
-            )[: args.size]
+            )
+            if not args.all_codes:
+                ranked = ranked[: args.size]
             moved = sorted(ranked, key=lambda c: -abs(prev[c][1] / prev[c][0] - 1))
             k = len(moved) // 3
             for rank, code in enumerate(moved):
