@@ -138,6 +138,27 @@ def kill_switch_active() -> bool:
     return KILL_SWITCH_PATH.exists()
 
 
+#: scalp-it 수집기가 60 초마다 다시 읽는 핀 목록. 저장 전용이라 그쪽 매매 판단이나
+#: 주문 화이트리스트에는 닿지 않고(그쪽 테스트로 고정), 파일이 없거나 깨져도
+#: 그쪽은 경고만 찍고 지나간다. 우리 쪽 실패도 매매를 막아서는 안 되므로 모든
+#: 예외를 삼킨다 -- 체결 데이터 수집은 있으면 좋은 것이지 매매의 전제가 아니다.
+TICK_PIN_PATH = Path.home() / "git" / "scalp-it" / "data" / "collect_pins_extra.txt"
+_pinned_codes: set[str] = set()
+
+
+def _pin_for_tick_collection(code: str) -> None:
+    """매수 판정이 난 종목을 수집기 핀 목록에 한 번만 덧붙인다."""
+    if code in _pinned_codes:
+        return
+    _pinned_codes.add(code)
+    try:
+        if TICK_PIN_PATH.parent.is_dir():
+            with TICK_PIN_PATH.open("a") as f:
+                f.write(f"{code}\n")
+    except Exception:  # noqa: BLE001 -- 수집 실패가 매매를 멈춰서는 안 된다
+        logger.warning("news_signal_poller: tick pin write failed", code=code)
+
+
 #: 판정 연속 실패가 이만큼 쌓이면 신규 진입을 자동으로 멈춘다. 한 번의 일시적
 #: 오류로 하루를 날리지 않을 만큼 크고, 크레딧 소진·키 만료처럼 계속되는 고장을
 #: 장 초반에 잡을 만큼 작은 값.
@@ -353,6 +374,12 @@ async def process_pair(
     )
     if news_signal is None:
         return
+
+    # 매수 판정이 난 종목을 scalp-it 수집기에 넘겨 체결·호가를 쌓게 한다.
+    # 지금 `ticks`/`quotes` 는 우리가 실제로 산 종목의 21.4% 만 덮고 있어,
+    # 체결강도·호가 잔량이 이 프로젝트에서 유일하게 검증하지 못한 가설로
+    # 남아 있다. 하루 약 20 종목이고 수집기는 60 초마다 이 파일을 다시 읽는다.
+    _pin_for_tick_collection(ticker.value)
 
     try:
         entry_signal = generate_no_chase_confirmation(ticker, broker, db_client, expires_at)
