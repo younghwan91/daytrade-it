@@ -254,24 +254,32 @@ def run(
         op._init_worker(make)
         _init_rows(rws)
 
+    def _report(r: dict, done: int) -> dict:
+        # Per window as it lands, not in one burst at the end: a curve over 30+
+        # windows runs for hours and a pool.map gives no progress signal until
+        # all of them finish, so a stall is indistinguishable from slow work.
+        print(
+            f"[{done}/{len(tasks)}] {r['name']}: train {len(r['train_days'])}d "
+            f"eval {len(r['eval_days'])}d cand={r['oos_candidate_net']:,.0f} "
+            f"base={r['oos_baseline_net']:,.0f} ({r.pop('seconds'):.0f}s)",
+            file=sys.stderr,
+            flush=True,
+        )
+        return r
+
     if jobs <= 1:
         saved, op._ENV = op._ENV, make_env()
         _init_rows(rows)
         try:
-            results = [_run_window(t) for t in tasks]
+            results = [_report(_run_window(t), i + 1) for i, t in enumerate(tasks)]
         finally:
             op._ENV = saved
     else:
         with multiprocessing.Pool(min(jobs, len(tasks)), _init, (make_env, rows)) as pool:
-            results = pool.map(_run_window, tasks, chunksize=1)
-
-    for r in results:
-        print(
-            f"{r['name']}: train {len(r['train_days'])}d eval {len(r['eval_days'])}d "
-            f"cand={r['oos_candidate_net']:,.0f} base={r['oos_baseline_net']:,.0f} "
-            f"({r.pop('seconds'):.0f}s)",
-            file=sys.stderr,
-        )
+            results = [
+                _report(r, i + 1)
+                for i, r in enumerate(pool.imap_unordered(_run_window, tasks, chunksize=1))
+            ]
     summary = aggregate(results)
     out.mkdir(parents=True, exist_ok=True)
     op._dump(out / "windows.json", results)
