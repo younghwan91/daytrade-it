@@ -274,7 +274,7 @@ For completeness, since this is the third independent route to the same place. A
 
 Standard errors on these are 3–8 bp. The score is non-monotone against alpha exactly as it was against raw return, with the ≥0.5 bucket the worst and negative in 5 of 7 months. Nothing here is separable from zero and nothing is remotely near 21.5 bp.
 
-### 4.4 The one survivor
+### 4.4 The survivor of the scan: the pre-entry move
 
 The pre-entry move — `entry / previous close - 1`, a pure decision-time input — is the only axis in the scan that is **monotone across all its buckets**, and it is the exclusion side that is stable.
 
@@ -343,13 +343,53 @@ reasons               ["p_mu_gt_0=0.8635 < 0.90"]
 
 There is a second, smaller directional finding inside the same table that the current one-sided cap ignores: the **down** buckets are the good ones. `< −3%` has the best net of any bucket (−21.1) and positive alpha in 5 of 6 months. The live filter only refuses upward extension; a version that also *prefers* weakness is untested and is the natural next hypothesis, stated here so that it is pre-registered rather than mined later.
 
-### 4.5 Ranked list of everything tested
+### 4.5 The one live-expressible candidate: drop yesterday's biggest movers
+
+Three independent routes arrived at the same line — the ten-year universe table (§7.1, movers third positive in 6 of 121 months), the news-pool horizon split (§8.9, where the multi-day alpha lives entirely in the calm two-thirds), and the dashboard's own profile (§7.1.1). Unlike everything else in this document it has a decade behind it, it needs no new data, and the previous day's bar is available at decision time.
+
+But a filter cannot be judged on the names it removes. The live book is capped at five positions a day, so removing candidates does not shrink the book — it changes **which** names fill it, and this project has twice found a filter whose replacements were worse than what it excluded. `scripts/eval/edge_filter.py` fills the book the live way (earliest acting minute, higher score breaking ties, capped at five) and measures it before and after, restricted to the live BUY gate:
+
+| filter | candidates | book | alpha | net | worst day | losers |
+|---|---:|---:|---:|---:|---:|---:|
+| none (baseline) | 22,690 | 625 | −16.2 | −112.2 | −1,219 | 0.614 |
+| drop top 1% movers | 22,399 | 625 | −8.5 | −103.6 | −1,219 | 0.605 |
+| drop top 5% | 21,497 | 625 | −4.5 | −97.2 | −1,219 | 0.600 |
+| drop top 10% | 20,368 | 625 | −6.3 | −98.0 | −1,219 | 0.592 |
+| drop top 20% | 18,104 | 625 | +3.9 | −87.1 | −1,219 | 0.589 |
+| **drop top 33%** | 15,142 | 625 | **+9.4** | **−71.4** | **−848** | **0.582** |
+| drop top 50% | 11,316 | 625 | −2.9 | −80.9 | −715 | 0.584 |
+
+**The cut is the top third**, removing 33% of candidates and 0% of the book. Net improves 40.8 bp, the worst day improves by 371 bp, and the loser ratio falls 3.2 points.
+
+**The refill is ordinary, and that is the honest mechanism.** 295 slots refill with alpha −5.8 and net −77.6 — the replacements are unremarkable. The entire gain is that what left was much worse than what arrived, not that the filter finds better names. It should be described that way.
+
+#### The adoption verdict
+
+```
+p_mu_gt_0             0.9576     >= 0.90                       PASS
+mu_mean              +1,705 KRW/day
+worst_day_candidate  -42,410  vs baseline -60,955              PASS
+loser_ratio           0.5824  vs baseline  0.6144              PASS
+days_ge_0             77 / 125,  floor ceil(5/7 * 125) = 90    FAIL
+adopt                 false
+```
+
+**Three of four, and the two that pass are the ones the objective weights above expectancy.** This is materially stronger than §4.4's `pre_entry_move ≤ +1%`, which failed p(μ>0) at 0.8635 *and* left the worst day untouched. Here p(μ>0) is 0.958 and the worst day improves by 18,500 KRW.
+
+The failure is consistency: the filter beats the baseline on 62% of days against a required 71%. Worth noting about the rule itself — `days_ge_0` is a consistency criterion, so a change whose gain is concentrated in avoiding bad days will tend to fail it even when it is right on both expectancy and tail. That is a reasonable thing to demand and it is not a complaint, but it means `adopt=false` here does not mean the same thing as `adopt=false` on a candidate that also failed on expectancy.
+
+#### On the post-hoc charge
+
+Six cut points were scanned and the best one won. That is a search and it should be said plainly. The defence is that the top-third cut was **specified in advance** by the ten-year universe analysis — the movers third — before this book simulation existed, and independently reached by the horizon split. Three routes, one cut, named before the test that selected it. Both facts belong on the record and neither cancels the other.
+
+### 4.6 Ranked list of everything tested
 
 | rank | conditioning | verdict |
 |---|---|---|
-| 1 | **pre-entry move ≤ +1%** | survives the scan — monotone, exclusion side negative 6/6 months, transfers in sign to the dashboard — and then **fails `bayes_judge` at p(μ>0)=0.8635**. Harm reduction of 17.5 bp per pair, not an edge, not adopted. |
-| 2 | publisher / wire (`특징` −31.1 alpha 0/7 months, `윤서` −48.8 1/7) | exclusion-only, n = 1,290–1,529, no positive counterpart. Worth a prefilter line, not a strategy. |
-| 3 | title tag (`오늘의 IR` −73.6, `오늘의 주요공시` −36.2, `표` +22.3) | the big positive (`표`) is 3/7 months and is the same anti-correlated tail the oracle mining already warned about. Exclusions only. |
+| 1 | **drop yesterday's top-third movers** (§4.6) | the strongest candidate here (§4.5). Ten years behind it, three independent routes to the same cut, live-expressible from prior-day bars. Book net +40.8 bp, worst day +371 bp, loser ratio −3.2pt. `bayes_judge` passes p(μ>0)=0.958, worst day and loser ratio; **fails days_ge_0 at 77/125**, so `adopt=false`. |
+| 2 | **pre-entry move ≤ +1%** | survives the scan — monotone, exclusion side negative 6/6 months, transfers in sign to the dashboard — and then **fails `bayes_judge` at p(μ>0)=0.8635**. Harm reduction of 17.5 bp per pair, not an edge, not adopted. Note it is intraday-only: the separation is gone by +40d (§8.5), so it does not compose with the multi-day result. |
+| 3 | publisher / wire (`특징` −31.1 alpha 0/7 months, `윤서` −48.8 1/7) | exclusion-only, n = 1,290–1,529, no positive counterpart. Worth a prefilter line, not a strategy. |
+| 4 | title tag (`오늘의 IR` −73.6, `오늘의 주요공시` −36.2, `표` +22.3) | the big positive (`표`) is 3/7 months and is the same anti-correlated tail the oracle mining already warned about. Exclusions only. |
 | — | sector | **fails** — best training sectors transfer 2/5 folds; `건설` +30.2 and `보험` +27.1 have se 19 and 16. |
 | — | market regime (6 features × terciles) | **fails** — all 18 buckets lose, and none moves alpha. |
 | — | volatility quartile, liquidity quartile | **fails** — spread ±14 bp, no monotonicity, s3 is `+++++--`, s2 is `+--+--+`. |
@@ -561,11 +601,46 @@ Three published claims were retracted in one night, and all three failed the sam
 
 ## 8. Persistent news over multi-day horizons
 
+> **Movement pays for the toll somewhere between +5 days and +10 days. Intraday it never does.**
+
+That is the deliverable of this investigation. Everything else in this document is either support for that sentence or a door it closed.
+
 > This is a different strategy from day trading. It should be chosen knowingly, not drifted into. Everything below is a multi-day hold, which the live system cannot currently execute or manage, and which consumes capital across days rather than releasing it at the close.
 
-Two of this project's binding constraints weaken only on a longer horizon, and they are the two that closed off everything else tonight. We are ~21.8 minutes late to every article and most of that lag is upstream of us, so an impulse is unreachable — but if the news has *lasting* impact, arriving late costs little. And the 20 bp sell tax is charged per disposal, so it amortises: the 36.7 bp round trip is 36.7 bp/day at T+0 and 0.9 bp/day at T+40. Neither weakens intraday, which is why §7's arithmetic was closed.
+The crossover, for our judged names minus yesterday's biggest movers (`scripts/eval/edge_curve.py`, `data/eval/edge/holding_curve.csv`). `minutes` is exposure, not calendar — a same-session hold is entered mid-session, so it is only the remaining minutes, and each extra day adds a whole session:
+
+| hold | minutes | alpha | se | cost | **alpha − cost** |
+|---|---:|---:|---:|---:|---:|
+| rest of day | 322 | +4.6 | 4.3 | 36.7 | **−32.1** |
+| +1d | 712 | +14.8 | 11.3 | 36.7 | −21.9 |
+| +2d | 1,102 | +18.5 | 16.4 | 36.7 | −18.2 |
+| +5d | 2,272 | +28.3 | 29.1 | 36.7 | **−8.4** |
+| **+10d** | 4,222 | +46.9 | 46.6 | 36.7 | **+10.2** |
+| +20d | 8,122 | +60.3 | 89.2 | 36.7 | +23.6 |
+| +40d | 15,922 | +134.3 | 76.7 | 36.7 | +97.6 |
+
+The toll is charged once per round trip and does not amortise until the horizon lengthens; the signal grows with horizon. Those two lines cross between 2,272 and 4,222 minutes of exposure. **No point on this curve is statistically significant** — the errors are moving-block bootstrapped at the holding length and the best t is 1.38 — so the crossing is a shape, not a level.
+
+Two of this project's binding constraints weaken only on that side of the crossover. We are ~21.8 minutes late to every article and most of that lag is upstream of us, so an impulse is unreachable — but if the news has *lasting* impact, arriving late costs little. And the sell tax is charged per disposal, so it amortises. Neither weakens intraday, which is why §7's arithmetic was closed.
 
 This is also the first time `persistence` has been scored on a horizon where it could possibly express itself. Every evaluation in this project's history has been same-day — a "structural" judgment has no way to show up by 15:00 on the day of the article — and the prompt that extracts it was validated on 209 pairs over 10 days.
+
+### 8.0 What the net number depends on, in the table rather than in a caveat
+
+`net = alpha + drift − cost`. The alpha term is five months of 2026. The drift term has ten years behind it and **swings enormously by year**, and 2026 is among the worst in the decade. Any net figure taken from this section carries a year range with it, so the range is printed beside it:
+
+Calm two-thirds, alpha from our 86 common days, drift from `edge_years.py` 2016–2026, cost 36.7 bp:
+
+| hold | alpha | drift, decade pooled | drift, worst year | drift, best year | net at pooled | net range across years |
+|---|---:|---:|---:|---:|---:|---|
+| rest of day | +4.6 | −21.8 | −32 (2016) | −13 (2025) | **−53.9** | −64 .. −45 |
+| +2d | +18.5 | −26.0 | −70 (2022) | +16 (2025) | −44.2 | −88 .. −2 |
+| +5d | +28.3 | −26.2 | −118 (2022) | +61 (2025) | −34.6 | −126 .. +53 |
+| +10d | +46.9 | −24.3 | −188 (2022) | +145 (2025) | −14.1 | −178 .. +155 |
+| +20d | +60.3 | −17.5 | −282 (2022) | +354 (2025) | +6.1 | −259 .. +378 |
+| +40d | +134.3 | **+4.3** | **−401 (2022)** | **+827 (2025)** | **+101.9** | **−303 .. +925** |
+
+Read the last row honestly: the same alpha produces −303 bp in a 2022-like year and +925 bp in a 2025-like one. **The multi-day result is a bet on the drift regime at least as much as on the news.** Intraday there is no such ambiguity — the drift is between −13 and −32 bp in all eleven years, which is why §7 closes and this does not.
 
 ### 8.1 Two corrections without which this section would have been wrong
 
@@ -635,7 +710,7 @@ I am flagging that rather than recommending it. It is untested, it rests on the 
 
 ### 8.5 The intraday survivor does not survive
 
-`pre_entry_move ≤ +1%`, the only conditioning that survived §4, is an intraday effect only:
+`pre_entry_move ≤ +1%`, the survivor of §4's scan, is an intraday effect only:
 
 | hold | keep ≤ +1% | drop > +1% | spread |
 |---|---:|---:|---:|
