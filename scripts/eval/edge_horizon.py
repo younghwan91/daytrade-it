@@ -1,34 +1,39 @@
-"""Does holding longer change the sign?
+"""Multi-day outcomes for every judged pair, with a null matched at each horizon.
 
-Cost is charged per round trip, not per day: one buy, one sell, ~36.7 bp,
-whatever the holding period. So a hold of h days pays the same toll spread over
-h days of exposure. That is the one lever that attacks the cost term instead of
-trying to out-earn it, and the data to test it already exists.
+Two of this project's binding constraints weaken only on a longer horizon. We
+are ~21.8 minutes late to every article and most of that is upstream of us, so
+an impulse is unreachable -- but if the news has lasting impact, arriving late
+costs little. And the 20 bp sell tax is charged per disposal, so it amortises
+over days: 36.7 bp is the whole toll at T+0 and 7.3 bp/day at T+5. Neither
+constraint weakens intraday.
 
-For every pair, entry is unchanged -- the same acting minute, the same
-SimBroker quote rule -- and the exit moves to the close of day d+h. The null
-moves with it: the same universe, the same minute, the same horizon, so
-`alpha` stays a like-for-like difference at every h and the day, minute and
-horizon are all differenced out.
+This writes the raw material for that test and nothing else, so the
+conditioning can be done offline without touching the DB again.
 
-The return is composed from two legs rather than read off one price, because
-`minute_bars` is raw and `daily_bars_adjusted` is adjusted -- dividing one by
-the other breaks on any split or dividend in between:
+Entry is unchanged: the same acting minute, the same SimBroker quote rule. The
+exit moves to the close of day d+h. The null moves with it -- same universe,
+same minute, same horizon -- because a longer horizon carries more drift and
+more variance, and a null that did not move with it would turn both into
+"alpha".
+
+Two nulls are emitted per pair per horizon:
+  null_all   the whole top-300 cross-section at that minute
+  null_cell  only the names in the pair's own volatility x liquidity cell
+             (`edge_strata.py`), which is what took the intraday result from
+             +8.1 bp to +1.6 bp -- the difference was composition, not skill
+
+Returns are composed from two legs, not read off one price, because
+`minute_bars` is raw and `daily_bars_adjusted` is adjusted; dividing one by the
+other breaks on any split or dividend in between:
 
     1 + ret_h = (1 + same-day raw return from minute bars)
               * (adjusted close at d+h / adjusted close at d)
 
 Each leg is internally consistent, so the product is split-safe.
 
-Reported per horizon:
-  null    what a universe name earned over the same window   (drift)
-  alpha   what our pairs earned above that                   (selection)
-  net     alpha + null - COST, one round trip                (the trade)
-  /day    net divided by h trading days of capital           (the comparison)
-
-A longer hold that merely rides more drift is not an improvement; the question
-is whether `net` crosses zero and whether `alpha` grows with h, which it would
-if news took longer than a session to be priced.
+Output, one JSON line per pair:
+    key, day, code, act_min, sig_q, val_q,
+    r   {h: return},  na {h: null_all},  nc {h: null_cell}
 
 READ-ONLY on kr_quant.
 """
@@ -47,10 +52,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from edge_db import connect  # noqa: E402
 from edge_null import fetch, trading_days, universe_for  # noqa: E402
 
-BP = 10_000
-#: the round trip this system actually pays -- see edge_cost.py
-COST = 0.00367
 HORIZONS = (0, 1, 2, 5, 10)
+MIN_CELL = 5
 
 
 def daily_closes(cur, lo: dt.date, hi: dt.date) -> dict[dt.date, dict[str, float]]:
@@ -65,12 +68,24 @@ def daily_closes(cur, lo: dt.date, hi: dt.date) -> dict[dt.date, dict[str, float
     return dict(out)
 
 
+def load_strata(path: Path) -> dict[tuple[str, str], tuple[int, int]]:
+    out: dict[tuple[str, str], tuple[int, int]] = {}
+    with path.open() as f:
+        for line in f:
+            s = json.loads(line)
+            out[(s["day"], s["code"])] = (s["sig_q"], s["val_q"])
+    return out
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--labels", default="data/eval/prompt_v3/labels.jsonl")
+    ap.add_argument("--strata", default="data/eval/edge/strata_sweep.jsonl")
+    ap.add_argument("--out", default="data/eval/edge/horizon_pairs.jsonl")
     ap.add_argument("--size", type=int, default=300)
     args = ap.parse_args()
 
+    strata = load_strata(Path(args.strata))
     pairs: dict[dt.date, list[dict]] = defaultdict(list)
     with Path(args.labels).open() as f:
         for line in f:
@@ -86,92 +101,99 @@ def main() -> None:
     prev_of = {d: cal[i - 1] for i, d in enumerate(cal) if i}
     closes = daily_closes(cur, days[0], cal[-1])
 
-    # per (horizon, day): our pairs' returns, and the universe's
-    ours: dict[int, dict[str, list[float]]] = {h: defaultdict(list) for h in HORIZONS}
-    null: dict[int, dict[str, list[float]]] = {h: defaultdict(list) for h in HORIZONS}
-
-    for day in days:
-        prev = prev_of.get(day)
-        if prev is None:
-            continue
-        univ = universe_for(cur, prev, args.size)
-        rows = pairs[day]
-        bars = fetch(cur, day, sorted({r["code"] for r in rows} | set(univ)))
-        i = idx[day]
-        exits = {h: (cal[i + h] if i + h < len(cal) else None) for h in HORIZONS}
-
-        # carry[h][code] = adjusted close at d+h / adjusted close at d
-        today_adj = closes.get(day, {})
-        carry: dict[int, dict[str, float]] = {}
-        for h in HORIZONS:
-            ex = exits[h]
-            px = closes.get(ex, {}) if ex else {}
-            carry[h] = {c: px[c] / today_adj[c] for c in px if c in today_adj and today_adj[c] > 0}
-
-        # The universe null, weighted by how many of OUR pairs used each minute.
-        # Weighting minutes equally would compare a pool that piles 42% of its
-        # pairs on the 09:00 open against an average over the whole session,
-        # and the difference would land in `alpha` as if it were selection.
-        weight: dict[int, int] = defaultdict(int)
-        for r in rows:
-            weight[r["act_min"]] += 1
-        same_day = {c: bars[c] for c in univ if c in bars}
-        for h in HORIZONS:
-            k = carry[h]
-            if not k:
+    out_path = Path(args.out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    n_out = 0
+    with out_path.open("w") as out:
+        for day in days:
+            prev = prev_of.get(day)
+            if prev is None:
                 continue
-            num = den = 0.0
-            for m, w in weight.items():
-                vals = [
-                    (1 + r0) * k[c] - 1
-                    for c, d in same_day.items()
-                    if c in k and (r0 := d.ret(m)) is not None
-                ]
-                if vals:
-                    num += w * statistics.fmean(vals)
-                    den += w
-            if den:
-                null[h][str(day)].append(num / den)
+            ds = str(day)
+            univ = universe_for(cur, prev, args.size)
+            rows = pairs[day]
+            bars = fetch(cur, day, sorted({r["code"] for r in rows} | set(univ)))
+            i = idx[day]
+            today_adj = closes.get(day, {})
 
-        for r in rows:
-            d = bars.get(r["code"])
-            if d is None:
-                continue
-            r0 = d.ret(r["act_min"])
-            if r0 is None:
-                continue
+            # carry[h][code] = adjusted close at d+h / adjusted close at d
+            carry: dict[int, dict[str, float]] = {}
             for h in HORIZONS:
-                k = carry[h].get(r["code"])
-                if k is None:
-                    continue
-                ours[h][str(day)].append((1 + r0) * k - 1)
-        print(f"{day}  pairs={len(rows)}", flush=True)
-    conn.close()
+                ex = cal[i + h] if i + h < len(cal) else None
+                px = closes.get(ex, {}) if ex else {}
+                carry[h] = {
+                    c: px[c] / today_adj[c] for c in px if c in today_adj and today_adj[c] > 0
+                }
 
-    print(f"\ncost per round trip {COST * BP:.1f} bp, charged once at every horizon\n")
-    print(
-        f"{'hold':<10}{'pairs':>9}{'days':>6}{'null':>10}{'se':>7}{'alpha':>9}{'se':>7}"
-        f"{'net':>10}{'net/day':>9}"
-    )
-    for h in HORIZONS:
-        od, nd = ours[h], null[h]
-        common = sorted(set(od) & set(nd))
-        if not common:
-            continue
-        o = [statistics.fmean(od[d]) for d in common]
-        n = [statistics.fmean(nd[d]) for d in common]
-        a = [x - y for x, y in zip(o, n, strict=True)]
-        npairs = sum(len(od[d]) for d in common)
-        se = lambda v: statistics.stdev(v) / (len(v) ** 0.5)  # noqa: E731
-        net = statistics.fmean(o) - COST
-        per = net / max(h, 1)
-        print(
-            f"{('same day' if h == 0 else f'+{h}d'):<10}{npairs:>9,}{len(common):>6}"
-            f"{statistics.fmean(n) * BP:>+10.1f}{se(n) * BP:>7.1f}"
-            f"{statistics.fmean(a) * BP:>+9.1f}{se(a) * BP:>7.1f}"
-            f"{net * BP:>+10.1f}{per * BP:>+9.1f}"
-        )
-    print()
+            members = [c for c in univ if c in bars]
+            cell_of = {c: strata.get((ds, c)) for c in set(members) | {r["code"] for r in rows}}
+            minutes = sorted({r["act_min"] for r in rows})
+
+            # null[h][minute] -> (all, {cell: mean})
+            null: dict[int, dict[int, tuple[float | None, dict[tuple[int, int], float]]]] = {}
+            for h in HORIZONS:
+                k = carry[h]
+                per_min: dict[int, tuple[float | None, dict[tuple[int, int], float]]] = {}
+                for m in minutes:
+                    allv: list[float] = []
+                    by_cell: dict[tuple[int, int], list[float]] = defaultdict(list)
+                    for c in members:
+                        if c not in k:
+                            continue
+                        r0 = bars[c].ret(m)
+                        if r0 is None:
+                            continue
+                        v = (1 + r0) * k[c] - 1
+                        allv.append(v)
+                        cell = cell_of.get(c)
+                        if cell:
+                            by_cell[cell].append(v)
+                    per_min[m] = (
+                        statistics.fmean(allv) if allv else None,
+                        {
+                            cl: statistics.fmean(vs)
+                            for cl, vs in by_cell.items()
+                            if len(vs) >= MIN_CELL
+                        },
+                    )
+                null[h] = per_min
+
+            for r in rows:
+                d = bars.get(r["code"])
+                if d is None:
+                    continue
+                r0 = d.ret(r["act_min"])
+                if r0 is None:
+                    continue
+                cell = cell_of.get(r["code"])
+                rec: dict[str, object] = {
+                    "key": r["key"],
+                    "day": ds,
+                    "code": r["code"],
+                    "act_min": r["act_min"],
+                    "sig_q": cell[0] if cell else None,
+                    "val_q": cell[1] if cell else None,
+                    "pre_move": r.get("pre_move"),
+                }
+                rr, na, nc = {}, {}, {}
+                for h in HORIZONS:
+                    k = carry[h].get(r["code"])
+                    if k is None:
+                        continue
+                    rr[str(h)] = (1 + r0) * k - 1
+                    a, cells = null[h].get(r["act_min"], (None, {}))
+                    if a is not None:
+                        na[str(h)] = a
+                    if cell and cell in cells:
+                        nc[str(h)] = cells[cell]
+                if not rr:
+                    continue
+                rec["r"], rec["na"], rec["nc"] = rr, na, nc
+                out.write(json.dumps(rec) + "\n")
+                n_out += 1
+            print(f"{day}  pairs={len(rows)}  written={n_out}", flush=True)
+    conn.close()
+    print(f"\n{n_out} pairs -> {out_path}")
 
 
 if __name__ == "__main__":
