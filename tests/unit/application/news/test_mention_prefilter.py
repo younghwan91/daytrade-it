@@ -11,8 +11,10 @@ import pytest
 
 from daytrade_it.application.news.mention_prefilter import (
     FANOUT_MAX,
+    INDEX_FANOUT_MIN,
     ROUNDUP_TAGS,
     fanout_max,
+    index_fanout_min,
     prefilter_enabled,
     roundup_tag,
     should_judge,
@@ -144,9 +146,6 @@ class TestFanout:
     combined with the roundup tags skips 22.94% at 0.183% BUY recall loss.
     """
 
-    def test_default_threshold_is_the_adopted_one(self) -> None:
-        assert FANOUT_MAX == 15
-
     def test_unknown_fanout_never_drops(self) -> None:
         """A caller that cannot count related codes must behave as before."""
         assert should_judge(*REAL, None, enabled=True) is True
@@ -226,3 +225,82 @@ class TestFanoutMax:
     def test_explicit_override_wins(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("DAYTRADE_NEWS_PREFILTER_MAX_CODES", "7")
         assert fanout_max(30) == 30
+
+
+class TestIndexCommentary:
+    """Rule 3: an index name in the title of a widely-tagged article.
+
+    `코스피`/`코스닥` in the title of an article Toss tags to >= 5 companies is
+    market-index commentary, not company news. Measured marginally over the
+    roundup + fan-out rules on 97,721 judged pairs: +5.0% of pairs skipped for
+    +0.12% BUY recall loss.
+    """
+
+    def test_index_token_with_wide_fanout_is_skipped(self) -> None:
+        title = "코스피, 7999 찍고 7643 마감…외국인 5.7조 순매도"
+        assert should_judge("삼성전자", "005930", title, "", 9, enabled=True) is False
+
+    def test_kosdaq_counts_too(self) -> None:
+        title = "코스닥 900선 회복…개인 순매수"
+        assert should_judge("에코프로", "086520", title, "", 7, enabled=True) is False
+
+    def test_index_token_on_a_narrow_article_is_judged(self) -> None:
+        """Company news that merely names the index must survive."""
+        title = "한미반도체, 코스피 시총 10위 진입"
+        assert should_judge("한미반도체", "042700", title, "", 2, enabled=True) is True
+
+    def test_wide_fanout_without_an_index_token_falls_to_the_fanout_rule(self) -> None:
+        assert should_judge("삼성전자", "005930", "삼성전자 3조 수주", "", 6, enabled=True) is True
+
+    def test_unknown_fanout_never_fires(self) -> None:
+        title = "코스피, 7999 찍고 7643 마감"
+        assert should_judge("삼성전자", "005930", title, "", None, enabled=True) is True
+
+    def test_reason_names_the_token_and_the_count(self) -> None:
+        assert skip_reason("코스피 급락", 8, enabled=True) == "index:코스피:8"
+
+    def test_fanout_rule_wins_when_both_apply(self) -> None:
+        assert skip_reason("코스피 급락", 40, enabled=True) == "fanout:40"
+
+    def test_off_by_default_switch(self) -> None:
+        assert should_judge("삼성전자", "005930", "코스피 급락", "", 9, enabled=False) is True
+
+
+class TestIndexFanoutMin:
+    def test_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("DAYTRADE_NEWS_PREFILTER_INDEX_MIN_CODES", raising=False)
+        assert index_fanout_min() == INDEX_FANOUT_MIN
+
+    def test_env_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("DAYTRADE_NEWS_PREFILTER_INDEX_MIN_CODES", "3")
+        assert index_fanout_min() == 3
+
+    def test_bad_env_falls_back_to_the_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("DAYTRADE_NEWS_PREFILTER_INDEX_MIN_CODES", "nonsense")
+        assert index_fanout_min() == INDEX_FANOUT_MIN
+
+    def test_explicit_override_wins(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("DAYTRADE_NEWS_PREFILTER_INDEX_MIN_CODES", "3")
+        assert index_fanout_min(99) == 99
+
+    def test_zero_disables_the_index_rule(self) -> None:
+        assert (
+            should_judge(
+                "삼성전자", "005930", "코스피 급락", "", 9, enabled=True, index_min_codes=0
+            )
+            is True
+        )
+
+
+class TestAdoptedThresholds:
+    """The measured constants. A change here changes what live judging spends."""
+
+    def test_fanout_max_is_eleven(self) -> None:
+        assert FANOUT_MAX == 11
+
+    def test_index_fanout_min_is_five(self) -> None:
+        assert INDEX_FANOUT_MIN == 5
+
+    def test_twelve_codes_is_dropped_and_eleven_is_kept(self) -> None:
+        assert should_judge(*REAL, 12, enabled=True) is False
+        assert should_judge(*REAL, 11, enabled=True) is True

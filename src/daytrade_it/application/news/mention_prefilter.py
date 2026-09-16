@@ -20,14 +20,38 @@ one-code articles are 41.3% BUY, >20-code articles 0.07% -- and it is known
 Measured over the same 97,721 pairs, combined with the roundup tags:
 
     N     skip     BUY loss
-    5    40.95%     4.158%
-    8    32.30%     1.325%
-    10   28.46%     0.609%
-    15   22.94%     0.183%   <- adopted (smallest N inside the 0.5% bar)
-    20   16.54%     0.065%
+    5    38.71%     3.211%
+    8    30.32%     0.757%
+    10   26.74%     0.331%
+    11   25.78%     0.254%   <- adopted
+    12   24.65%     0.219%
+    15   22.10%     0.130%
+    20   15.99%     0.065%
 
-Measured with both rules on: **22.94% of pairs skipped, 0.183% BUY (score >
-0.15) recall loss.** Roundup alone is 13.34% / 0.024%.
+A third rule, **index commentary**, catches what fan-out alone misses: an
+index name (`코스피`/`코스닥`) in the title of an article tagged to
+`INDEX_FANOUT_MIN` or more companies is market-wide commentary, not company
+news. Alone, marginally over roundup + fan-out(15): +5.55% of pairs skipped for
++0.219% BUY loss. Its threshold is 5 rather than 3 or 4 because the cheaper
+thresholds cost more BUYs than they buy skips.
+
+Measured with all three rules on (fan-out 11, index 5): **29.00% of pairs
+skipped, 0.373% BUY (score > 0.15) recall loss**, 0.371% weighted by |score|.
+Split in half by publication time the loss is 0.259% (older half) and 0.460%
+(newer half), so the rule set stays inside the 0.5% bar out of sample.
+Roundup alone is 13.34% / 0.024%; roundup + fan-out(15) is 22.10% / 0.130%.
+
+**Rejected candidates**, all measured on the same 97,721 pairs: publisher
+(`source`) -- the worst publisher still converts at 16.0% against a 17.3% base,
+so there is nothing to cut; summary length -- every Toss summary is truncated
+to 101-120 characters, so the feature has no variance; publication hour --
+the overnight block (21:00-06:00) holds 8.5% of pairs but 6.8% of BUYs;
+near-duplicate titles -- same code + normalised title within 24h is only 0.05%
+of pairs, and the loose variant (same title, any code) loses 18.6% of BUYs;
+per-code trailing zero-BUY history -- a 60-day window skips 0.82% of pairs for
+0.822% of BUYs, worse than 1:1. A greedy search over 54 title n-grams was
+rejected outright: fitted on the older half it looked like 0.490% loss and cost
+1.046% on the newer half, i.e. the token picks do not generalise.
 
 `should_judge` reads the **title and the related-code count only** -- never the
 body. Live judging and backtests do not pass the same body text (see the
@@ -84,12 +108,53 @@ PREFILTER_ENABLED = False
 
 _ENV_VAR = "DAYTRADE_NEWS_PREFILTER"
 
-# Articles tagged with more than this many companies are dropped. 15 is the
-# smallest of {5, 8, 10, 15, 20} whose combined BUY recall loss stays inside the
-# 0.5% bar (0.183%; N=10 costs 0.609%). 0 disables the fan-out rule.
-FANOUT_MAX = 15
+# Articles tagged with more than this many companies are dropped. 11 leaves
+# enough of the 0.5% BUY-loss budget for the index rule below; N=10 alone costs
+# 0.331% and would push the three-rule total over the bar on the newer half of
+# the sample. 0 disables the fan-out rule.
+FANOUT_MAX = 11
 
 _FANOUT_ENV_VAR = "DAYTRADE_NEWS_PREFILTER_MAX_CODES"
+
+# Index names. A title naming one of these on an article tagged to
+# INDEX_FANOUT_MIN+ companies is index commentary ("코스피, 7999 찍고 7643
+# 마감…"), which never moves one ticker on its own. Measured at 5 rather than 3
+# or 4: at 3 the extra skip costs more BUYs per point than fan-out does.
+INDEX_TOKENS: frozenset[str] = frozenset({"코스피", "코스닥"})
+
+#: Fan-out floor for the index rule. 0 disables it.
+INDEX_FANOUT_MIN = 5
+
+_INDEX_ENV_VAR = "DAYTRADE_NEWS_PREFILTER_INDEX_MIN_CODES"
+
+
+def index_fanout_min(override: int | None = None) -> int:
+    """The fan-out floor of the index-commentary rule.
+
+    Same contract as :func:`fanout_max`: `override`, then
+    `DAYTRADE_NEWS_PREFILTER_INDEX_MIN_CODES`, then :data:`INDEX_FANOUT_MIN`.
+    A non-integer env value is ignored rather than raising.
+    """
+    if override is not None:
+        return int(override)
+    raw = os.environ.get(_INDEX_ENV_VAR)
+    if raw is not None:
+        try:
+            return int(raw.strip())
+        except ValueError:
+            return INDEX_FANOUT_MIN
+    return INDEX_FANOUT_MIN
+
+
+def index_token(title: str | None, related_count: int | None, floor: int) -> str | None:
+    """The index name that makes this a market-commentary mention, or None."""
+    if floor <= 0 or related_count is None or related_count < floor:
+        return None
+    text = title or ""
+    for token in sorted(INDEX_TOKENS):
+        if token in text:
+            return token
+    return None
 
 
 def fanout_max(override: int | None = None) -> int:
@@ -145,13 +210,15 @@ def skip_reason(
     *,
     enabled: bool | None = None,
     max_codes: int | None = None,
+    index_min_codes: int | None = None,
 ) -> str | None:
     """Why this pair is skipped, or None to judge it.
 
-    `"roundup:<tag>"` or `"fanout:<n>"`, so every skip can be logged with the
-    rule and value that caused it and a drifting publisher tag or an unexpected
-    fan-out distribution shows up in the counters. The roundup rule is checked
-    first, so a roundup that is also wide reports the tag.
+    `"roundup:<tag>"`, `"fanout:<n>"` or `"index:<token>:<n>"`, so every skip
+    can be logged with the rule and value that caused it and a drifting
+    publisher tag or an unexpected fan-out distribution shows up in the
+    counters. The rules are checked most-specific first (roundup, then fan-out,
+    then index), so a pair that trips several reports the narrowest one.
     """
     if not prefilter_enabled(enabled):
         return None
@@ -161,6 +228,9 @@ def skip_reason(
     ceiling = fanout_max(max_codes)
     if ceiling > 0 and related_count is not None and related_count > ceiling:
         return f"fanout:{related_count}"
+    token = index_token(title, related_count, index_fanout_min(index_min_codes))
+    if token is not None:
+        return f"index:{token}:{related_count}"
     return None
 
 
@@ -173,6 +243,7 @@ def should_judge(
     *,
     enabled: bool | None = None,
     max_codes: int | None = None,
+    index_min_codes: int | None = None,
 ) -> bool:
     """True if this (article, ticker) pair is worth spending a judgment on.
 
@@ -185,4 +256,13 @@ def should_judge(
     the filter at all.
     """
     del name, code, body  # title + fan-out only by design; see the module docstring
-    return skip_reason(title, related_count, enabled=enabled, max_codes=max_codes) is None
+    return (
+        skip_reason(
+            title,
+            related_count,
+            enabled=enabled,
+            max_codes=max_codes,
+            index_min_codes=index_min_codes,
+        )
+        is None
+    )
