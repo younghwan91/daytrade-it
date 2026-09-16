@@ -5,7 +5,7 @@ Everything ran on simnode in `~/git/daytrade-it-edge` (branch `feat/edge-hunt`),
 - No Anthropic calls, no Toss calls, no Kiwoom calls. Nothing was written outside `data/eval/edge/`.
 - Nothing in `~/git/daytrade-it`, the live daemon or the running backfill was touched.
 
-**Answer, up front.** There is no demonstrated edge in the selection. Against a null matched on the day, the acting minute, the volatility bucket and the liquidity bucket, the whole judged pool is worth **+1.6 bp per pair (se 3.4) over 125 days** — zero, against a round trip that costs 21.5 bp. The dashboard pool's celebrated +18 bp is two-thirds calendar and one-third reconstructed data: on the only two days that are genuine live archive it is **−33.4 bp**. One conditioning rule survives the search, it is an exclusion rather than a pick, and it then fails `bayes_judge` at p(μ>0)=0.8635.
+**Answer, up front.** There is no demonstrated edge in the selection. Against a null matched on the day, the acting minute, the volatility bucket and the liquidity bucket, the whole judged pool is worth **+1.6 bp per pair (se 3.4) over 125 days** — zero. The bar it has to clear is **about 36.7 bp**, not the 21.5 bp every table in this repo has been netting out (§2.5): the research constant omits spread and slippage entirely and counts commission once instead of twice. The dashboard pool's celebrated +18 bp is two-thirds calendar and one-third reconstructed data; on the only two days that are genuine live archive it is −33.4 bp, and **−48.6 bp** once costed properly. One conditioning rule survives the search, it is an exclusion rather than a pick, and it then fails `bayes_judge` at p(μ>0)=0.8635.
 
 The single most useful number in this document is not about selection at all. Buying any top-300 name at the 09:00 open and holding it to the close lost **56.8 bp** per name per day, averaged over 125 days. 42% of our pairs act at that minute. That headwind, not our stock picking, is what the system has been fighting.
 
@@ -128,6 +128,49 @@ At 632× the sample the baseline is not +1.27%, and it is not positive. The most
 
 ---
 
+## 2.5 The cost floor, which is 15 bp higher than every table in this repo assumes
+
+If the whole question is a few bp of signal against a round trip, the round trip has to be right. `COST = 0.00215` — used by `prompt_ceiling.py`, `prompt_oracle_mine.py`, `prompt_dashboard_fanout.py` and every table above — is not the cost this system pays. It is the 0.20% sell tax plus **one side** of commission, with **no spread and no slippage at all**.
+
+The broker's own model (`krx_quant_core.costs.model`, which `daytrade_it` configures and `PaperBroker` charges) says:
+
+| | tax (sell only) | commission (both sides) | slippage (both sides) | **round trip** |
+|---|---:|---:|---:|---:|
+| 거래소 (81.7% of entries) | 20.0 | 3.0 | 10.0 | **33.0** |
+| 코스닥 (18.3%) | 20.0 | 3.0 | 30.0 | **53.0** |
+| **pool-weighted** | | | | **36.7** |
+| research constant in use | 20.0 | 1.5 | 0.0 | 21.5 |
+| **understated by** | | | | **15.2** |
+
+The slippage line is a configuration choice, so it is worth a second, independent route that no configuration can argue away. A KRX quote moves on a fixed price grid, and crossing a one-tick spread costs exactly one tick per round trip — buy the ask, sell the bid. Measured on the 132,185 actual entry prices:
+
+| market | n | median | mean | p75 | p90 |
+|---|---:|---:|---:|---:|---:|
+| 거래소 | 107,967 | 11.5 | 12.4 | 16.4 | 20.1 |
+| 코스닥 | 24,218 | 12.2 | 12.8 | 16.8 | 19.6 |
+| **pooled** | **132,185** | **11.7** | **12.5** | 16.5 | 20.0 |
+
+tax 20.0 + commission 3.0 + **one tick of spread 12.5 = 35.5 bp**, against the model's 36.7. Two independent routes, 1.2 bp apart. And a one-tick spread is the *floor*: it assumes we never cross a wider book and never move the price, on 100,000 KRW orders placed at the open when the book is thinnest.
+
+**The bar is therefore about 36 bp of selection alpha. The measured selection alpha on this pool is +1.6 bp (se 3.4).** The required signal is roughly twenty times what exists.
+
+Every net figure in this document and in the prompt-v3 and dashboard work is **15.2 bp optimistic**. Restated at the true cost:
+
+| | at COST = 21.5 | **at the real ~36.7** |
+|---|---:|---:|
+| sweep pool, 125 days | −51.9 | **−67.1** |
+| dashboard pool, 7 days | +17.8 | **+2.6** |
+| dashboard BUY, 7 days | +39.4 | **+24.2** |
+| dashboard, archive 2 days | −33.4 | **−48.6** |
+| dashboard BUY, archive 2 days | +1.7 | **−13.5** |
+| pre-move gate, kept half | −43.8 | **−59.0** |
+
+The dashboard pool's headline "+18 bp" is **+2.6 bp** once the trade is costed the way the broker costs it, and the BUY subset on the two genuine archive days goes from +1.7 to **−13.5**. Nothing in this investigation survives the correction, but several things that looked marginal become clearly negative, and the pre-move gate's bayes_judge failure gets worse rather than better.
+
+I have not re-run the tables at 36.7 bp, because the deltas are unaffected — cost cancels in every `alpha` and every D-row, which is exactly why the decomposition was built on differences. Only the `net` columns move, and they move by a constant.
+
+---
+
 ## 3. The structural headwind
 
 `alpha` is flat, so everything the pool earns or loses is the null. The null, by acting minute, over 125 days:
@@ -144,6 +187,25 @@ At 632× the sample the baseline is not +1.27%, and it is not positive. The most
 Monotone, and large. A long-only intraday position opened at the Korean open and held to the close carried a 56.8 bp headwind over this sample, before costs and before any stock is chosen; by the afternoon the headwind is gone. 42% of our pairs act at that worst minute — which is not the same as the 61% whose *article* is pre-market, since a judge backlog can push a pre-market article's decision well into the session.
 
 This is also the mechanical explanation for the `after_10am` result that was correctly retracted as position shrinkage: later entries are not better selections, they are entries into a smaller headwind.
+
+### 3.1 The 09:00 batch effect is calendar, not selection
+
+`rl-builder` found the 09:00–09:01 batch worth +166 bp on the dashboard pool and everything after 10:00 negative. The dashboard pool has 78 pairs at that minute; the sweep pool has 55,308 over 125 days. Ran once, here, as agreed.
+
+| acting minute | n | alpha | net | days ≥ 0 | months |
+|---|---:|---:|---:|---:|---|
+| 10:00–10:59 | 19,438 | +7.9 | −35.5 | 55/125 | `+-++-++` |
+| 09:30–09:59 | 14,091 | +5.2 | −42.1 | 48/125 | `++++--+` |
+| 11:00–12:59 | 12,279 | +2.4 | −24.1 | 51/125 | `+--++-+` |
+| 13:00+ | 14,408 | −0.5 | −16.4 | 42/125 | `+-+-+-+` |
+| 09:01–09:29 | 16,553 | −3.0 | −43.1 | 54/125 | `+-+---+` |
+| **09:00 open** | **55,308** | **−4.8** | **−82.6** | 48/125 | `+++---+` |
+
+On 125 days the open batch is the **worst** bucket on net and the worst on alpha. It is not +166 bp; the sign is reversed.
+
+It is also **not** the reconstructed-day artifact I expected. Splitting the dashboard's own 09:00 batch by provenance gives archive +134.8 bp net (n=13) and reconstructed +128.3 (n=65) — the effect is present in both, so the archive/reconstructed split does not explain it away. What explains it is the window. In the sweep pool, the 09:00 batch on those same five reconstructed days ran +45.2, −215.6, +67.3, +35.7, +114.3 bp per day; September as a whole is −22.8 bp net at the open, and the monthly series is −7.2, −19.7, −108.1, −148.6, −154.0, +7.0, −22.8. The 09-07..09-11 open was an unusually good five-day window in **both** pools.
+
+So the finding is real for those days and does not generalise: 78 pairs on 7 days against 55,308 on 125, pointing opposite ways. `minutes_since_open` having sign stability in the bandit work is consistent with §3 — it is tracking the headwind curve, not a selection signal.
 
 I am flagging this to `rl-builder` rather than acting on it, since buy timing is that lane. The point here is a decomposition, not a proposed feature: **the −52 bp is not bad stock picking. It is a falling universe, a falling time of day, and a 21.5 bp toll.**
 
@@ -298,8 +360,15 @@ Every claim that the live pool differs from the sweep pool rests on **two days**
 **2. Do not buy more Haiku labelling to answer *this* question.**
 The directive says to buy labels rather than accept a thin sample, and that is right in general, but it does not apply to the entry-selection question. The 132,185 already-judged pairs put the whole LLM field block at ±8 bp against a matched null with `score` non-monotone, and the character-n-gram bound on the raw text caps any possible prompt at 1.9% of the oracle gap. Buying labels buys more of a quantity that has now been measured at zero three independent ways, and a fourth measurement against a properly matched null. Labels **are** the binding constraint for the learning curve and for a bandit with enough days; they are not the binding constraint for "does the news tell us which stock to buy".
 
-**3. Attack the 21.5 bp, because the signal is not going to grow to meet it.**
-The entire cross-sectional spread of conditional means found here is roughly ±30 bp, and the honest central estimate of our selection alpha is +1.6 ± 3.4. To be profitable a rule needs about 25 bp. Nothing in the free attribute set is within a factor of three. Two arithmetic levers are larger than any feature found tonight: the 0.20% sell tax is most of the toll and is amortised by holding longer than a day, and the current same-day round trip pays it in full on every entry. A multi-day horizon is a different strategy, but it is the one place where the cost term stops dominating.
+**3. Attack the ~36.7 bp, because the signal is not going to grow to meet it.**
+Per §2.5 the bar is about 36.7 bp, not 21.5, and the honest central estimate of our selection alpha is +1.6 ± 3.4 — a factor of roughly twenty. The entire cross-sectional spread of conditional means found anywhere in §4 is about ±30 bp, so even a perfect, costless selector over the free attribute set would not clear the floor. No feature search can close a gap this size; only the cost term can move.
+
+Where it can move, in order of size:
+- **Slippage, 10–30 bp.** The largest single controllable line, and the one the research constant zeroed. We enter at the 09:00 open with market orders — the thinnest book of the day — and 18.3% of entries are KOSDAQ at triple the KOSPI assumption. Limit orders, or simply not entering in the opening minute, act directly on this. This is also where §3 and this section point at the same change for different reasons.
+- **The 0.20% sell tax, 20 bp.** Irreducible within a same-day round trip and paid in full on every entry. It amortises only over a longer holding period, which is a different strategy, but it is the one place the arithmetic genuinely changes.
+- **KOSDAQ exposure.** 53.0 bp round trip against 33.0 for 거래소. A market filter is worth 20 bp on 18.3% of entries — about 3.7 bp pool-wide — which is small, but it is larger than any selection feature found here and it costs nothing to implement.
+
+The uncomfortable implication is that this is not a modelling problem. At a 36.7 bp floor, same-day long-only news trading on KRX top-300 needs an entry signal stronger than anything in the literature on daily-resolution news features, and the measurement says we have none at all.
 
 **4. Tick and order-book coverage on the names we actually trade.**
 21.4% of our entries have tick data. That is a collection-scope problem, not a modelling one. §3 says the money is in the minute, not the article, and the minute is where we have the least data. Extending tick collection to the traded names is the only proposal here that could plausibly produce 25 bp, and it should be scoped before any further feature search on daily-resolution attributes.
@@ -334,4 +403,12 @@ uv run python scripts/eval/edge_gate.py   --rows data/eval/edge/rows_sweep.jsonl
 uv run python scripts/eval/edge_budget.py --rows data/eval/edge/rows_sweep.jsonl
 uv run python scripts/eval/bayes_judge.py --candidate data/eval/edge/budget_candidate.json \
                                           --baseline  data/eval/edge/budget_baseline.json
+uv run python scripts/eval/edge_cost.py                         # the cost floor (no DB)
 ```
+
+## 8. Coordination
+
+- `rl-builder` confirmed the lane split and supplied two corrections used above: `minute_bars.trade_value` is exactly `close × volume` (a derived column, not exchange-reported 거래대금), and the `ci-local` pre-push hook leaves a worktree HEAD detached — `git rev-parse HEAD origin/<branch> | uniq -c` must print `2` on one line after every push. Their `dash_forward.py` independently found random tickers beating our own pairs (r_close +21 bp vs +11) on the September window, which is the same conclusion as §2.3 from a different direction.
+- The 09:00 batch check in §3.1 was the one the team lead asked to be run once; it was run here and not duplicated.
+- Exit knobs `stop_loss_pct`, `take_profit_pct`, `trail_after_gain`, `stop_orb`, `exit_rule_hit` are **not on main** — any result about them describes a research branch's configuration surface, not live.
+- 2026-09-16 was deliberately **not** added as an archive day: the live scoring path failed 86 times between 09:07 and 14:58 (Anthropic credit exhaustion), leaving 20 judgments against 147 and 144 on the two real days. It is a degraded day and would contaminate exactly the comparison §2.2 rests on.
