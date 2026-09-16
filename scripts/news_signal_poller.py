@@ -98,6 +98,14 @@ def kill_switch_active() -> bool:
     return KILL_SWITCH_PATH.exists()
 
 
+#: 판정 연속 실패가 이만큼 쌓이면 신규 진입을 자동으로 멈춘다. 한 번의 일시적
+#: 오류로 하루를 날리지 않을 만큼 크고, 크레딧 소진·키 만료처럼 계속되는 고장을
+#: 장 초반에 잡을 만큼 작은 값.
+SCORING_FAILURE_LIMIT = 10
+
+_scoring_failures = 0
+
+
 class JudgmentLog:
     """Every (article, ticker) judgment, one JSONL per day.
 
@@ -213,11 +221,34 @@ async def process_pair(
             body=article.summary or article.content,
             category=article.category,
         )
-    except Exception:
+    except Exception as exc:
+        global _scoring_failures
+        _scoring_failures += 1
         logger.exception(
-            "news_signal_poller: scoring failed", article_id=str(article.id), ticker=ticker.value
+            "news_signal_poller: scoring failed",
+            article_id=str(article.id),
+            ticker=ticker.value,
+            consecutive=_scoring_failures,
         )
+        if _scoring_failures == SCORING_FAILURE_LIMIT:
+            # 판정을 못 하면 뉴스 매매의 근거가 없다. 09-16 에는 크레딧이 떨어져
+            # 09:07~14:58 동안 86 건이 실패했는데도 데몬이 조용히 계속 돌았고,
+            # 아무도 장이 끝날 때까지 몰랐다. 신규 진입만 막고 청산은 계속 돈다.
+            KILL_SWITCH_PATH.parent.mkdir(parents=True, exist_ok=True)
+            KILL_SWITCH_PATH.write_text(
+                f"{dt.datetime.now(KST).isoformat()} 판정 연속 실패 "
+                f"{SCORING_FAILURE_LIMIT} 회로 신규 진입을 자동 중단한다.\n"
+                f"마지막 오류: {type(exc).__name__}: {exc}\n"
+                "원인을 고친 뒤 이 파일을 지우면 재개된다.\n"
+            )
+            logger.critical(
+                "news_signal_poller: 판정 연속 실패 -- 신규 진입 중단",
+                consecutive=_scoring_failures,
+                error=f"{type(exc).__name__}: {exc}",
+            )
         return
+
+    globals()["_scoring_failures"] = 0  # 연속 실패만 센다 -- 한 번 성공하면 초기화.
 
     sentiment = features.to_sentiment()
     logger.info(
