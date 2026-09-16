@@ -145,6 +145,7 @@ def main() -> None:
     ap.add_argument("--master", default="data/eval/prompt_v3/master.jsonl")
     ap.add_argument("--sigma", default="data/eval/prompt_v3/sigma.json")
     ap.add_argument("--cell", action="store_true", help="null = own volatility x liquidity cell")
+    ap.add_argument("--movers", help="movers.jsonl from edge_movers.py; adds the split")
     ap.add_argument(
         "--common-days",
         action="store_true",
@@ -160,11 +161,19 @@ def main() -> None:
             m = json.loads(line)
             v2[m["key"]] = m.get("v2") or {}
 
+    movers: dict[tuple[str, str], bool] = {}
+    if args.movers:
+        with Path(args.movers).open() as f:
+            for line in f:
+                m = json.loads(line)
+                movers[(m["day"], m["code"])] = m["movers"]
+
     rows = []
     with Path(args.pairs).open() as f:
         for line in f:
             r = json.loads(line)
             r["v2"] = v2.get(r["key"], {})
+            r["movers"] = movers.get((r["day"], r["code"]))
             rows.append(r)
 
     # A +40d exit needs 40 trading days of future, which only the early days
@@ -242,6 +251,23 @@ def main() -> None:
         cells = "".join(f"{v * BP:>+8.0f}" if v is not None else f"{'.':>8}" for v in per_month)
         print(f"    {label:<10}{pooled * BP:>+9.1f}  {cells}   {marks}/{have}")
     print()
+
+    if args.movers:
+        print("=== 4b. dropping yesterday's movers, inside our own universe\n")
+        print(
+            "    The universe work says the movers third drifts -42.0 bp against -21.8\n"
+            "    for the calm two-thirds, holding in 115 of 121 months. These are names\n"
+            "    we already judge, so this needs no transfer assumption and no new\n"
+            "    labelling -- unlike moving to a different turnover rank.\n"
+        )
+        for label, want in (("calm two-thirds", False), ("movers third", True)):
+            sel = [r for r in rows if r.get("movers") is want]
+            print(f"{label}  (n={len(sel):,})\n" + HEAD)
+            for h in HORIZONS:
+                print(
+                    row("same day" if h == "0" else f"+{h}d", summarise(sel, h, args.cell, sigma))
+                )
+            print()
 
     print("=== 5. the intraday survivor at longer horizons: pre-entry move <= +1%\n")
     for label, sel in (

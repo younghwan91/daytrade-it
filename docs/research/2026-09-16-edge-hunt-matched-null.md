@@ -606,10 +606,75 @@ The strategy class **does not close**, which is a different answer from every ot
 
 - Alpha grows with horizon, in bp and in σ. Not significant at any horizon once window overlap is honestly priced.
 - `persistence` orders that growth correctly at all seven horizons, 4/5 to 5/5 months. This is the first time an LLM judgment field has earned anything in this project.
-- Long-only it still loses at every horizon, because the market drift grows faster than the alpha.
+- Long-only it lost at every horizon **in this sample**, because the 2026 drift grew faster than the alpha — but §8.8 shows that drift is regime, not structure, and the decade-typical +40d drift for the calm two-thirds is +4.3 bp rather than −697.
 - Hedged, the arithmetic would be positive on these point estimates — and those point estimates rest on two independent windows.
 
 So: not demonstrated, and not excluded. That is genuinely different from the intraday case, where the confidence interval excludes anything tradeable. The next step is not to build it; it is to measure it on a longer history, where the 40-day window has enough independent observations to carry a standard error. `daily_bars_adjusted` reaches back to 2016-09-09, so the drift and the horizon arithmetic can be extended immediately — but the `persistence` labels only exist for 2026-03..09, and extending those is the one place in this project where buying more Haiku labelling would answer the question that is actually open.
+
+---
+
+### 8.8 Addendum: ten years of the drift term, and what it does to §8.4
+
+§8.4 concluded that a multi-day hold loses because the drift term swamps the alpha — `structural` at +40d had alpha +247.0, null ≈ −697, and net −486.9. That null was measured on 2026-03..07. Per §7.3's own rule, it needed checking on a decade before it could carry a conclusion, and it does not survive.
+
+`scripts/eval/edge_years.py`, equal-weight, open of day *d* to close of day *d+h*, **2,454 days by year**. (069500 is absent from `daily_bars_adjusted` and `sector_index` begins 2024-01-26, so "all traded codes" stands in for the market and is labelled as the proxy it is.)
+
+| | 2016 | 2017 | 2018 | 2019 | 2020 | 2021 | 2022 | 2023 | 2024 | 2025 | 2026 | pooled | se |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| **all, same day** | −9 | −8 | −5 | −5 | −0 | −5 | −8 | −3 | −9 | −7 | −24 | **−6.8** | 2.4 |
+| **top300, same day** | −34 | −25 | −24 | −31 | −28 | −24 | −33 | −27 | −32 | −20 | −44 | **−28.6** | 2.6 |
+| **movers, same day** | −39 | −41 | −28 | −39 | −46 | −34 | −47 | −45 | −43 | −36 | −71 | **−42.0** | 3.3 |
+| **calm, same day** | −32 | −17 | −22 | −26 | −20 | −20 | −27 | −17 | −26 | −13 | −31 | **−21.8** | 2.5 |
+| all, +40d | −107 | +216 | −39 | +18 | +776 | +170 | −161 | +108 | −148 | +436 | −366 | **+116.5** | 17.9 |
+| top300, +40d | −468 | +101 | −360 | −351 | +534 | −264 | −479 | −32 | −238 | +689 | −313 | −73.2 | 19.7 |
+| movers, +40d | −663 | −58 | −406 | −417 | +477 | −309 | −637 | −202 | −478 | +413 | −780 | **−228.1** | 22.3 |
+| **calm, +40d** | −369 | +181 | −337 | −318 | +562 | −242 | −401 | +53 | −118 | +827 | −79 | **+4.3** | 19.3 |
+
+Two facts, pointing opposite ways:
+
+**1. The intraday drift is structural.** Every universe is negative in **11 of 11 years**, with our top-300 between −20 and −44 bp every single year. §7's conclusion rests on the one thing in this investigation that genuinely does not move. That is now settled.
+
+**2. The multi-day drift is not structural — it is regime, and 2026 is among the worst years in the decade.** At +40d the market proxy swings from −366 (2026) to +776 (2020), pooling to **+116.5**. Our own top-300 pools to −73.2 with a −479..+689 range. So §8.4's "the drift swamps the alpha" was a statement about the sample, not about multi-day holding.
+
+**3. And the screen's penalty compounds with horizon.** The gap between our top-300 and the market proxy is −21.8 bp same-day and **−189.7 bp at +40d**. Choosing a momentum screen costs little intraday and a great deal over weeks. The calm two-thirds at +40d drifts **+4.3 bp** over the decade — essentially zero — against −228.1 for the movers third, a 232 bp separation.
+
+### 8.9 The same split, measured directly inside our own pool
+
+§8.8's split is a property of the universe. Whether it survives *our selection* is a separate question, and it can be answered without any transfer assumption or new labelling, because both groups are names we already judge. `--movers` on `edge_persist.py`, same 86 common days, same matched null, same block bootstrap:
+
+| hold | **calm two-thirds** (n=69,041) | | | | **movers third** (n=18,270) | | | |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| | alpha | net/day | worst day | losers | alpha | net/day | worst day | losers |
+| same day | +4.6 | −72.1 | −569 | 0.641 | +7.5 | −94.9 | −766 | 0.637 |
+| +2d | +18.5 | −43.3 | −1,003 | 0.597 | +19.3 | −68.7 | −1,253 | 0.624 |
+| +5d | +28.3 | −24.8 | −1,372 | 0.592 | +6.1 | −48.6 | −1,938 | 0.625 |
+| +10d | +46.9 | −18.4 | −1,794 | 0.608 | −7.0 | −39.9 | −2,503 | 0.676 |
+| +20d | +60.3 | **−8.7** | −2,018 | 0.602 | −84.2 | −28.9 | −3,638 | 0.695 |
+| +40d | +134.3 | −12.9 | −3,036 | 0.660 | **−156.0** | −32.9 | −4,737 | **0.767** |
+
+**The multi-day alpha lives entirely in the calm two-thirds.** Its alpha grows monotonically at every horizon (+4.6 → +134.3) while the movers third turns negative from +10d onward and reaches −156.0. The movers third is worse on every dimension at every horizon — alpha, net per capital-day, worst day, and loser ratio (0.767 vs 0.660 at +40d).
+
+This is the same finding as §7.1's screen result, arriving independently through the news pool, and it is the one recommendation in this document that requires no new data, no new labelling, and no transfer assumption: **yesterday's movers should not be bought, and the reason to exclude them gets stronger the longer you intend to hold.**
+
+### 8.10 The counterfactual, stated as a counterfactual
+
+Putting §8.8 and §8.9 together gives the first positive number this investigation has produced, and it needs its caveats attached to it rather than following it.
+
+For the calm two-thirds at +40d, using the decade-typical drift instead of 2026's:
+
+```
+alpha   +134.3   measured on our pool, 86 common days, se 76.7  (t = 1.75)
+null      +4.3   the calm two-thirds' +40d drift, 2016-2026, se 19.3
+cost     -36.7   one round trip
+        --------
+net     +101.9   per trade over 40 trading days  =  +2.5 bp per capital-day
+```
+
+**Why this is not a result.** It composes an alpha measured over five months of 2026 with a drift measured over a decade — legitimate as arithmetic, but the two terms come from different populations and the alpha term has roughly **two independent 40-day windows** behind it. The drift term ranges from −369 to +827 by year, so "decade-typical" describes no actual year. And `structural` at +40d would give a larger number still (+247.0 alpha), on even less data.
+
+**What it does establish.** The sign of the project's arithmetic is no longer determined by structure. Intraday it is: the drift is negative in 11 of 11 years and no conditioning reaches the toll, so §7 stands. Multi-day it is determined by the sample, and on a decade of drift the terms are close enough together that the answer depends on an alpha we have measured for five months.
+
+That is what makes the labelling question in §8.7 worth funding rather than a hunch: it is the only term in this sum we do not have a decade of.
 
 ---
 
@@ -639,6 +704,14 @@ uv run python scripts/eval/edge_budget.py --rows data/eval/edge/rows_sweep.jsonl
 uv run python scripts/eval/bayes_judge.py --candidate data/eval/edge/budget_candidate.json \
                                           --baseline  data/eval/edge/budget_baseline.json
 uv run python scripts/eval/edge_cost.py                         # the cost floor (no DB)
+uv run python scripts/eval/edge_spread.py                       # measured touch, by market and hour
+uv run python scripts/eval/edge_universe.py --start 2016-09-12  # ten years, by month
+uv run python scripts/eval/edge_years.py                        # ten years, by year and horizon
+uv run python scripts/eval/edge_horizon.py                      # -> horizon_pairs.jsonl
+uv run python scripts/eval/edge_movers.py                       # -> movers.jsonl
+uv run python scripts/eval/edge_persist.py --cell --common-days \
+    --movers data/eval/edge/movers.jsonl
+uv run --with pytest --with pytest-cov pytest tests/unit/test_eval_costs.py --no-cov
 ```
 
 ## 10. Coordination
