@@ -561,3 +561,44 @@ def test_retry_after_seconds_falls_back_when_the_header_is_missing_or_junk() -> 
     assert retry_after_seconds(httpx.Response(429, headers={"retry-after": "12"}), 60.0) == 12.0
     assert retry_after_seconds(httpx.Response(429), 60.0) == 60.0
     assert retry_after_seconds(httpx.Response(429, headers={"retry-after": "soon"}), 60.0) == 60.0
+
+
+# --- --collect-only: bank what is already paid for, submit nothing -------------
+
+
+def _stopped_run(tmp_path: Path) -> CrashOnSecondCreate:
+    """A run whose first chunk got a batch and whose second chunk never did."""
+    api = CrashOnSecondCreate()
+    with pytest.raises(SubmitUncertain):
+        _judge(tmp_path, api, chunk=2).run(
+            [_pair(i) for i in range(4)], sample=4, stratify=["month"], seed=1
+        )
+    assert len(api.created) == 1
+    api.crash = False
+    return api
+
+
+def test_collect_only_collects_pending_batches_and_submits_nothing(tmp_path: Path) -> None:
+    api = _stopped_run(tmp_path)
+    summary = _judge(tmp_path, api, chunk=2).run(
+        [], sample=0, stratify=["month"], seed=1, collect_only=True
+    )
+    assert len(api.created) == 1  # the unsubmitted chunk stays unsubmitted
+    assert summary["submitted"] == 0 and summary["succeeded"] == 2
+    keys = {json.loads(line)["key"] for line in (tmp_path / "cache.jsonl").open()}
+    submitted = {r["custom_id"] for r in api.created[0]["requests"]}
+    assert {custom_id_of(k) for k in keys} == submitted
+    state = json.loads((tmp_path / "state.json").read_text())
+    assert state["run"]["completed"] is False  # the rest can still be submitted later
+    assert all(b["processed"] for b in state["batches"])
+
+
+def test_collect_only_is_idempotent_and_reads_no_pairs(tmp_path: Path) -> None:
+    api = _stopped_run(tmp_path)
+    _judge(tmp_path, api, chunk=2).run([], sample=0, stratify=["month"], seed=1, collect_only=True)
+    rows = len(list((tmp_path / "cache.jsonl").open()))
+    summary = _judge(tmp_path, api, chunk=2).run(
+        [], sample=0, stratify=["month"], seed=1, collect_only=True
+    )
+    assert summary["succeeded"] == 0  # nothing left unprocessed
+    assert len(list((tmp_path / "cache.jsonl").open())) == rows

@@ -539,6 +539,27 @@ class BatchJudge:
 
     # --- orchestration ------------------------------------------------------------
 
+    def collect_pending(self) -> dict:
+        """Collect every batch not processed yet; submit nothing.
+
+        For a run stopped by something a resubmit cannot fix (credit exhausted,
+        a pricing surprise): the batches already created are paid for, so their
+        results are banked, while the unsubmitted chunks stay unsubmitted and
+        the run stays incomplete for a later resume.
+        """
+        summary: dict = {
+            "resumed": 1,
+            "submitted": 0,
+            "succeeded": 0,
+            "failed": 0,
+            "collect_only": True,
+        }
+        for entry in [b for b in self._load_state()["batches"] if not b["processed"]]:
+            ok, bad = self.collect(entry)
+            summary["succeeded"] += ok
+            summary["failed"] += bad
+        return summary
+
     def run(
         self,
         pairs: list[dict],
@@ -549,6 +570,7 @@ class BatchJudge:
         dry_run: bool = False,
         calibrate: int = 0,
         new_run: bool = False,
+        collect_only: bool = False,
     ) -> dict:
         """Draw + persist a sample, submit its chunks, collect. Reruns continue the stored run.
 
@@ -556,8 +578,11 @@ class BatchJudge:
         submit). A rerun with an incomplete run submits only chunks that have no
         batch yet and collects unprocessed batches -- the CLI's sample/seed are
         ignored then. A completed run blocks a fresh sample unless `new_run`.
+        `collect_only` banks the batches already created and submits nothing.
         """
         summary: dict = {"resumed": 0, "submitted": 0, "succeeded": 0, "failed": 0}
+        if collect_only:
+            return self.collect_pending()
         state = self._load_state()
         run = state.get("run")
         if run and not run.get("completed"):
@@ -694,9 +719,9 @@ def api_key_for(
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--pairs", type=Path, required=True)
-    ap.add_argument("--budget-usd", type=float, required=True)
-    ap.add_argument("--sample", type=int, required=True)
+    ap.add_argument("--pairs", type=Path)
+    ap.add_argument("--budget-usd", type=float)
+    ap.add_argument("--sample", type=int)
     ap.add_argument("--stratify", default="month,sector,session")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--model", default=DEFAULT_MODEL, help="live judge's Haiku 4.5 snapshot")
@@ -718,11 +743,25 @@ def main() -> None:
         action="store_true",
         help="draw a fresh sample even though the state file holds a completed run",
     )
+    ap.add_argument(
+        "--collect-only",
+        action="store_true",
+        help="collect the batches already created and submit nothing (no spend, no --pairs read)",
+    )
     args = ap.parse_args()
+    if not args.collect_only:  # a collect spends nothing and touches no pair
+        missing = [f for f in ("pairs", "budget_usd", "sample") if getattr(args, f) is None]
+        if missing:
+            ap.error("required unless --collect-only: " + ", ".join(f"--{m}" for m in missing))
     if not args.model.startswith("claude-haiku-4-5"):
         sys.exit(f"model must be Haiku 4.5 (plan Global Constraints), got {args.model}")
 
-    pairs = [json.loads(line) for line in args.pairs.open() if line.strip()]
+    # --collect-only touches no pair: skip reading the (large) pairs file entirely
+    pairs = (
+        []
+        if args.collect_only
+        else [json.loads(line) for line in args.pairs.open() if line.strip()]
+    )
     with httpx.Client() as client:
         judge = BatchJudge(
             client=client,
@@ -731,7 +770,7 @@ def main() -> None:
             cache=args.cache,
             errors=args.errors,
             state=args.state,
-            budget_usd=args.budget_usd,
+            budget_usd=args.budget_usd or 0.0,
             chars_per_token=args.chars_per_token,
             est_output_tokens=args.est_output_tokens,
             chunk=args.chunk,
@@ -741,12 +780,13 @@ def main() -> None:
                 judge.adopt_batch(args.adopt_batch)
             summary = judge.run(
                 pairs,
-                sample=args.sample,
+                sample=args.sample or 0,
                 stratify=[f for f in args.stratify.split(",") if f],
                 seed=args.seed,
                 dry_run=args.dry_run,
                 calibrate=args.calibrate,
                 new_run=args.new_run,
+                collect_only=args.collect_only,
             )
         except (BudgetExceeded, SubmitUncertain) as exc:
             sys.exit(f"ABORT: {exc}")
