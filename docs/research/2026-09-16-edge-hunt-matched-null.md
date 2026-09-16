@@ -322,6 +322,8 @@ Frozen transfer to the dashboard pool, which none of this was fitted on (`--rows
 
 Sign is consistent everywhere and the loser ratio improves everywhere. The seven-day standard errors are 17–27 bp, so this transfer is corroboration, not evidence.
 
+**Read §4.7 before applying this.** The result below is *same-day*, and the sign of `pre_move` inverts across the middle of its range at multi-day horizons. Anyone who takes "tighter no-chase is better" from here into a multi-day design will have it backwards.
+
 **What this is and is not.** It is a real, sign-stable, free exclusion: the half of the pool that has already run up more than 1% is worth −18.4 bp of alpha and is negative in **6 of 6 months**. Tightening the live `MAX_PRE_ENTRY_MOVE` from 3% to 1% improves net by 17.5 bp per pair and the loser ratio slightly, and it replaces a value that was chosen by leave-one-day-out on six days — the methodology this session has banned — with one chosen on 101 days under monthly time-ordered sign stability.
 
 It is **not** an edge. The kept half still loses 43.8 bp per pair. Alpha at +7.5 ± 4.2 bp is a third of the round trip. This is harm reduction, and it should be adopted as harm reduction or not at all.
@@ -430,6 +432,58 @@ Six cut points were scanned and the best one won. That is a search and it should
 | — | session, weekday, market (거래소/코스닥) | **fails** — all within ±10 bp, no month stability. |
 | — | every v2 LLM field | **fails** — all within ±8 bp against the matched null; `score` non-monotone. |
 | — | greedy best gate / best-3 union from history | **fails badly** — worse than the base pool on net, worst day and loser ratio. |
+
+---
+
+### 4.7 "No-chase" is two rules with opposite signs
+
+This has its own section because reading §4.4 alone and then designing a multi-day strategy gets the sign backwards, and that is a foreseeable and expensive misreading.
+
+Alpha in bp by pre-article move, across the full range including the region live refuses, 91,914 pairs with a known prior close over 84 common days (`scripts/eval/edge_nochase.py`):
+
+| pre_move bucket | n | **same day** | +2d | +5d | **+10d** | +40d | months (d0) |
+|---|---:|---:|---:|---:|---:|---:|---|
+| −inf .. −3.0% | 13,414 | **+21** | −35 | −74 | **−128** | −304 | `+++++` |
+| −3.0 .. −1.0% | 14,156 | +9 | +8 | +5 | +10 | −49 | `++--+` |
+| −1.0 .. +0.3% | 17,388 | +4 | −1 | +1 | +11 | +5 | `+--++` |
+| +0.3 .. +1.0% | 9,375 | +5 | +11 | +41 | **+46** | +117 | `-+-++` |
+| +1.0 .. +2.0% | 10,823 | −3 | +16 | +39 | **+45** | +23 | `--+-+` |
+| +2.0 .. +3.0% | 7,432 | −28 | +6 | +6 | +7 | +56 | `-----` |
+| +3.0 .. +5.0% | 8,211 | −9 | −29 | +29 | +39 | +99 | `---+-` |
+| +5.0% .. | 11,115 | **−37** | −50 | −72 | **−110** | −67 | `--+--` |
+
+**Same day the response is monotone decreasing**: the further a name has already run, the worse it does. Tighter no-chase is better, which is §4.4's finding.
+
+**Multi-day it inverts across the middle of the range.** Names that fell hardest are the *worst* at +10d (−128 bp), and mild-to-moderate up-moves are the *best* (+45 to +46). The same variable that says "avoid what has risen" at a session horizon says "prefer what has risen modestly" at ten days.
+
+Only the extreme holds its sign: above +5% is negative at every horizon.
+
+So `pre_move` is not one rule. It is a same-day mean-reversion signal and a multi-day momentum signal wearing the same name, and which one applies depends entirely on how long the position is meant to live. Any future use of it has to state the horizon it was fitted at.
+
+#### The filter itself is safe, and safe for an unusual reason
+
+| cut | kept % | kept alpha d0 | removed d0 | kept +10d | removed +10d |
+|---|---:|---:|---:|---:|---:|
+| ≤ 0% | 44.7% | +9.6 | −9.8 | −6.1 | −0.4 |
+| ≤ 1% | 59.1% | +11.0 | −17.4 | +8.9 | −3.1 |
+| ≤ 2% (as fitted) | 70.9% | +9.4 | −24.2 | **+28.4** | −26.7 |
+| ≤ 3% (**live now**) | 79.0% | +6.8 | −23.5 | **+30.2** | −36.7 |
+| ≤ 5% | 87.9% | +8.5 | −37.4 | **+30.5** | −109.6 |
+
+Every cut removes a negative-alpha population at both horizons, so there is no line at which the filter discards something that works. And between 2% and 5% the kept alpha is **flat** (+28.4 / +30.2 / +30.5 at +10d).
+
+That flatness is worth stating positively rather than as an absence of harm. `MAX_PRE_ENTRY_MOVE` was set to 2% on 209 pairs over 10 days, then raised to 3% on six days of leave-one-day-out — a fitting procedure this investigation has otherwise spent the night discrediting. It survives not because the fit was good but because **it landed in a plateau**, so the fragility of the procedure did not propagate into the result. It is rare to be able to report a hand-set constant as safe *because* the surface is flat, and it is the honest reason to leave it alone rather than re-fit it, which would be optimising noise.
+
+#### And the hypothesis this was built to test is refuted
+
+The proposal was that the pool's alpha lives in names that gap and run, so the no-chase filter removes the only part that works. It conflates two variables:
+
+- `pre_move` — entry versus the *prior* close, what the filter sees
+- **never dipped** — never traded a tick below entry *after* the decision minute, the +246 bp population from §8.11's fill split
+
+If they were the same names, "never dipped" would concentrate at high `pre_move`. It does not: **2.1% to 4.1% in every bucket, with no trend** — 3.6% in the +5% bucket against 3.8% in the −3% bucket. A name that gapped up is no likelier to be one a resting bid misses than a name that gapped down. The inference never had a bridge.
+
+Buyability was measured anyway, since it was the stated crux: the rejected region fills at **96–98%** with a resting bid. Those names are perfectly purchasable. They simply do not pay — which closes the escape hatch where someone later argues the filter is protecting us from something unbuyable.
 
 ---
 
