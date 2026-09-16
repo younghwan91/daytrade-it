@@ -172,12 +172,43 @@ def vwap_exit_hit(
     return hit, close, vwap
 
 
+def _entry_time(entry_row: dict[str, Any]) -> dt.datetime | None:
+    """진입 기록의 체결/제출 시각, 못 읽으면 None (그 경우 규칙을 건너뛴다).
+
+    시각을 모를 때 0 시로 떨어지면 하루 전체가 '진입 이후'가 되어 규칙이
+    오전 고점을 물고 오작동한다 -- 모르면 쏘지 않는 쪽이 안전하다.
+    """
+    raw = entry_row.get("ts")
+    if not raw:
+        return None
+    try:
+        return dt.datetime.fromisoformat(str(raw))
+    except ValueError:
+        return None
+
+
+def _after_entry(
+    bars: list[MinuteBar], now: dt.datetime, entered_at: dt.datetime
+) -> tuple[list[MinuteBar], list[MinuteBar]]:
+    """(완료된 정규장 봉 전부, 그중 진입 이후 봉).
+
+    진입 분의 봉은 체결 **전** 고가를 담을 수 있으므로 진입 다음 분부터 센다
+    (`feat/a-plan` 의 `exit_rule_hit` 트레일링 규칙과 같은 처리). 이 구분이
+    없으면 오후에 산 포지션이 오전 고점을 자기 고점으로 착각한다.
+    """
+    minute = now.replace(tzinfo=None, second=0, microsecond=0)
+    done = [b for b in bars if b.ts.time() >= dt.time(9, 0) and b.ts < minute]
+    after = entered_at.replace(tzinfo=None, second=0, microsecond=0) + dt.timedelta(minutes=1)
+    return done, [b for b in done if b.ts >= after]
+
+
 def breakeven_stop_hit(
     bars: list[MinuteBar],
     entry: Decimal,
     now: dt.datetime,
     arm_gain: Decimal,
     buffer: Decimal,
+    entered_at: dt.datetime,
 ) -> tuple[bool, Decimal | None, Decimal | None]:
     """(hit, peak gain so far, last completed close) for the break-even stop.
 
@@ -189,12 +220,10 @@ def breakeven_stop_hit(
     트레일링과 다른 점: 진입가 아래로는 절대 자르지 않고, 이익이 난 뒤에만
     켜진다. 완료된 1분봉만 본다(vwap_exit_hit 과 같은 규칙).
     """
-    minute = now.replace(tzinfo=None, second=0, microsecond=0)
-    done = [b for b in bars if b.ts.time() >= dt.time(9, 0) and b.ts < minute]
-    if not done or entry <= 0:
+    done, since = _after_entry(bars, now, entered_at)
+    if not done or not since or entry <= 0:
         return False, None, None
-    peak = max(b.high for b in done)
-    peak_gain = peak / entry - 1
+    peak_gain = max(b.high for b in since) / entry - 1
     close = done[-1].close
     if peak_gain < arm_gain:
         return False, peak_gain, close
@@ -207,6 +236,7 @@ def stall_exit_hit(
     now: dt.datetime,
     min_gain: Decimal,
     stall_minutes: int,
+    entered_at: dt.datetime,
 ) -> tuple[bool, Decimal | None]:
     """(hit, gain at the last completed close) for the stall / resistance exit.
 
@@ -218,16 +248,17 @@ def stall_exit_hit(
     손실 구간에서는 켜지지 않는다(그쪽은 `breakeven_stop_hit` 과 손절의 몫).
     완료된 1분봉만 본다.
     """
-    minute = now.replace(tzinfo=None, second=0, microsecond=0)
-    done = [b for b in bars if b.ts.time() >= dt.time(9, 0) and b.ts < minute]
-    if len(done) <= stall_minutes or entry <= 0 or stall_minutes <= 0:
+    done, since = _after_entry(bars, now, entered_at)
+    # 고점 비교는 진입 이후 봉만으로 한다. 오전 고점을 기준으로 삼으면 오후에
+    # 산 포지션은 그 고점을 넘을 일이 없어 "이익이 나자마자 매도"로 퇴화한다.
+    if len(since) <= stall_minutes or not done or entry <= 0 or stall_minutes <= 0:
         return False, None
     close = done[-1].close
     gain = close / entry - 1
     if gain < min_gain:
         return False, gain
-    recent = done[-stall_minutes:]
-    earlier_peak = max(b.high for b in done[:-stall_minutes])
+    recent = since[-stall_minutes:]
+    earlier_peak = max(b.high for b in since[:-stall_minutes])
     # 최근 stall_minutes 분 안에 이전 고점을 넘지 못했다 = 주춤.
     return max(b.high for b in recent) <= earlier_peak, gain
 
@@ -530,7 +561,9 @@ class AutoTrader:
             if last is not None and now - last < lim.exit_check_every:
                 continue
             self._last_exit_check[ticker] = now
-            entry_limit = self._state.entries[ticker].get("limit")
+            entry_row = self._state.entries[ticker]
+            entry_limit = entry_row.get("limit")
+            entered_at = _entry_time(entry_row)
             if not entry_limit:
                 continue
             try:
@@ -549,15 +582,27 @@ class AutoTrader:
                 )
                 reason = "vwap_break" if hit else ""
             # 주춤 익절이 본절보다 먼저다: 아직 이익일 때 나가는 쪽이 낫다.
-            if not hit and lim.stall_exit_min_gain is not None:
+            # 둘 다 진입 시각을 받는다 -- 진입 전 고점을 자기 고점으로 세면
+            # 오전에 오른 종목을 오후에 산 순간 곧바로 매도가 나간다.
+            if not hit and lim.stall_exit_min_gain is not None and entered_at is not None:
                 hit, gain = stall_exit_hit(
-                    bars, entry_px, now, lim.stall_exit_min_gain, lim.stall_exit_minutes
+                    bars,
+                    entry_px,
+                    now,
+                    lim.stall_exit_min_gain,
+                    lim.stall_exit_minutes,
+                    entered_at,
                 )
                 if hit:
                     reason, close = "stall", gain
-            if not hit and lim.breakeven_after_gain is not None:
+            if not hit and lim.breakeven_after_gain is not None and entered_at is not None:
                 hit, peak_gain, close = breakeven_stop_hit(
-                    bars, entry_px, now, lim.breakeven_after_gain, lim.breakeven_buffer
+                    bars,
+                    entry_px,
+                    now,
+                    lim.breakeven_after_gain,
+                    lim.breakeven_buffer,
+                    entered_at,
                 )
                 if hit:
                     reason, vwap = "breakeven", peak_gain
