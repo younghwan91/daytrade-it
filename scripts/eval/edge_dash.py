@@ -25,6 +25,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from edge_db import connect  # noqa: E402
 from edge_null import fetch, trading_days, universe_for  # noqa: E402
 
+#: `data/eval/prev_close/*.json`, the frozen vintage the sweep pool uses, stops
+#: at 2026-08-14 and so covers none of the dashboard days. The previous
+#: session's adjusted close stands in. It is still decision-time information --
+#: only the adjustment factor is a later vintage, and over a 7-day window that
+#: moves nothing unless a name splits inside it.
+PREV_CLOSE = Path("data/eval/prev_close")
+
 EVENTS = Path("data/eval/replay_events")
 OUT = Path("data/eval/edge/dash_labels.jsonl")
 OPEN = dt.time(9, 0)
@@ -38,6 +45,22 @@ def act_min(decide: str, day: dt.date) -> int | None:
     if minute.time() < OPEN:  # live parity: cannot act before the 09:00 poll
         minute = dt.datetime.combine(day, OPEN)
     return int((minute - dt.datetime.combine(day, OPEN)).total_seconds() // 60)
+
+
+def frozen_prev(day: dt.date) -> dict[str, float] | None:
+    path = PREV_CLOSE / f"{day}.json"
+    if not path.exists():
+        return None
+    raw = json.loads(path.read_text())["closes"]
+    return {k: float(v["close"]) for k, v in raw.items() if v.get("close")}
+
+
+def db_prev(cur, prev: dt.date, codes: list[str]) -> dict[str, float]:
+    cur.execute(
+        "SELECT code, close FROM daily_bars_adjusted WHERE date = %s AND code = ANY(%s)",
+        (prev, codes),
+    )
+    return {c: float(v) for c, v in cur.fetchall() if v and float(v) > 0}
 
 
 def main() -> None:
@@ -74,6 +97,7 @@ def main() -> None:
             univ = set(universe_for(cur, prev_of[day], args.size))
             codes = sorted({r["ticker"] for r in rows})
             bars = fetch(cur, day, codes)
+            prev_close = frozen_prev(day) or db_prev(cur, prev_of[day], codes)
             kept = 0
             for r in rows:
                 code = r["ticker"]
@@ -95,6 +119,9 @@ def main() -> None:
                             "entry": d.entry[i],
                             "ret_close": ret,
                             "ret_1520": d.ret_1520(i),
+                            "pre_move": (
+                                d.entry[i] / prev_close[code] - 1 if code in prev_close else None
+                            ),
                             "score": feats.get("score"),
                             "market": r.get("market"),
                             "sector": r.get("sector"),

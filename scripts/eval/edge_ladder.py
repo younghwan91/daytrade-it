@@ -109,10 +109,21 @@ def main() -> None:
     ap.add_argument("--reps", type=int, default=20000)
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--days", help="comma-separated subset of days")
+    ap.add_argument(
+        "--strata",
+        help="strata.jsonl from edge_strata.py; matches each pair to the null "
+        "inside its own volatility x liquidity cell instead of the whole universe",
+    )
     args = ap.parse_args()
 
     nulls = load_null(Path(args.null))
     pool = load_pool(Path(args.pool))
+    cell_of: dict[tuple[str, str], str] = {}
+    if args.strata:
+        with Path(args.strata).open() as f:
+            for line in f:
+                s = json.loads(line)
+                cell_of[(s["day"], s["code"])] = f"{s['sig_q']}|{s['val_q']}"
     if args.days:
         keep = set(args.days.split(","))
         pool = [r for r in pool if r["day"] in keep]
@@ -127,17 +138,27 @@ def main() -> None:
     d3: list[tuple[str, float]] = []
     dropped = 0
 
+    thin = 0
     for r in pool:
         n = nulls.get((r["day"], r["act_min"]))
         if n is None or n.get("mkt_ret") is None or r.get("ret_close") is None:
             dropped += 1
             continue
         day, ret = r["day"], r["ret_close"]
+        null = n["null_mean"]
+        if cell_of:
+            code = r.get("code") or r["key"].split("|")[1]
+            cell = (n.get("cells") or {}).get(cell_of.get((day, code), ""))
+            # A cell thinner than 5 names is its own noise, not a null.
+            if not cell or cell["n"] < 5:
+                thin += 1
+                continue
+            null = cell["mean"]
         r0.append((day, n["mkt_ret"]))
-        r1.append((day, n["null_mean"]))
+        r1.append((day, null))
         r2.append((day, ret))
-        d1.append((day, n["null_mean"] - n["mkt_ret"]))
-        d2.append((day, ret - n["null_mean"]))
+        d1.append((day, null - n["mkt_ret"]))
+        d2.append((day, ret - null))
         score = r.get("score")
         if score is None:
             score = (r.get("v2") or {}).get("score")
@@ -149,10 +170,14 @@ def main() -> None:
     for day, ret in r3:
         d3.append((day, ret - pool_day_mean[day]))
 
-    print(f"\n=== {args.label}  ({len(pool)} pairs, {dropped} without a matched null)\n")
+    match = "sigma x value cell" if cell_of else "whole top-300"
+    print(
+        f"\n=== {args.label}  ({len(pool)} pairs, {dropped} without a matched null, "
+        f"{thin} in a cell under 5 names)\n    null = {match}\n"
+    )
     print("--- rungs (gross, hold to close)")
     show("R0 index 069500", r0, args.reps, args.seed)
-    show("R1 universe top-300 equal-wt", r1, args.reps, args.seed)
+    show(f"R1 null ({match})", r1, args.reps, args.seed)
     show("R2 pool (news-tagged)", r2, args.reps, args.seed)
     show("R3 buy (score > 0.15)", r3, args.reps, args.seed)
     print("\n--- rungs (net of 21.5 bp round trip, for comparison with published figures)")
