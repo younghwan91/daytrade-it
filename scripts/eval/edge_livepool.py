@@ -96,12 +96,28 @@ def ew(day: dict[str, tuple[float, float, float]], codes) -> float | None:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--dash", default="data/eval/edge/dash_labels.jsonl")
+    ap.add_argument(
+        "--dash",
+        default="data/eval/edge/dash_labels.jsonl",
+        help="labelled pairs -- used ONLY for the direct drift, which needs bars",
+    )
+    ap.add_argument(
+        "--events",
+        default="data/eval/replay_events",
+        help="raw dashboard events -- used for the profile, which needs only "
+        "prior-day data and so must not inherit the bar-coverage filter",
+    )
     ap.add_argument("--labels", default="data/eval/prompt_v3/labels.jsonl")
     ap.add_argument("--start", default="2016-09-12")
     ap.add_argument("--end", default="2026-09-15")
     args = ap.parse_args()
 
+    # Two ticker sets, deliberately. `dash` needs minute bars because it is
+    # priced; `tagged` does not, because a percentile rank only needs the
+    # PREVIOUS day's daily bar. Using the priced set for the profile would
+    # inherit its bar-coverage filter, which drops thin names non-randomly and
+    # would bias the turnover percentile upward -- the same silent, outcome-
+    # correlated filtering that has bitten this project three times.
     dash: dict[dt.date, set[str]] = defaultdict(set)
     archive: dict[dt.date, bool] = {}
     with Path(args.dash).open() as f:
@@ -110,6 +126,24 @@ def main() -> None:
             d = dt.date.fromisoformat(r["day"])
             dash[d].add(r["code"])
             archive[d] = bool(r.get("archive"))
+
+    tagged: dict[dt.date, set[str]] = defaultdict(set)
+    ev_dir = Path(args.events)
+    for path in sorted(ev_dir.glob("*.jsonl")):
+        d = dt.date.fromisoformat(path.stem)
+        with path.open() as f:
+            for line in f:
+                tagged[d].add(json.loads(line)["ticker"])
+        archive.setdefault(d, False)
+    meta = ev_dir / "meta.json"
+    if meta.exists():
+        for day in json.loads(meta.read_text()).get("archive_days", []):
+            archive[dt.date.fromisoformat(day)] = True
+    n_drop = sum(len(tagged[d]) for d in tagged) - sum(len(dash[d]) for d in dash)
+    print(
+        f"\nprofile uses {sum(len(v) for v in tagged.values())} tagged (day, ticker) pairs; "
+        f"the priced set is {n_drop} smaller"
+    )
 
     sweep: dict[dt.date, set[str]] = defaultdict(set)
     with Path(args.labels).open() as f:
@@ -133,10 +167,10 @@ def main() -> None:
     print(f"{'pool':<26}{'n':>7}{'prior-day turnover pct':>26}{'prior-day |move| pct':>24}")
     print(f"{'':<26}{'':>7}{'p25':>8}{'median':>9}{'p75':>9}{'p25':>8}{'median':>8}{'p75':>8}")
     for label, pool, days in (
-        ("dashboard (all 7 days)", dash, sorted(dash)),
-        ("dashboard archive only", dash, [d for d in sorted(dash) if archive.get(d)]),
-        ("dashboard reconstructed", dash, [d for d in sorted(dash) if not archive.get(d)]),
-        ("sweep pool (same 7 days)", sweep, sorted(dash)),
+        ("dashboard (all 7 days)", tagged, sorted(tagged)),
+        ("dashboard archive only", tagged, [d for d in sorted(tagged) if archive.get(d)]),
+        ("dashboard reconstructed", tagged, [d for d in sorted(tagged) if not archive.get(d)]),
+        ("sweep pool (same 7 days)", sweep, sorted(tagged)),
         ("sweep pool (all 125 days)", sweep, sorted(sweep)),
     ):
         vals, movs = [], []
@@ -205,12 +239,12 @@ def main() -> None:
     print("    the dashboard's own weight in each cell is in the last column\n")
     dash_w: dict[tuple[str, str], int] = defaultdict(int)
     total_w = 0
-    for d in sorted(dash):
+    for d in sorted(tagged):
         prev = prev_of.get(d)
         if prev is None:
             continue
         vr, mr = pct_ranks(bars[prev])
-        for c in dash[d]:
+        for c in tagged[d]:
             if c in vr:
                 dash_w[(band(vr[c], VAL_BANDS), band(mr[c], MOVE_BANDS))] += 1
                 total_w += 1
