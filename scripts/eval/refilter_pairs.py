@@ -12,6 +12,32 @@ file is exactly the fan-out `should_judge` reads, and the filter is pure, so
 filtering the frozen pool gives byte-identical rows.
 
 Reads and writes files only -- no DB, no network, no Anthropic call.
+
+**The threshold lives in the FILE, not in the environment.** `judge_batch`
+re-applies `should_judge` at submit time and reads
+`DAYTRADE_NEWS_PREFILTER_MAX_CODES`, but the completeness denominator does not:
+`judge_days.verify()` returns `len(pairs)` and `pairs_day_summary.pairs_kept` is
+the row count of the `--prefiltered` file. Setting the env var for judging while
+leaving an N=11 pairs file as the denominator therefore counts pairs that will
+never be submitted, and those days can never reach 100%. Measured on the n300
+pool: 93,063 pairs are kept at N=11 and dropped at N=2, 48,526 of them unjudged,
+leaving the worst day 42.8% unreachable.
+
+So regenerate the pairs file at the threshold you intend and pass **that one
+file** to both the judging run and the accounting::
+
+    DAYTRADE_NEWS_PREFILTER_MAX_CODES=2 \\
+      uv run python scripts/eval/refilter_pairs.py \\
+        --pairs data/eval/universe_pairs_n300.jsonl \\
+        --out   data/eval/universe_pairs_n300_prefiltered_n2.jsonl
+
+The sweep/batch tools run at 2; the **live daemon keeps 11**
+(`news_signal_daemon.sh`) and `FANOUT_MAX` stays 11. That split is deliberate --
+on the dashboard pool live trades, 82.3% of BUYs are already fan-out 1, so
+tightening wins nothing there, while on the sweep pool it halves the judging
+bill. Do not "fix" the inconsistency by changing the module default; that would
+change live on sweep-pool evidence. See
+`docs/research/2026-09-16-prompt-v3-oracle-mining.md`, appendices 11 and 14.
 """
 
 from __future__ import annotations
