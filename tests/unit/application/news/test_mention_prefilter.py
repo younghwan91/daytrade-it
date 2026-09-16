@@ -304,3 +304,30 @@ class TestAdoptedThresholds:
     def test_twelve_codes_is_dropped_and_eleven_is_kept(self) -> None:
         assert should_judge(*REAL, 12, enabled=True) is False
         assert should_judge(*REAL, 11, enabled=True) is True
+
+    def test_index_boundary_is_five_codes(self) -> None:
+        """코스피 in the title: 4 codes is judged, 5 codes is skipped."""
+        title = "코스피, 7999 찍고 7643 마감…외국인 5.7조 순매도"
+        assert should_judge("삼성전자", "005930", title, "", 4, enabled=True) is True
+        assert should_judge("삼성전자", "005930", title, "", 5, enabled=True) is False
+
+    def test_index_token_alone_never_drops_without_related_codes(self) -> None:
+        """A title-only match with no related-code count must stay judged.
+
+        Live callers that cannot count the article's companies (`related_count`
+        is None) have to behave exactly as if the rule did not exist.
+        """
+        for title in ("코스피 급락", "코스닥 900선 회복", "코스피·코스닥 동반 하락"):
+            assert should_judge("삼성전자", "005930", title, "", None, enabled=True) is True
+            assert skip_reason(title, None, enabled=True) is None
+
+    def test_every_rule_is_reachable_through_should_judge(self) -> None:
+        """One function, three rules -- callers never re-implement any of them."""
+        cases = {
+            "[표] 코스피 거래대금 상위": (1, "roundup:표"),
+            "기아 PV7 공개": (12, "fanout:12"),
+            "코스피, 7999 찍고 7643 마감": (5, "index:코스피:5"),
+        }
+        for title, (n, expected) in cases.items():
+            assert skip_reason(title, n, enabled=True) == expected
+            assert should_judge("기아", "000270", title, "", n, enabled=True) is False
