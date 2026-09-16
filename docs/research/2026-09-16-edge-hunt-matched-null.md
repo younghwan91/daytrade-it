@@ -110,6 +110,22 @@ The +8.1 bp was composition. Properly matched, the news tag buys nothing.
 
 (On the dashboard's seven days, stratum matching moves D2 only from +27.5 to +23.8 — the dashboard's residual is not a volatility-bucket artifact. It is a reconstructed-data artifact, per §2.2.)
 
+### 2.4 The founding premise does not replicate
+
+`docs/research/2026-09-13-news-prompt-eval.md` opens with "기준선이 0이 아니다": the average excess of every Toss-tagged article was **+1.27%**, i.e. news-tagged stocks are strong that day, and the prompt has to beat that baseline. That number is the reason this system trades news at all.
+
+It was measured on **209 labelled pairs over 10 days**, with `excess` defined as the return minus that day's median open-to-close across all codes — structurally the same quantity as `D2` here. Its own caveats are the relevant ones: 137 of the 353 intraday pairs were dropped for lack of tick data, and the doc says the surviving intraday sample is skewed toward scalp-it's subscribed names, which are surging stocks.
+
+The same quantity on 132,185 pairs over 125 days:
+
+| | 09-13 eval | this measurement |
+|---|---:|---:|
+| pairs / days | 209 / 10 | 132,185 / 125 |
+| tagged excess over a cross-sectional centre | **+127 bp** | **−11.5 bp** (vs 069500) |
+| tagged excess over a day × minute × volatility × liquidity matched null | — | **+1.6 bp** (se 3.4) |
+
+At 632× the sample the baseline is not +1.27%, and it is not positive. The most likely explanation is the one the original doc already names — the intraday half that survived the tick-data filter was a sample of stocks that were already moving — but whatever the cause, the premise that news-tagged names carry a large same-day drift does not hold on the full pool.
+
 ---
 
 ## 3. The structural headwind
