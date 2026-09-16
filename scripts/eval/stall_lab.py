@@ -27,6 +27,7 @@ import argparse
 import datetime as dt
 import itertools
 import json
+import multiprocessing
 from collections import defaultdict
 from decimal import Decimal
 from pathlib import Path as FsPath
@@ -47,10 +48,22 @@ FLATTEN_MINUTE = 15 * 60
 OPEN_MINUTE = 9 * 60
 NOTIONAL = 100_000.0
 
-STALL_GAIN = (None, Decimal("0.005"), Decimal("0.010"), Decimal("0.020"), Decimal("0.030"))
-STALL_MINUTES = (3, 5, 10)
-BREAKEVEN = (None, Decimal("0.010"), Decimal("0.020"), Decimal("0.030"), Decimal("0.050"))
-BUFFER = (Decimal("0.003"), Decimal("0.006"))
+#: 0 is deliberately excluded: at min_gain = 0 a flat post-entry window satisfies
+#: both the gain and the stall conditions, so the rule degenerates into "sell when
+#: it stops moving, profit or not". Selecting it would be a signal the rule is not
+#: earning its place rather than a learned value.
+STALL_GAIN = (None, Decimal("0.005"), Decimal("0.010"), Decimal("0.020"))
+STALL_MINUTES = (5, 10)
+BREAKEVEN = (None, Decimal("0.010"), Decimal("0.020"), Decimal("0.030"))
+BUFFER = (Decimal("0.003"),)
+
+
+_ROWS: list[dict] = []
+_BARS: list = []
+
+
+def _score_config(lim: TradingLimits) -> np.ndarray:
+    return np.array([simulate(r, b, lim)[0] for r, b in zip(_ROWS, _BARS, strict=True)])
 
 
 def load(path: FsPath) -> list[dict]:
@@ -76,6 +89,7 @@ def simulate(row: dict, bars: list[MinuteBar], lim: TradingLimits) -> tuple[floa
     """(reward, exit reason, exit minute) under `lim`, using the live predicates."""
     day = dt.date.fromisoformat(row["day"])
     buy_minute = int(row["buy_minute"])
+    entered_at = dt.datetime.combine(day, dt.time(buy_minute // 60, buy_minute % 60))
     entry = Decimal(str(row["buy_price"]))
     by_min = {b.ts.hour * 60 + b.ts.minute: b for b in bars}
     after = sorted(m for m in by_min if m > buy_minute)
@@ -100,13 +114,13 @@ def simulate(row: dict, bars: list[MinuteBar], lim: TradingLimits) -> tuple[floa
                 return _net(entry, bar.open), "vwap_break", m
         if lim.stall_exit_min_gain is not None:
             hit, _g = stall_exit_hit(
-                bars, entry, now, lim.stall_exit_min_gain, lim.stall_exit_minutes
+                bars, entry, now, lim.stall_exit_min_gain, lim.stall_exit_minutes, entered_at
             )
             if hit:
                 return _net(entry, bar.open), "stall", m
         if lim.breakeven_after_gain is not None:
             hit, _p, _c = breakeven_stop_hit(
-                bars, entry, now, lim.breakeven_after_gain, lim.breakeven_buffer
+                bars, entry, now, lim.breakeven_after_gain, lim.breakeven_buffer, entered_at
             )
             if hit:
                 return _net(entry, bar.open), "breakeven", m
@@ -154,7 +168,14 @@ def main() -> None:
     ap.add_argument("--paths", type=FsPath, required=True)
     ap.add_argument("--out", type=FsPath, required=True)
     ap.add_argument("--lam", type=float, default=2.0)
+    ap.add_argument("--jobs", type=int, default=8)
     args = ap.parse_args()
+
+    from stall_repro import main as gate  # noqa: PLC0415
+
+    print("regression gate: rules must not read pre-entry bars ...", end=" ")
+    gate()
+    print("passed\n")
 
     rows = load(args.paths)
     bars = [bars_of(r) for r in rows]
@@ -165,9 +186,11 @@ def main() -> None:
         f"entries={len(rows)} days={len(set(days.tolist()))} months={months} configs={len(configs)}"
     )
 
-    scores: dict[int, np.ndarray] = {}
-    for i, lim in enumerate(configs):
-        scores[i] = np.array([simulate(r, b, lim)[0] for r, b in zip(rows, bars, strict=True)])
+    global _ROWS, _BARS  # noqa: PLW0603
+    _ROWS, _BARS = rows, bars
+    with multiprocessing.Pool(args.jobs) as pool:
+        scored = pool.map(_score_config, configs, chunksize=1)
+    scores: dict[int, np.ndarray] = dict(enumerate(scored))
     base_idx = next(
         i
         for i, c in enumerate(configs)
