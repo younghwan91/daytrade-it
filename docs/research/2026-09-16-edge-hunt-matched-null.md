@@ -1,4 +1,85 @@
-# Is there an edge, and where does it come from? (2026-09-16)
+# Is there an edge, and where does it come from? (2026-09-17)
+
+**The answer is no, and this document is the case for it.**
+
+The question was whether news day-trading as this system does it has a real, tradeable edge, and if so where it comes from. It does not. What follows is the arithmetic, and then the list of places we looked.
+
+---
+
+## The arithmetic, in four numbers
+
+```
+selection alpha        +1.6 bp   (se 3.4, 132,077 pairs, 125 days)
+intraday drift        -28.6 bp   (top-300, negative in 11 of 11 years)
+round-trip toll       -36.7 bp   (measured, not assumed)
+                     ----------
+                      -63.7 bp
+```
+
+**Selection alpha is zero.** Against a null matched on the day, the acting minute, the volatility quartile and the liquidity quartile, the whole judged pool is worth +1.6 bp with a standard error of 3.4. Twenty-two conditioning axes were searched; a gate chosen from earlier months is *worse* than doing nothing.
+
+**The toll is 36.7 bp, not the 21.5 the research had been assuming for months** (§2.5). The constant omitted spread and slippage and counted commission once. Two independent routes — the broker's own model, and the KRX tick grid measured on 132,185 actual entry prices — agree within 1.2 bp.
+
+**The drift is the only rung with a real t-statistic**, and it is against us at every hour of the session.
+
+To be profitable a rule needs about 37 bp of selection alpha. We have 1.6 ± 3.4. **An effect large enough to trade would have been visible in four days; we have 125** (§7.2). The sample was never the constraint.
+
+---
+
+## Where the money seemed to be, and where it went
+
+Every apparent edge in this project dissolved into one of four things. Naming them is more useful than the individual results:
+
+| what it looked like | what it was | section |
+|---|---|---|
+| the pool loses 52 bp, so we pick badly | the clock and the toll: index drift −18.9, universe −19.5, cost −21.5, selection ≈ 0 | §2 |
+| the dashboard pool makes +18 bp | two-thirds a favourable 7-day window; the rest lives only in reconstructed days. On the two genuine archive days it is −33.4 | §2.1–2.2 |
+| news-tagged names carry +8.1 bp | composition — news names are the big volatile ones. Matched, +1.6 | §2.3 |
+| any Toss-tagged ticker gains +1.27% | 209 pairs over 10 days with an outcome-conditioned sample. At 632× the size: −11.5 bp | §2.4 |
+| the 09:00 batch is worth +166 bp | a five-day window, visible in both pools. Over 125 days the open is the **worst** bucket | §3.1 |
+| dashboard names reach +252 bp | 2× the volatility. σ-normalised, −0.15σ | §2.3 |
+
+Four of those are the same error: **a sample conditioned, silently, on its own outcome.** It appeared in the founding evaluation, in the dashboard's forward maximum, in the dashboard's own membership (§7.1.1), and in a judging cohort stratified on outcome-correlated fields. It is the most persistent failure mode in this project and it should be the first thing looked for in any new result.
+
+---
+
+## What survived
+
+**One conditioning rule**, and it did not survive contact with live. Dropping yesterday's top-third movers improves the sweep-pool book by 40.8 bp with a better worst day and loser ratio, passes three of four `bayes_judge` criteria — and **reverses sign on the dashboard pool** (§4.5). Ten years and three independent routes behind it, and it still cannot be proposed.
+
+**One execution improvement**, worth ~2.8 bp: a limit entry at the touch with an end-of-day cancel and no retry (§8.11). Against a 36.7 bp toll.
+
+**One open door**, which cannot be closed with the data that exists. Alpha grows with holding horizon — +5.9 bp at a session, +96.6 at forty days — and `persistence`, the one LLM judgment field that has ever earned anything, orders that growth correctly at all seven horizons (§8.3). Nothing is significant once overlapping windows are priced honestly, the whole multi-day case rests on roughly two independent forty-day windows, and it is **unvalidatable on live by construction** until mid-October at the earliest.
+
+---
+
+## Two rules this investigation earned
+
+**1. No sweep-pool result transfers to live.** Six times a candidate passed on the 132,185-pair sweep pool and reversed on the dashboard pool. At six it is a rule: nothing is a candidate until frozen onto dashboard days.
+
+**2. The dashboard pool cannot currently validate anything.** Seven days, two genuine, 35 trades in a capped book, against a baseline that is itself an artifact. Candidates pass or fail there by noise.
+
+Together they mean the project can currently disqualify a candidate but cannot confirm one. **That is the binding constraint, and the fix is free**: real archive days accrue at one per trading day. Twenty of them is four weeks and no money, and nothing that can be bought substitutes for them.
+
+---
+
+## What would change the answer
+
+1. **Twenty real archive days.** Free, automatic, four weeks. The gate on turning live entries back on is not finding a candidate — it is being able to tell whether a candidate is real.
+2. **Multi-day `persistence` labels**, 42 months, ~$109 (approved). The only term in the multi-day sum without a decade behind it. Note it buys zero days from the pool live trades.
+3. **Not more data at daily or minute resolution.** A tradeable effect would already be visible; the effect is twenty times too small, not twenty times too noisy.
+
+---
+
+## What was measured and closed
+
+Entry selection across 22 axes. Six exit families. Market regime. Latency. Buy timing. The universe screen. The no-chase filter. Limit entry, with and without retry. The overnight/intraday split. Tick width. Order-book depth and the real spread. Each is a section below; each is a place the edge is not.
+
+The one thing this document does not say is that news trading cannot work. It says something narrower and more useful: **on this universe, at this horizon, long-only, with a 21.8-minute detection lag and a 36.7 bp toll, the selection alpha is zero at every hour and no conditioning over the available attribute set reaches the toll.** Five qualifiers, each of which could be changed. §8 changes one of them and does not close.
+
+---
+
+## Provenance
 
 Everything ran on simnode in `~/git/daytrade-it-edge` (branch `feat/edge-hunt`), `data` symlinked to `~/git/daytrade-it/data`.
 - The DB was read-only throughout (`scripts/eval/edge_db.py` opens `set_session(readonly=True)`).
