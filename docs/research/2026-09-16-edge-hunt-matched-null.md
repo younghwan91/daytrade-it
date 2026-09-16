@@ -692,6 +692,8 @@ Three published claims were retracted in one night, and all three failed the sam
 
 That is the deliverable of this investigation. Everything else in this document is either support for that sentence or a door it closed.
 
+> **Nothing in this section can be validated on the pool live trades, and will not be for some weeks.** All 11 September days are in the stratified judging cohort, so they are excluded from the primary contrast — including 09-14 and 09-15, the only genuine live-archive days in the project. And a +10d exit on days ending 09-15 needs future that does not exist until mid-October. The multi-day case is unvalidatable on live **by construction**, not by sample size.
+>
 > This is a different strategy from day trading. It should be chosen knowingly, not drifted into. Everything below is a multi-day hold, which the live system cannot currently execute or manage, and which consumes capital across days rather than releasing it at the close.
 
 The crossover, for our judged names minus yesterday's biggest movers (`scripts/eval/edge_curve.py`, `data/eval/edge/holding_curve.csv`). `minutes` is exposure, not calendar — a same-session hold is entered mid-session, so it is only the remaining minutes, and each extra day adds a whole session:
@@ -922,6 +924,64 @@ So §8.11's predecessor measurement was right for the wrong reason. Its +4.5 bp 
 **Which answers the question this experiment existed to ask.** Does the spread/adverse-selection cancellation decay with horizon? **No.** It holds from the same session out to forty days. The adverse selection in a limit fill is not a short-horizon artifact that a patient holder can wait out.
 
 The one striking cell is the 3.8% of fills that rested — price touched our limit exactly and never went below — at +203 to +449 bp. That is essentially the same population as §8.9's "never dipped" names, and it is not knowable in advance: "the order that filled without the price going through it" is a description of what happened, not a signal.
+
+---
+
+### 8.12 The right half of the day, and why it cannot be owned
+
+scalp-it decomposed the drift into its two legs — overnight (previous close → open) and intraday (open → close) — and found that on our universe all of the return is overnight while the intraday loss scales with turnover rank. Our strategy enters intraday and exits at the close. That is precisely the negative half, and we skip the positive one.
+
+Reproduced here on independent code, `scripts/eval/edge_overnight.py`, ten years by year, bp:
+
+| universe | leg | 2016 | 2017 | 2018 | 2019 | 2020 | 2021 | 2022 | 2023 | 2024 | 2025 | 2026 | pooled | se |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| **top300 (ours)** | overnight | 20 | 22 | 19 | 21 | **41** | 28 | 13 | 25 | 16 | 32 | **48** | **+25.7** | 1.8 |
+| | intraday | −34 | −25 | −24 | −31 | −28 | −24 | −33 | −27 | −32 | −20 | −44 | **−28.6** | 2.6 |
+| 301–600 | overnight | 14 | 17 | 10 | 15 | 24 | 19 | 5 | 20 | 14 | 30 | 39 | +18.5 | 1.8 |
+| | intraday | −16 | −12 | −15 | −12 | −10 | −15 | −18 | −14 | −23 | −14 | −38 | −16.4 | 2.8 |
+| 601–900 | overnight | 8 | 12 | 4 | 11 | 20 | 15 | −0 | 14 | 7 | 21 | 33 | +13.0 | 1.6 |
+| | intraday | −8 | −6 | −4 | −5 | 1 | −8 | −8 | −6 | −12 | −6 | −33 | −8.1 | 2.8 |
+| 901+ | overnight | 7 | 7 | −1 | 7 | 9 | 10 | −5 | 2 | −1 | 12 | 16 | +5.3 | 1.1 |
+| | intraday | −1 | −2 | 3 | 3 | 9 | 2 | −0 | 5 | −1 | −3 | −15 | +0.5 | 2.2 |
+
++25.7 / −28.6 against their +26.3 / −28.0 — the same number from different code. Monotone in turnover rank on both legs.
+
+#### The trade this suggests, and the two arithmetics that kill it
+
+**Entering at the close of the article day and exiting at the open** is the trade the table implies. First, the cost, because a close-to-open trade crosses the **closing auction at entry and the opening auction at exit**, and the continuous-session spread does not apply (`scripts/eval/edge_auction.py`):
+
+| | 거래소 | 코스닥 |
+|---|---:|---:|
+| continuous 13:00–14:59 | 14.0 | 19.1 |
+| closing auction 15:25–15:30 | **15.1** | **18.1** |
+| pre-open 08:50–08:59 | **19.1** | **30.7** |
+
+The closing auction is fine — it converges to near-continuous, and depth is 2–3.5 billion KRW on 거래소, so size is a non-issue at our notional. **The opening auction is the expensive side.** Half the spread at each end gives 18.5 bp pool-weighted, so this trade's round trip is **41.5 bp**, not the 36.7 used elsewhere in this document.
+
+And our own judged pairs, entered at the close of the article day (124 days):
+
+| nights | n | ours | null | alpha | se | net |
+|---|---:|---:|---:|---:|---:|---:|
+| **1** | 131,536 | +42.9 | +40.9 | **+1.9** | 3.1 | +6.2 |
+| 2 | 130,698 | +31.1 | +23.5 | +7.6 | 9.5 | −5.6 |
+| 5 | 128,912 | +9.3 | −10.8 | +20.1 | 18.6 | −27.4 |
+| 10 | 125,613 | −14.6 | −53.6 | +38.9 | 26.2 | −51.3 |
+
+**Hold through, and it never amortises.** Overnight +25.7 against intraday −28.6 means each extra night is **−2.9 bp** before the toll is considered. The thing you would be amortising the toll over is itself negative. That is structural: it needs only |intraday| > |overnight|, which holds by construction on a momentum screen, because such a screen buys the names whose intraday reversal is largest.
+
+**Trade it nightly, and the toll scales with the thing you are collecting.** Per night the sum is `drift + 1.9 − 41.5`, so the bar is **39.6 bp of overnight drift**. Across eleven years that is cleared **twice** — 2020 (41) and 2026 (48). One is a pandemic; the other is the year this project happens to have measured. The decade figure is **−13.9 bp per night**.
+
+So the good half of the day is not separable from its cost. Hold through it and the bad half eats more than the good half pays; trade it nightly and the toll scales one-for-one against a bar the drift clears twice a decade.
+
+#### A pre-registration, and a correction
+
+I recorded an expectation before the decade run: *alpha survives, net does not.* Half right, and the half I got wrong is worth stating because it is a methods failure rather than a guess.
+
+I first measured the close-entry alpha at **+6.8 bp (t = 2.6)** on a 2025–2026 window and reported it as refuting the objection that news is stale by the close. **That number was wrong.** The smoke test loaded only a truncated price history, so codes without a full trailing window fell into a degenerate volatility cell and the matched null was mis-specified. With the decade history the same 124 pair-days give **+1.9 ± 3.1**.
+
+So the staleness objection is **not** refuted. Alpha at a close entry is +1.9 against +5.9 entering intraday — a decay, not a collapse. News information survives a multi-hour delay in attenuated form, which is worth knowing and is a great deal less than I first claimed.
+
+The general lesson is the same one §7.3 drew: the helper (`sigma_at`) was written for a 125-day window and silently degraded when reused over ten years. It did not error; it returned a worse null. **Reusing a component outside the range it was written for is the fifth way this investigation has produced a wrong number tonight**, and the only defence that worked was re-running the same question on better inputs.
 
 ---
 

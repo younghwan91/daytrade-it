@@ -49,7 +49,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from edge_db import connect  # noqa: E402
-from edge_strata import quantile_edges, sigma_at  # noqa: E402
+from edge_strata import LOOKBACK, quantile_edges  # noqa: E402
 
 BP = 10_000
 #: measured round trip, pool-weighted (edge_cost.py)
@@ -71,6 +71,29 @@ def load(cur, lo: dt.date, hi: dt.date):
             by_date[date][code] = (float(o), float(c), float(v or 0.0))
             hist[code].append((date, float(c), float(v or 0.0)))
     return dict(by_date), hist
+
+
+def sigma_index(hist: dict[str, list[tuple]]) -> dict[str, tuple[list, list]]:
+    """Per code, (dates, closes) sorted -- so sigma is a bisect, not a rescan.
+
+    `edge_strata.sigma_at` filters the whole history on every call, which is
+    fine over a 125-day window and quadratic over ten years. Same definition,
+    same trailing-20 window ending at the previous session.
+    """
+    return {c: ([d for d, _c, _v in rows], [x for _d, x, _v in rows]) for c, rows in hist.items()}
+
+
+def sigma_of(index: dict[str, tuple[list, list]], code: str, day: dt.date) -> float | None:
+    got = index.get(code)
+    if not got:
+        return None
+    dates, closes = got
+    i = bisect.bisect_left(dates, day)
+    w = closes[max(0, i - LOOKBACK - 1) : i]
+    if len(w) < 11:
+        return None
+    rets = [w[k] / w[k - 1] - 1 for k in range(1, len(w))]
+    return statistics.pstdev(rets) if len(rets) >= 10 else None
 
 
 def universes(prev: dict[str, tuple[float, float, float]]) -> dict[str, list[str]]:
@@ -97,6 +120,7 @@ def main() -> None:
     by_date, hist = load(cur, lo - dt.timedelta(days=120), hi)
     cal = sorted(by_date)
     idx = {d: i for i, d in enumerate(cal)}
+    sindex = sigma_index(hist)
 
     # ---- 1. the decomposition, by year
     legs: dict[tuple[str, str], dict[int, list[float]]] = defaultdict(lambda: defaultdict(list))
@@ -179,7 +203,7 @@ def main() -> None:
         prev, today = by_date[cal[i - 1]], by_date[day]
         univ = universes(prev)["top300 (ours)"]
         codes = {r["code"] for r in pairs[day]}
-        sig = {c: sigma_at(hist.get(c, []), day) for c in set(univ) | codes}
+        sig = {c: sigma_of(sindex, c, day) for c in set(univ) | codes}
         u_sig = [sig[c] for c in univ if sig.get(c) is not None]
         if len(u_sig) < NQ * 4:
             continue
