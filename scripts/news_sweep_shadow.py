@@ -772,7 +772,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Allow sweeping without --proxy (competes with the live daemon's Toss access)",
     )
-    parser.add_argument("--size", type=int, default=UNIVERSE_SIZE, help="Universe size")
+    parser.add_argument(
+        "--size",
+        type=int,
+        default=None,
+        help=f"Universe size (default: DAYTRADE_NEWS_UNIVERSE_SIZE, else {UNIVERSE_SIZE})",
+    )
     parser.add_argument(
         "--universe-file",
         type=Path,

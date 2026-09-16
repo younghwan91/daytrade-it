@@ -53,7 +53,10 @@ from universe_coverage import (  # noqa: E402
     month_bounds,
 )
 
-from daytrade_it.application.news.universe import select_universe  # noqa: E402
+from daytrade_it.application.news.universe import (  # noqa: E402
+    UNIVERSE_SIZE,
+    select_universe,
+)
 from daytrade_it.infrastructure.brokers.base import KST  # noqa: E402
 
 #: Relaxed rule: share of a day's distinct event tickers that must have bars.
@@ -197,6 +200,13 @@ def main() -> None:
         "(>= --event-bar-frac of a day's distinct event tickers have bars)",
     )
     ap.add_argument("--event-bar-frac", type=float, default=EVENT_BAR_FRAC)
+    ap.add_argument(
+        "--universe-size",
+        type=int,
+        default=None,
+        help=f"top-N by prior-day traded value "
+        f"(default: DAYTRADE_NEWS_UNIVERSE_SIZE, else {UNIVERSE_SIZE})",
+    )
     args = ap.parse_args()
     start, end = dt.date.fromisoformat(args.start), dt.date.fromisoformat(args.end)
 
@@ -209,7 +219,10 @@ def main() -> None:
             raise SystemExit(f"no trading day before {start} in daily_bars_adjusted")
         rows_by_day = fetch_daily_rows(conn, buffer_start, end)
         prev_days = {d: trading[trading.index(d) - 1] for d in targets}
-        universes = {d: select_universe(dict(rows_by_day.get(prev_days[d], []))) for d in targets}
+        universes = {
+            d: select_universe(dict(rows_by_day.get(prev_days[d], [])), args.universe_size)
+            for d in targets
+        }
         bar_counts: dict[tuple[dt.date, str], int] = {}
         for month_start, month_end in month_bounds(targets):
             bar_counts.update(fetch_month_bar_counts(conn, month_start, month_end))

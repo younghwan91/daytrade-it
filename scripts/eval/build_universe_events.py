@@ -50,6 +50,7 @@ from judge_batch import cache_row_valid
 
 from daytrade_it.application.news.mention_prefilter import should_judge
 from daytrade_it.application.news.universe import (
+    UNIVERSE_SIZE,
     judge_queue,
     live_article_id,
     related_codes,
@@ -573,6 +574,13 @@ def main() -> None:
     )
     ap.add_argument("--model", default=DEFAULT_MODEL, help="judge model (cache input hash)")
     ap.add_argument(
+        "--universe-size",
+        type=int,
+        default=None,
+        help=f"top-N by prior-day traded value; the SAME number the live sweep reads "
+        f"(default: DAYTRADE_NEWS_UNIVERSE_SIZE, else {UNIVERSE_SIZE})",
+    )
+    ap.add_argument(
         "--prefilter",
         dest="prefilter",
         action="store_true",
@@ -604,7 +612,7 @@ def main() -> None:
             if i == 0:
                 print(f"{day}: no previous trading day in bars -- skipped")
                 continue
-            universe = select_universe(daily_values(trading[i - 1]))
+            universe = select_universe(daily_values(trading[i - 1]), args.universe_size)
             try:
                 pairs, line = prepare_day(
                     buckets.get(day, []),

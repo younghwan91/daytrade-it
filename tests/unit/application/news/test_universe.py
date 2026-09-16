@@ -20,7 +20,39 @@ from daytrade_it.application.news.universe import (
     related_codes,
     select_universe,
     simulate_sweep,
+    universe_size,
 )
+
+
+class TestUniverseSize:
+    """One number for the live sweep, the C3 event builder and the analysis scripts."""
+
+    def test_default_is_300(self) -> None:
+        assert UNIVERSE_SIZE == 300
+        assert universe_size() == 300
+
+    def test_explicit_override_wins(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("DAYTRADE_NEWS_UNIVERSE_SIZE", "600")
+        assert universe_size(200) == 200
+
+    def test_env_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("DAYTRADE_NEWS_UNIVERSE_SIZE", "600")
+        assert universe_size() == 600
+
+    def test_bad_env_falls_back_to_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("DAYTRADE_NEWS_UNIVERSE_SIZE", "many")
+        assert universe_size() == UNIVERSE_SIZE
+
+    def test_non_positive_env_falls_back_to_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("DAYTRADE_NEWS_UNIVERSE_SIZE", "0")
+        assert universe_size() == UNIVERSE_SIZE
+
+    def test_select_universe_reads_the_env_at_call_time(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        values = {f"{i:06d}": float(2000 - i) for i in range(700)}
+        monkeypatch.setenv("DAYTRADE_NEWS_UNIVERSE_SIZE", "450")
+        assert len(select_universe(values)) == 450
 
 
 class TestSelectUniverse:

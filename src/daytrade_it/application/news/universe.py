@@ -20,6 +20,7 @@ from __future__ import annotations
 import bisect
 import datetime as dt
 import hashlib
+import os
 from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -30,9 +31,49 @@ from krx_quant_core.market.session import KST
 
 from daytrade_it.infrastructure.external.toss_news_client import TOSS_NEWS_NAMESPACE
 
-#: Default sweep size: previous day's top-N traded-value codes (spec design
-#: doc, "대상 종목: 전일 거래대금 상위 N(기본 600, 장 전 고정)").
-UNIVERSE_SIZE = 600
+#: Sweep size: previous day's top-N traded-value codes (spec design doc,
+#: "대상 종목: 전일 거래대금 상위 N(장 전 고정)").
+#:
+#: **300**, chosen for sweep latency, not for cost. At one request per second
+#: from 08:00 to 15:20 the lap time is ``N / (26,400 - articles_per_day)``:
+#: N=600 gives 10.45 min per lap, N=300 gives **5.19 min**, so the mean
+#: time-to-judgement of a sweep-discovered article halves (~5.2 -> ~2.6 min).
+#: The price is 20.5% of BUY-eligible judgments (ranks 301-600 hold 20.5% of
+#: all BUYs but only 10-13 BUYs per rank slot per 6 months against 22-80 in
+#: what is kept), and the remaining 6-month judging bill falls $133 -> $111.
+#: Evidence: ``.superpowers/sdd/2026-09-16-bayes-stages/prefilter-report.md``
+#: Addendum C (rank-bucket analysis over 97,721 judged pairs).
+#:
+#: Read it through :func:`universe_size` -- never inline the constant -- so the
+#: live sweep, the C3 event builder and the analysis scripts stay on one number
+#: and a single env var can move all of them at once.
+UNIVERSE_SIZE = 300
+
+#: Env override so live and backtest can be moved off the default together.
+_SIZE_ENV_VAR = "DAYTRADE_NEWS_UNIVERSE_SIZE"
+
+
+def universe_size(override: int | None = None) -> int:
+    """The sweep universe size the live sweep and every backtest both read.
+
+    ``override`` (a CLI flag or a policy field) wins; otherwise
+    ``DAYTRADE_NEWS_UNIVERSE_SIZE``; otherwise :data:`UNIVERSE_SIZE`. A
+    non-integer or non-positive env value is ignored rather than raising, so a
+    typo cannot take the live daemon down (same contract as
+    ``mention_prefilter.fanout_max``).
+    """
+    if override is not None:
+        return int(override)
+    raw = os.environ.get(_SIZE_ENV_VAR)
+    if raw is not None:
+        try:
+            value = int(raw.strip())
+        except ValueError:
+            return UNIVERSE_SIZE
+        if value > 0:
+            return value
+    return UNIVERSE_SIZE
+
 
 #: Default per-code sweep cadence (spec design doc: "1초에 1회씩").
 SWEEP_INTERVAL = dt.timedelta(seconds=1)
@@ -44,14 +85,18 @@ _DEFAULT_START = dt.time(8, 0)
 _CUTOFF = dt.time(15, 20)
 
 
-def select_universe(daily_values: dict[str, float], size: int = UNIVERSE_SIZE) -> list[str]:
+def select_universe(daily_values: dict[str, float], size: int | None = None) -> list[str]:
     """The sweep universe for a day, given the previous day's traded value per code.
 
     Sorted by value descending, ties broken by code ascending (deterministic).
     Codes that aren't a plain 6-digit string, or whose value isn't positive,
     are ignored -- matches the plan's "전일 거래대금 내림차순, 동률은 코드
     오름차순" plus the implicit "실제 거래된 종목만" filter.
+
+    ``size=None`` resolves through :func:`universe_size` **at call time**, so
+    the env override reaches callers that never touch the constant.
     """
+    size = universe_size(size)
     candidates = [
         code
         for code, value in daily_values.items()

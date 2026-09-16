@@ -29,9 +29,13 @@ from pathlib import Path
 
 import psycopg2
 
+from daytrade_it.application.news.universe import UNIVERSE_SIZE as _UNIVERSE_SIZE
+from daytrade_it.application.news.universe import universe_size
 from daytrade_it.shared.runtime_host import require_backtest_host
 
-UNIVERSE_SIZE = 600
+#: One number for live sweep, C3 events and the analysis scripts -- see
+#: ``application/news/universe.UNIVERSE_SIZE`` (300; Addendum C).
+UNIVERSE_SIZE = _UNIVERSE_SIZE
 ALWAYS_INCLUDE = ("069500",)
 COVERAGE_THRESHOLD = 300  # >=300 규정장 분봉이면 "커버됨"
 SESSION_START = "09:00"
@@ -45,7 +49,7 @@ SESSION_END = "15:30"
 
 def select_universe(
     day_rows: list[tuple[str, float]],
-    size: int = UNIVERSE_SIZE,
+    size: int | None = None,
     always: tuple[str, ...] = ALWAYS_INCLUDE,
 ) -> list[str]:
     """Top ``size`` codes by trade value (desc), tie-break code asc, plus ``always``.
@@ -54,6 +58,7 @@ def select_universe(
     trading) day. Deterministic. ``always`` codes are appended even if they
     fall outside the top ``size`` (they never count against the size limit).
     """
+    size = universe_size(size)
     ranked = sorted(day_rows, key=lambda r: (-r[1], r[0]))
     top = [code for code, _ in ranked[:size]]
     seen = set(top)
@@ -68,7 +73,7 @@ def compute_universes(
     rows_by_day: dict[dt.date, list[tuple[str, float]]],
     ordered_days: list[dt.date],
     target_days: list[dt.date],
-    size: int = UNIVERSE_SIZE,
+    size: int | None = None,
     always: tuple[str, ...] = ALWAYS_INCLUDE,
 ) -> dict[dt.date, list[str]]:
     """Universe per target day, keyed off the previous entry in ``ordered_days``.
@@ -218,7 +223,13 @@ def month_bounds(target_days: list[dt.date]) -> list[tuple[dt.date, dt.date]]:
     return bounds
 
 
-def run(start: dt.date, end: dt.date, out_dir: Path, dsn: str | None = None) -> dict:
+def run(
+    start: dt.date,
+    end: dt.date,
+    out_dir: Path,
+    dsn: str | None = None,
+    size: int | None = None,
+) -> dict:
     conn = connect(dsn)
     try:
         buffer_start = start - dt.timedelta(days=20)
@@ -230,7 +241,7 @@ def run(start: dt.date, end: dt.date, out_dir: Path, dsn: str | None = None) -> 
             )
         target_days = [d for d in trading_days if start <= d <= end]
         rows_by_day = fetch_daily_rows(conn, buffer_start, end)
-        universes = compute_universes(rows_by_day, trading_days, target_days)
+        universes = compute_universes(rows_by_day, trading_days, target_days, size=size)
 
         bar_counts: dict[tuple[dt.date, str], int] = {}
         for month_start, month_end in month_bounds(target_days):
@@ -268,11 +279,17 @@ def main() -> None:
     ap.add_argument("--end", required=True, help="YYYY-MM-DD")
     ap.add_argument("--out-dir", default="data/eval/universe_coverage")
     ap.add_argument("--dsn", default=None, help="생략 시 KR_QUANT_DB")
+    ap.add_argument(
+        "--universe-size",
+        type=int,
+        default=None,
+        help=f"전일 거래대금 상위 N (기본: DAYTRADE_NEWS_UNIVERSE_SIZE, 없으면 {UNIVERSE_SIZE})",
+    )
     args = ap.parse_args()
 
     start = dt.date.fromisoformat(args.start)
     end = dt.date.fromisoformat(args.end)
-    summary = run(start, end, Path(args.out_dir), dsn=args.dsn)
+    summary = run(start, end, Path(args.out_dir), dsn=args.dsn, size=args.universe_size)
     print(json.dumps(summary, indent=2, ensure_ascii=False))
 
 
