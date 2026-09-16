@@ -85,12 +85,25 @@ def reduce_path(
     run_peak = np.maximum.accumulate(masked_high)
     run_has_peak = np.maximum.accumulate(after_entry.astype(int)).astype(bool)
 
-    # Decision minutes: a bar exists, after the fill, at or before the flatten minute.
-    sel = (minutes > buy_minute) & (minutes <= flatten_minute)
+    # Decision minutes: a bar exists, after the fill, up to and including the minute
+    # the position is closed. That closing minute is the FIRST print at or after
+    # 15:00 -- live retries the exit every minute until it fills, so a ticker with
+    # no 15:00 bar leaves on its next print, not at 15:00 exactly. With no print at
+    # all at or after 15:00 the leftover is valued at the day's last close.
+    after = minutes[minutes > buy_minute]
+    if after.size == 0:
+        return None
+    at_or_after = after[after >= flatten_minute]
+    close_at = int(at_or_after[0]) if at_or_after.size else int(after[-1])
+    real_flatten = bool(at_or_after.size)
+    sel = (minutes > buy_minute) & (minutes <= close_at)
     if not sel.any():
         return None
     dec_minutes = minutes[sel]
-    dec_fill = opens[sel]
+    dec_fill = opens[sel].copy()
+    if not real_flatten:
+        # Settled at the last close, not sold into the open of that minute.
+        dec_fill[-1] = closes[sel][-1]
     # j(m) = index of the last bar whose minute is strictly before m.
     j = np.searchsorted(minutes, dec_minutes, side="left") - 1
     ok = j >= 0
@@ -108,10 +121,7 @@ def reduce_path(
         window = minutes < end
         orb[w] = float(lows[window].min()) if window.any() else np.inf
 
-    flat_idx = np.where(minutes == flatten_minute)[0]
-    flatten_fill = (
-        float(opens[flat_idx[0]]) if flat_idx.size else float(closes[-1]) if closes.size else 0.0
-    )
+    flatten_fill = float(dec_fill[-1])
     return Reduced(
         minute=dec_minutes,
         fill=dec_fill,
@@ -124,7 +134,7 @@ def reduce_path(
         elapsed=dec_minutes - buy_minute,
         entry=float(buy_price),
         flatten_fill=flatten_fill,
-        flatten_minute=flatten_minute,
+        flatten_minute=close_at,
     )
 
 

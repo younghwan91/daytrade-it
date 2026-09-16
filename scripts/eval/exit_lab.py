@@ -77,6 +77,24 @@ def _net(buy: Decimal, proceeds: Decimal) -> float:
     return float((proceeds * (1 - SELL_COST) - buy * (1 + BUY_COST)) / buy)
 
 
+def flatten_index(path: Path, flat_minute: int) -> tuple[int, bool]:
+    """(minute the position is closed if no rule fires, whether that is a real flatten).
+
+    Live places the exit at 15:00 and retries every minute, more aggressively each
+    time, until it fills; continuous trading ends at 15:20. So the position leaves
+    at the FIRST tradable minute at or after 15:00, not at 15:00 exactly -- a stock
+    that does not print a 15:00 bar is exited on its next print. If the ticker
+    prints nothing at or after 15:00 at all, the position is settled at the last
+    bar of the day (the replay's leftover valuation).
+    """
+    minutes = sorted(b.ts.hour * 60 + b.ts.minute for b in path.bars)
+    after = [m for m in minutes if m > path.buy_minute]
+    if not after:
+        return path.buy_minute, False
+    at_or_after = [m for m in after if m >= flat_minute]
+    return (at_or_after[0], True) if at_or_after else (after[-1], False)
+
+
 def simulate(
     path: Path, lim: TradingLimits, flatten_at: dt.time = FLATTEN
 ) -> tuple[float, str, int]:
@@ -84,24 +102,25 @@ def simulate(
     entered_at = dt.datetime.combine(path.day, dt.time(path.buy_minute // 60, path.buy_minute % 60))
     flat_minute = flatten_at.hour * 60 + flatten_at.minute
     by_minute = {b.ts.hour * 60 + b.ts.minute: b for b in path.bars}
+    close_at, real_flatten = flatten_index(path, flat_minute)
+    if close_at == path.buy_minute:
+        return 0.0, "no_bars", path.buy_minute
 
-    for m in range(path.buy_minute + 1, flat_minute + 1):
-        bar = by_minute.get(m)
-        if bar is None:
+    for m in sorted(by_minute):
+        if m <= path.buy_minute or m > close_at:
             continue
+        bar = by_minute[m]
+        if m == close_at:
+            # Sold into this minute if it is a real flatten; otherwise the day ran
+            # out and the leftover is valued at the last close.
+            price = bar.open if real_flatten else bar.close
+            return _net(path.buy_price, price), ("flatten" if real_flatten else "last_bar"), m
         now = dt.datetime.combine(path.day, dt.time(m // 60, m % 60))
-        if m == flat_minute:
-            return _net(path.buy_price, bar.open), "flatten", m
         hit = exit_rule_hit(path.bars, path.buy_price, entered_at, now, lim)
         if hit is not None:
             return _net(path.buy_price, bar.open), hit, m
 
-    # No bar at or before the flatten minute: settle at the last bar we have.
-    tail = [b for b in path.bars if b.ts.hour * 60 + b.ts.minute > path.buy_minute]
-    last = tail[-1] if tail else by_minute.get(path.buy_minute)
-    if last is None:
-        return 0.0, "no_bars", path.buy_minute
-    return _net(path.buy_price, last.close), "last_bar", last.ts.hour * 60 + last.ts.minute
+    return 0.0, "no_bars", path.buy_minute
 
 
 def mfe_mae(path: Path, flatten_at: dt.time = FLATTEN) -> tuple[float, float]:
