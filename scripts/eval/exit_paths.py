@@ -52,21 +52,44 @@ WORK = Path("data/eval/rl_minimal/paths_work")
 _OPEN = dt.time(9, 0)
 
 
-def no_add_ons(base: NewsPolicy) -> NewsPolicy:
-    """`uncapped(base)` with pyramiding off, so one entry == one share."""
+def no_add_ons(
+    base: NewsPolicy, min_score: float | None = None, max_pre_move: Decimal | None = None
+) -> NewsPolicy:
+    """`uncapped(base)` with pyramiding off, so one entry == one share.
+
+    `min_score` / `max_pre_move` additionally open the two hand-set entry gates
+    (the 0.15 score threshold and the no-chase cap), so the recorded set includes
+    the pairs the live rule refuses. A contextual threshold cannot be learned from
+    a sample that only contains what the current threshold already admits.
+    """
     pol = uncapped(base)
-    return dataclasses.replace(pol, limits=dataclasses.replace(pol.limits, add_on_min_gain=None))
+    limits = dataclasses.replace(pol.limits, add_on_min_gain=None)
+    sel = pol.selection
+    if min_score is not None:
+        sel = dataclasses.replace(sel, min_score=min_score)
+    if max_pre_move is not None:
+        sel = dataclasses.replace(sel, max_pre_move=max_pre_move)
+    return dataclasses.replace(pol, limits=limits, selection=sel)
 
 
 def _minute(ts: dt.datetime) -> int:
     return ts.hour * 60 + ts.minute
 
 
-def day_rows(data, base: NewsPolicy, stocks: dict, dart: Path, work_root: Path) -> list[dict]:  # noqa: ANN001
+def day_rows(  # noqa: ANN001
+    data,
+    base: NewsPolicy,
+    stocks: dict,
+    dart: Path,
+    work_root: Path,
+    min_score: float | None = None,
+    max_pre_move: Decimal | None = None,
+) -> list[dict]:
     """One row per entry that actually filled in the uncapped, add-on-free replay of `data`."""
     from replay_common import run_day  # noqa: PLC0415
 
-    res, pnl = run_day(data, no_add_ons(base), stocks, dart, work_root, cash=UNCAPPED_CASH)
+    policy = no_add_ons(base, min_score, max_pre_move)
+    res, pnl = run_day(data, policy, stocks, dart, work_root, cash=UNCAPPED_CASH)
     if res.errors:
         raise RuntimeError(f"{data.day}: {len(res.errors)} error(s) logged in the uncapped replay")
 
@@ -127,7 +150,9 @@ def day_rows(data, base: NewsPolicy, stocks: dict, dart: Path, work_root: Path) 
 _WORKER: dict = {}
 
 
-def _init(stocks: dict, dart: Path, work_root: Path, cache_dir: Path, base, events_dir) -> None:  # noqa: ANN001
+def _init(  # noqa: ANN001
+    stocks: dict, dart: Path, work_root: Path, cache_dir: Path, base, events_dir, gates
+) -> None:
     _WORKER.update(
         stocks=stocks,
         dart=dart,
@@ -135,6 +160,7 @@ def _init(stocks: dict, dart: Path, work_root: Path, cache_dir: Path, base, even
         cache=cache_dir,
         base=base,
         events=events_dir,
+        gates=gates,
     )
 
 
@@ -144,7 +170,7 @@ def _day_job(day: dt.date) -> list[dict]:
     w = _WORKER
     try:
         data = load_day(day, w["cache"], w["events"])
-        return day_rows(data, w["base"], w["stocks"], w["dart"], w["work"])
+        return day_rows(data, w["base"], w["stocks"], w["dart"], w["work"], *w["gates"])
     except Exception as exc:  # noqa: BLE001 -- one bad day must not kill the pass
         print(f"{day}: SKIPPED -- {exc}", file=sys.stderr)
         return []
@@ -170,6 +196,14 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--work-root", type=Path, default=WORK)
     ap.add_argument("--cache-dir", type=Path, default=CACHE)
     ap.add_argument("--jobs", type=int, default=3)
+    ap.add_argument(
+        "--min-score",
+        type=float,
+        help="override SelectionConfig.min_score (0.0 records every positive-score pair)",
+    )
+    ap.add_argument(
+        "--max-pre-move", type=Decimal, help="override the no-chase cap (e.g. 10 to disable it)"
+    )
     args = ap.parse_args(argv)
 
     require_backtest_host()
@@ -189,7 +223,10 @@ def main(argv: list[str] | None = None) -> None:
     stocks = QuantAirflowDBClient().get_stock_master()
     for d in days:
         load_day(d, args.cache_dir, events_dir)
-    init = partial(_init, stocks, args.dart, args.work_root, args.cache_dir, base, events_dir)
+    gates = (args.min_score, args.max_pre_move)
+    init = partial(
+        _init, stocks, args.dart, args.work_root, args.cache_dir, base, events_dir, gates
+    )
     args.out.parent.mkdir(parents=True, exist_ok=True)
     total = 0
     with (
