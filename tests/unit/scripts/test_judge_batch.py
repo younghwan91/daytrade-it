@@ -254,6 +254,72 @@ def test_results_errored_and_schema_failures_go_to_errors_file(tmp_path: Path) -
     assert api4.created == []
 
 
+def test_credit_and_auth_errors_do_not_burn_an_attempt(tmp_path: Path) -> None:
+    """A per-request API error that is not the pair's fault was never a judgement.
+
+    The batch run of 2026-09-16 came back with 61,515 rows of
+    `invalid_request_error: "Your credit balance is too low"`. Counting those as
+    attempts would lock those pairs out of MAX_ATTEMPTS for good, although not one
+    of them was ever judged.
+    """
+
+    def errored(err_type: str) -> dict:
+        return {"type": "error", "error": {"type": err_type, "message": "x"}}
+
+    rows = [
+        {
+            "key": "a|1",
+            "reason": "errored",
+            "detail": errored("invalid_request_error"),
+            "batch_id": "b1",
+        },
+        {
+            "key": "a|1",
+            "reason": "errored",
+            "detail": errored("authentication_error"),
+            "batch_id": "b2",
+        },
+        {
+            "key": "b|1",
+            "reason": "errored",
+            "detail": errored("overloaded_error"),
+            "batch_id": "b1",
+        },
+        {
+            "key": "c|1",
+            "reason": "schema",
+            "detail": "persistence outside allowed set",
+            "batch_id": "b1",
+        },
+        {"key": "d|1", "reason": "missing_result", "detail": None, "batch_id": "b1"},
+    ]
+    (tmp_path / "errors.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    counts = _judge(tmp_path, FakeAPI()).failure_counts()
+    assert counts["a|1"] == 0  # credit / auth: never judged
+    assert (counts["b|1"], counts["c|1"], counts["d|1"]) == (1, 1, 1)
+
+
+def test_max_submit_caps_the_wave_and_leaves_the_run_resumable(tmp_path: Path) -> None:
+    """The Batch API caps requests in flight (~100k), so a run submits in waves."""
+    pairs = [_pair(i) for i in range(6)]
+    api = FakeAPI()
+    summary = _judge(tmp_path, api, chunk=2).run(
+        pairs, sample=6, stratify=["month"], seed=1, max_submit=2
+    )
+    assert len(api.created) == 2  # 3 chunks planned, 2 submitted
+    assert summary["submitted"] == 2 and summary["chunks_left"] == 1
+    state = json.loads((tmp_path / "state.json").read_text())
+    assert state["run"]["completed"] is False
+    assert all(b["processed"] for b in state["batches"])  # the wave was collected
+
+    summary = _judge(tmp_path, api, chunk=2).run(pairs, sample=6, stratify=["month"], seed=1)
+    assert len(api.created) == 3 and summary["submitted"] == 1
+    state = json.loads((tmp_path / "state.json").read_text())
+    assert state["run"]["completed"] is True
+    keys = {json.loads(line)["key"] for line in (tmp_path / "cache.jsonl").open()}
+    assert keys == {p["key"] for p in pairs}
+
+
 def test_failure_counts_dedupe_by_key_and_batch(tmp_path: Path) -> None:
     rows = [
         {"key": "a|1", "reason": "schema", "batch_id": "b1"},

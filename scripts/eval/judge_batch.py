@@ -27,6 +27,8 @@
 - A batch create is never retried: a 5xx/transport error records the attempt
   and fails loudly (`SubmitUncertain`); a rerun resubmits that chunk only if no
   unrecorded batch of that size is listed, else `--adopt-batch ID` records it.
+- `--max-submit N` submits only N chunks per invocation and collects them, so the
+  ~100k requests-in-flight cap is never hit; the run stays resumable.
 - Resumable, no double spend: the chosen sample (keys, chunking, seed, args)
   is saved to the state file before the first submit; each batch id is appended
   to `<state>.batches.log` as soon as the create call returns, then recorded in
@@ -90,6 +92,29 @@ UNCERTAIN_SKEW = dt.timedelta(minutes=10)
 CREATE_429_DELAY = 60.0
 CREATE_429_MAX_DELAY = 600.0
 CREATE_429_RETRIES = 60
+
+#: Per-request `errored` results that say nothing about the pair: the request was
+#: rejected by the account, not judged (no credit, bad key, revoked permission).
+#: They must not burn one of MAX_ATTEMPTS -- unlike `overloaded_error`/`api_error`,
+#: which mean the model was actually asked.
+NON_ATTEMPT_ERROR_TYPES = frozenset(
+    {
+        "invalid_request_error",  # includes "Your credit balance is too low"
+        "authentication_error",
+        "permission_error",
+        "billing_error",
+    }
+)
+
+
+def counts_as_attempt(row: dict) -> bool:
+    """Whether an error row means this pair really got a judgement attempt."""
+    if row.get("reason") != "errored":
+        return True  # schema / missing_result: the model did answer (or the batch did)
+    detail = row.get("detail")
+    error = detail.get("error") if isinstance(detail, dict) else None
+    error_type = error.get("type") if isinstance(error, dict) else None
+    return error_type not in NON_ATTEMPT_ERROR_TYPES
 
 
 def retry_after_seconds(resp: httpx.Response, default: float) -> float:
@@ -253,7 +278,7 @@ class BatchJudge:
         seen = {
             (r["key"], r.get("batch_id"))
             for line in self.errors.open()
-            if line.strip() and (r := json.loads(line))
+            if line.strip() and counts_as_attempt(r := json.loads(line))
         }
         return Counter(key for key, _ in seen)
 
@@ -571,6 +596,7 @@ class BatchJudge:
         calibrate: int = 0,
         new_run: bool = False,
         collect_only: bool = False,
+        max_submit: int | None = None,
     ) -> dict:
         """Draw + persist a sample, submit its chunks, collect. Reruns continue the stored run.
 
@@ -579,6 +605,9 @@ class BatchJudge:
         batch yet and collects unprocessed batches -- the CLI's sample/seed are
         ignored then. A completed run blocks a fresh sample unless `new_run`.
         `collect_only` banks the batches already created and submits nothing.
+        `max_submit` caps how many chunks this invocation submits (the Batch API
+        caps requests in flight at ~100k): the wave is collected, the run stays
+        incomplete, and the next invocation submits the next wave.
         """
         summary: dict = {"resumed": 0, "submitted": 0, "succeeded": 0, "failed": 0}
         if collect_only:
@@ -592,7 +621,7 @@ class BatchJudge:
                 return summary
             summary["resumed"] = 1
             self.log(f"resuming stored run (seed {run['seed']}, {len(run['keys'])} keys)")
-            return self._finish(run, {p["key"]: p for p in pairs}, summary)
+            return self._finish(run, {p["key"]: p for p in pairs}, summary, max_submit=max_submit)
         if run and not new_run:
             self.log(f"completed run in {self.state}; pass --new-run to draw a fresh sample")
             summary["refused"] = True
@@ -653,9 +682,16 @@ class BatchJudge:
         if state.get("run"):
             history.append({"run": state["run"], "batches": state["batches"]})
         self._save_state({"run": run, "batches": [], "history": history})
-        return self._finish(run, unique, summary)
+        return self._finish(run, unique, summary, max_submit=max_submit)
 
-    def _finish(self, run: dict, by_key: dict[str, dict], summary: dict) -> dict:
+    def _finish(
+        self,
+        run: dict,
+        by_key: dict[str, dict],
+        summary: dict,
+        *,
+        max_submit: int | None = None,
+    ) -> dict:
         submitted = {b["chunk"] for b in self._load_state()["batches"]}
         remaining: list[tuple[int, list[str], list[dict]]] = []
         for i, chunk_keys in enumerate(run["chunks"]):
@@ -685,16 +721,26 @@ class BatchJudge:
                 raise BudgetExceeded(
                     f"remaining estimate ${est['usd']:.2f} > budget ${self.budget_usd:.2f}"
                 )
-        for i, chunk_keys, reqs in remaining:
+        wave = remaining if max_submit is None else remaining[:max_submit]
+        if len(wave) < len(remaining):
+            self.log(f"submitting {len(wave)} of {len(remaining)} remaining chunk(s) this wave")
+        for i, chunk_keys, reqs in wave:
             self._resolve_uncertain(i)
             self.submit(reqs, {custom_id_of(k): k for k in chunk_keys}, i)
             summary["submitted"] += 1
+        del remaining, wave  # the requests are large: free them before the long poll
         for entry in [b for b in self._load_state()["batches"] if not b["processed"]]:
             ok, bad = self.collect(entry)
             summary["succeeded"] += ok
             summary["failed"] += bad
         state = self._load_state()
-        state["run"]["completed"] = True
+        done = {b["chunk"] for b in state["batches"]}
+        left = [i for i in range(len(run["chunks"])) if i not in done]
+        summary["chunks_left"] = len(left)
+        if left:
+            self.log(f"{len(left)} chunk(s) not submitted yet -- rerun to continue")
+        else:
+            state["run"]["completed"] = True
         self._save_state(state)
         return summary
 
@@ -744,6 +790,12 @@ def main() -> None:
         help="draw a fresh sample even though the state file holds a completed run",
     )
     ap.add_argument(
+        "--max-submit",
+        type=int,
+        default=None,
+        help="submit at most N chunks this run (Batch API caps ~100k requests in flight)",
+    )
+    ap.add_argument(
         "--collect-only",
         action="store_true",
         help="collect the batches already created and submit nothing (no spend, no --pairs read)",
@@ -787,6 +839,7 @@ def main() -> None:
                 calibrate=args.calibrate,
                 new_run=args.new_run,
                 collect_only=args.collect_only,
+                max_submit=args.max_submit,
             )
         except (BudgetExceeded, SubmitUncertain) as exc:
             sys.exit(f"ABORT: {exc}")
