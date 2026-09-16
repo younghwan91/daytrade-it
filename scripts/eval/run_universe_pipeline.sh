@@ -101,16 +101,22 @@ JOBS=$(uv run python -c "print(max(1, min(8, int(45.0 / (0.07 * $N_USED + 0.5)))
 echo "== jobs=$JOBS for $N_USED day(s)"
 
 # ---- 4. baseline --------------------------------------------------------
-# replay_baseline has no --out: it always writes data/eval/replay_baseline.
-# Park whatever is there (another experiment's pool) before overwriting it.
-if [[ -d data/eval/replay_baseline && ! -d "data/eval/replay_baseline_before_$RUN" ]]; then
-  cp -r data/eval/replay_baseline "data/eval/replay_baseline_before_$RUN"
-  echo "parked the previous baseline at data/eval/replay_baseline_before_$RUN"
+# replay_baseline has no --out: it always writes per-day files into the shared
+# data/eval/replay_baseline, MERGING with whatever pool is already there. So
+# move the old dir out of the way (a copy is not enough -- the days this run
+# rewrites would silently replace another experiment's days of the same date),
+# take the result, and put the old one back.
+PARKED=""
+if [[ -d data/eval/replay_baseline ]]; then
+  PARKED="data/eval/replay_baseline_before_$RUN"
+  rm -rf "$PARKED" && mv data/eval/replay_baseline "$PARKED"
+  echo "parked the previous baseline at $PARKED"
 fi
 echo "== replay_baseline"
 uv run python scripts/eval/replay_baseline.py \
   --events "$EVENTS" --work-root "$OUT/replay_work" | tee "$OUT/baseline.log"
-rm -rf "$OUT/baseline" && cp -r data/eval/replay_baseline "$OUT/baseline"
+rm -rf "$OUT/baseline" && mv data/eval/replay_baseline "$OUT/baseline"
+if [[ -n "$PARKED" ]]; then mv "$PARKED" data/eval/replay_baseline; fi
 
 # ---- 5. optimizer judge -------------------------------------------------
 echo "== optimize_policy stage2 (LODO)"
