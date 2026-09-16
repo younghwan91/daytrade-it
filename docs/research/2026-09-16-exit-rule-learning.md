@@ -24,7 +24,9 @@ the live function on every sampled path for every sampled configuration, or the 
 run.
 
 **It refused.** The first run reported 5 mismatches out of 13 configurations × 400 paths, all the
-same shape: reference minute 919, twin minute 900.
+same shape: reference minute 919, twin minute 900. After the fix, a wider test passes cleanly:
+**25 configurations × 1,500 paths = 37,500 comparisons, 0 mismatches**
+(`scripts/eval/verify_more.py`).
 
 The cause was real and neither side had it right. **A stock that prints no 15:00 bar cannot be
 sold at 15:00.** Live places the exit at `flatten_at` and retries every minute with a widening
@@ -188,34 +190,102 @@ If anything is worth queuing for more evidence it is `stop_orb = 30`, the only c
 improves the worst day on both pools. That is a "collect more days" recommendation, not a
 "change live tomorrow" one.
 
-## 5. Pyramiding — `add_on_min_gain = 0.01`, measured across all 97 days
+## 5. Pyramiding, hold-to-close, and the finding that undoes this whole section
 
-Measured engine-against-engine on the same entries, so the add-on effect is not mixed with the
-lab's sell-fill model. **Numbers pending the paired run; the 2-day smoke suggested ~31–44 bp and
-is not reported as a finding until the full-sample paired figure lands.**
+### 5a. Two more "cut risk" changes, measured on the sweep pool
+
+**Pyramiding** (`add_on_min_gain = 0.01`), paired engine-against-engine on the same entries so the
+add-on effect is not mixed with the lab's fill model:
+
+| | |
+|---|---|
+| paired entries / days | 4,377 / 95 |
+| add-ons **off** | −62 bp |
+| add-ons **on** | −93 bp |
+| paired difference | **−31 bp (se 1 bp)** |
+| entries actually changed | 47.0% |
+| days worse with add-ons on | **95 of 95** |
+
+**Hold-to-close.** `vwap_exit_gap` had been pinned at its live value, which kept "switch every
+early exit off and simply flatten at 15:00" outside the search space — the same kind of ceiling
+as the +5% target cap. Adding `vwap_exit_gap ∈ {0.01, None}`:
+
+| fold | live exits | hold-to-close |
+|---|---|---|
+| 2026-04 | −49 | −50 |
+| 2026-05 | −49 | −48 |
+| 2026-06 | −36 | −34 |
+| 2026-07 | −121 | −126 |
+| 2026-08 | −12 | −9 |
+
+Hold-to-close is **within 1–5 bp of the live exits**, and the learned configuration beats it at
+p(μ>0) = 0.835 — essentially the same verdict as against live (0.871). The two baselines are
+interchangeable on this pool. (prompt-opt measured hold-to-close 60 bp *better* than live on
+overlapping rows; that comparison had pyramiding on for "live" and off for "hold", so roughly
+half of it is the add-on effect above and the rest is their label's optimism.)
+
+### 5b. Both reverse on the pool live actually trades
+
+Run through the real replay engine on the 7 dashboard days (`scripts/eval/dash7_exits.py`,
+0 errors):
+
+| policy | total | trades | losers | worst day | p(μ>0) | days ≥ 0 |
+|---|---|---|---|---|---|---|
+| **base (live default)** | **+39,915** | 35 | 12 | −2,838 | — | — |
+| `no_add_ons` | **+30,027** | 35 | 12 | −1,601 | 0.131 | 4/7 |
+| `hold_to_close` | **+29,423** | 34 | 11 | −1,601 | 0.121 | 4/7 |
+| `trail_2_1` | −547 | 51 | 21 | −8,560 | 0.016 | 1/7 |
+| `consensus` (my folds' 5/5) | −1,973 | 59 | 31 | −4,680 | 0.004 | 0/7 |
+
+Switching pyramiding off **costs 9,888 KRW** on the live pool; hold-to-close costs 10,492.
+
+### 5c. The pattern, and what it costs this document
+
+**Three independent changes — trailing, hold-to-close, and add-ons-off — all help the sweep pool
+and all hurt the dashboard pool.** None is a near miss; all three reverse.
+
+The reading is economic, not methodological. The dashboard pool is profitable (34% losing
+trades); the sweep pool is not (64% losers, −52 bp/trade). Every one of these changes trades
+upside away for downside protection — which is what a losing pool needs and what a winning pool
+is destroyed by. The risk metrics behave exactly as that predicts: on the dashboard pool both
+`no_add_ons` and `hold_to_close` **improve** the worst day (−1,601 vs −2,838) and the loser ratio
+while giving up a quarter of the profit.
+
+**So §3 and §4 do not license a live change.** The −52 → −29 bp improvement is real for a pool we
+do not trade. This is the central caveat of this document, and it was found only because the
+trailing re-test (§4b) forced the same check on every subsequent candidate.
 
 ## 6. What this does and does not establish
 
 Established:
 
-1. The exit is the **largest lever found in this whole line of work**. Ranking improvements were
-   worth +1,073 KRW/day (entry relabelling); the exit is worth **+3,545 KRW/day**, and it is the
-   only candidate to pass both loss-prevention criteria.
-2. It nevertheless **fails adoption**, on p(μ>0) and on the day-count floor.
-3. **Trailing belongs on** — 5 of 5 folds selected it, against a live default that has it off.
-   That is the single most stable finding in the search.
-4. Volatility-scaled thresholds are a **more stable parameterisation** than fixed percentages,
-   and do not beat them on realized money.
+1. The vectorized twin is exact against the live predicate: **0 mismatches in 37,500
+   comparisons**, after it caught a real live-parity bug on its first run.
+2. On the **sweep pool**, a learned exit roughly halves the per-trade loss (−52 → −29 bp),
+   improving in 5 of 5 folds, and still fails adoption (p = 0.871, 50/84 days).
+3. On the **sweep pool**, pyramiding costs 31 bp/trade (se 1) and is worse on 95 of 95 days;
+   hold-to-close is indistinguishable from the live exits.
+4. **None of that transfers.** All three risk-cutting changes reverse on the dashboard pool,
+   which is what live trades. The evidence that turned trailing off in live reproduces to the
+   won (§4b) and stands.
+5. Volatility-scaled thresholds are a **more stable parameterisation** than fixed percentages
+   (a = 1.0 in 4/5 folds vs five distinct fixed configurations in five folds) and do not beat
+   them on realized money.
 
-Not established, and the reason this line is not finished:
+Not established:
 
-- Every figure above holds the **entry ranking at the live default**. The (a)+(b) combination —
-  rank by the σ-normalised max-label model, exit by the learned rule — has not been run, and is
-  the last untested cell. Both halves improve their own margin; whether they compound or overlap
-  is unknown.
-- All figures are the **uncapped one-share-per-candidate counterfactual** over ~53 entries/day,
-  not the live 5-position portfolio. The per-trade bp are the transferable quantity; the KRW
-  totals (−2,084,384 → −1,153,107 over 84 days) are not live P&L and must not be quoted as such.
+- Whether any exit helps the **dashboard** pool. Seven days cannot answer it, and the sweep pool
+  cannot stand in for it. This is now the binding question for the whole exit line, and it needs
+  dashboard-pool days, not more sweep days.
+- The **(a)+(b) combination**. Every figure here holds the entry ranking at the live default.
+- Whether a **far target** monetises the travel distance prompt-opt measured (+10% shows 22.2x
+  raw / 9.23x σ-normalised lift, against 1.47x / 1.12x at +1%). The grid's +5% ceiling and 3%
+  trailing arm made that untestable; extended to +8%/+10% targets and 5%/8% arms, results pending.
+
+**The methodological lesson worth carrying beyond this document:** a sweep-pool optimisation
+result must be checked on dashboard days before it is called anything. Three candidates looked
+good on the sweep pool and all three would have been harmful in live. That applies to the
+optimizer and the label work as much as to exits.
 
 ## 7. Artifacts
 

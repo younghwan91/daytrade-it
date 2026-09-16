@@ -46,6 +46,13 @@ CANDIDATES: dict[str, dict] = {
         "trail_gap": Decimal("0.005"),
         "stop_orb": dt.timedelta(minutes=30),
     },
+    #: Pyramiding off. On the sweep pool it costs 31 bp/trade and is worse on
+    #: 95 of 95 days -- but so was trailing, and trailing did not transfer,
+    #: because this pool has positive drift and that one does not. Same test.
+    "no_add_ons": {"add_on_min_gain": None},
+    #: Every early exit off: hold to 15:00. prompt-opt measures this at -34 bp
+    #: against the live rules' -94 bp on the rows we share.
+    "hold_to_close": {"vwap_exit_gap": None},
 }
 
 

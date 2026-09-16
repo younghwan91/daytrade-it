@@ -44,6 +44,11 @@ ORB_WIDTHS: tuple[int, ...] = (30,)
 NOTIONAL = 100_000.0
 
 STOP_LOSS = (None, Decimal("0.010"), Decimal("0.015"), Decimal("0.020"), Decimal("0.030"))
+#: Extended to +8% and +10% on prompt-opt's finding that the travel-distance lift
+#: concentrates at FAR targets, not near ones: at +1% it is 1.47x raw / 1.12x
+#: sigma-normalised, at +10% it is 22.2x / 9.23x. A grid that stopped at +5% could
+#: not have found a configuration that monetises that, so it was extended rather
+#: than left to conclude "no target works".
 TAKE_PROFIT = (
     None,
     Decimal("0.010"),
@@ -51,7 +56,11 @@ TAKE_PROFIT = (
     Decimal("0.020"),
     Decimal("0.030"),
     Decimal("0.050"),
+    Decimal("0.080"),
+    Decimal("0.100"),
 )
+#: Wider arms for the same reason: a trailing stop that stays in for a large move
+#: is the other shape that could monetise far travel.
 TRAIL = (
     (None, Decimal("0.01")),
     (Decimal("0.01"), Decimal("0.005")),
@@ -59,9 +68,19 @@ TRAIL = (
     (Decimal("0.02"), Decimal("0.01")),
     (Decimal("0.03"), Decimal("0.01")),
     (Decimal("0.02"), Decimal("0.02")),
+    (Decimal("0.05"), Decimal("0.02")),
+    (Decimal("0.05"), Decimal("0.03")),
+    (Decimal("0.08"), Decimal("0.03")),
 )
 STOP_TIME = (None, dt.timedelta(minutes=30), dt.timedelta(minutes=60))
 STOP_ORB = (None, dt.timedelta(minutes=30))
+#: The live default runs an early VWAP-break exit (gap 0.01, min gain 0.02). Leaving
+#: it pinned would have kept "hold to close" -- switching every early exit off and
+#: simply flattening at 15:00 -- outside the search space entirely. prompt-opt
+#: measured that baseline at -34 bp against the live rules' -94 bp on the 4,496 rows
+#: we share, so it is not a straw man: a configuration that cannot beat doing
+#: nothing is worth knowing about.
+VWAP_EXIT = (Decimal("0.01"), None)
 
 
 def grid() -> list[TradingLimits]:
@@ -73,17 +92,19 @@ def grid() -> list[TradingLimits]:
             for after, gap in TRAIL:
                 for st in STOP_TIME:
                     for orb in STOP_ORB:
-                        out.append(
-                            dataclasses.replace(
-                                base,
-                                stop_loss_pct=sl,
-                                take_profit_pct=tp,
-                                trail_after_gain=after,
-                                trail_gap=gap,
-                                stop_time=st,
-                                stop_orb=orb,
+                        for vw in VWAP_EXIT:
+                            out.append(
+                                dataclasses.replace(
+                                    base,
+                                    stop_loss_pct=sl,
+                                    take_profit_pct=tp,
+                                    trail_after_gain=after,
+                                    trail_gap=gap,
+                                    stop_time=st,
+                                    stop_orb=orb,
+                                    vwap_exit_gap=vw,
+                                )
                             )
-                        )
     return out
 
 
@@ -240,6 +261,7 @@ def describe(lim: TradingLimits) -> dict:
 def short(lim: TradingLimits) -> str:
     d = describe(lim)
     bits = [
+        f"vw={d['vwap_exit_gap']}",
         f"sl={d['stop_loss_pct']}",
         f"tp={d['take_profit_pct']}",
         f"tr={d['trail_after_gain']}/{d['trail_gap']}",
@@ -345,6 +367,14 @@ def main() -> None:  # noqa: PLR0915
     # -- 2. engine parity ----------------------------------------------------
     live = TradingLimits()
     lab = stack.rewards(live)
+    hold = stack.rewards(dataclasses.replace(live, vwap_exit_gap=None))
+    print(
+        f"\nbaselines: live exits {lab.mean() * 1e4:+.0f} bp"
+        f" (win {float((lab > 0).mean()):.3f})"
+        f"   hold-to-close {hold.mean() * 1e4:+.0f} bp"
+        f" (win {float((hold > 0).mean()):.3f})"
+        f"   difference {(hold.mean() - lab.mean()) * 1e4:+.0f} bp"
+    )
 
     def compare(label: str, ref: dict[tuple[str, str], float]) -> None:
         pairs = [
@@ -401,7 +431,10 @@ def main() -> None:  # noqa: PLR0915
     # -- 4. global exit search on monthly time-ordered folds -----------------
     scores = {i: stack.rewards(c) for i, c in enumerate(configs)}
     print("\n=== global exit, monthly time-ordered folds")
-    print(f"{'fold':9s} {'n':>5s} {'chosen config':44s} {'live bp':>8s} {'chosen bp':>10s}")
+    print(
+        f"{'fold':9s} {'n':>5s} {'chosen config':52s}"
+        f" {'live bp':>8s} {'hold bp':>8s} {'chosen bp':>10s}"
+    )
     fold_rows = []
     cand_days, base_days = [], []
     for m in months[1:]:
@@ -409,7 +442,7 @@ def main() -> None:  # noqa: PLR0915
         ev = np.array([d[:7] == m for d in days.tolist()])
         best = max(scores, key=lambda i: objective(days[tr], scores[i][tr]))
         lim = configs[best]
-        ev_r, ev_live = scores[best][ev], lab[ev]
+        ev_r, ev_live, ev_hold = scores[best][ev], lab[ev], hold[ev]
         fold_rows.append(
             {
                 "fold": m,
@@ -422,15 +455,21 @@ def main() -> None:  # noqa: PLR0915
         cand_days += day_records(days[ev], ev_r)
         base_days += day_records(days[ev], ev_live)
         print(
-            f"{m:9s} {int(ev.sum()):>5d} {short(lim):44s}"
-            f" {ev_live.mean() * 1e4:>+8.0f} {ev_r.mean() * 1e4:>+10.0f}"
+            f"{m:9s} {int(ev.sum()):>5d} {short(lim):52s}"
+            f" {ev_live.mean() * 1e4:>+8.0f} {ev_hold.mean() * 1e4:>+8.0f}"
+            f" {ev_r.mean() * 1e4:>+10.0f}"
         )
     if not cand_days:
         print("fewer than two months: no time-ordered fold is possible")
         return
     oos_cand = {d["day"]: d for d in cand_days}
     oos_base = {d["day"]: d for d in base_days}
+    hold_days = day_records(
+        days[np.isin(days, [d["day"] for d in base_days])],
+        hold[np.isin(days, [d["day"] for d in base_days])],
+    )
     verdict_global = judge(oos_cand, oos_base)
+    verdict_vs_hold = judge(oos_cand, {d["day"]: d for d in hold_days})
     print(
         f"pooled: live {sum(d['net'] for d in base_days):+,.0f} KRW,"
         f" learned {sum(d['net'] for d in cand_days):+,.0f} KRW"
@@ -445,6 +484,16 @@ def main() -> None:  # noqa: PLR0915
         f" {verdict_global['loser_ratio_baseline']:.3f} adopt={verdict_global['adopt']}"
     )
     for r in verdict_global["reasons"]:
+        print(f"    - {r}")
+    v = verdict_vs_hold
+    print(
+        f"bayes_judge vs HOLD-TO-CLOSE: p(mu>0)={v['p_mu_gt_0']:.3f}"
+        f" mu={v['mu_mean']:+,.0f} days>=0={v['days_ge_0']}/{v['n_days']}"
+        f" worst {v['worst_day_candidate']:+,.0f} vs {v['worst_day_baseline']:+,.0f}"
+        f" losers {v['loser_ratio_candidate']:.3f} vs {v['loser_ratio_baseline']:.3f}"
+        f" adopt={v['adopt']}"
+    )
+    for r in v["reasons"]:
         print(f"    - {r}")
 
     # -- 5. context-dependent exit: thresholds as multiples of entry volatility --
@@ -507,6 +556,7 @@ def main() -> None:  # noqa: PLR0915
                 "folds": fold_rows,
                 "context_folds": ctx_rows,
                 "verdict_global": verdict_global,
+                "verdict_vs_hold": verdict_vs_hold,
                 "verdict_ctx_vs_live": v_ctx_live,
                 "verdict_ctx_vs_fixed": v_ctx_fixed,
                 "mfe_mean_bp": float(mfe.mean() * 1e4),
