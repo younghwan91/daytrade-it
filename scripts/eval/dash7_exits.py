@@ -53,6 +53,18 @@ CANDIDATES: dict[str, dict] = {
     #: Every early exit off: hold to 15:00. prompt-opt measures this at -34 bp
     #: against the live rules' -94 bp on the rows we share.
     "hold_to_close": {"vwap_exit_gap": None},
+    #: Far targets. prompt-opt's sigma-normalised travel-distance lift concentrates
+    #: at large moves (9.2x at +10%, 1.12x at +1%), so if travel distance is
+    #: monetisable it is here -- not at a +2% take-profit and not under a tight
+    #: trailing stop, both of which the rows above already rule out on this pool.
+    "tp5": {"take_profit_pct": Decimal("0.05")},
+    "tp8": {"take_profit_pct": Decimal("0.08")},
+    "tp10": {"take_profit_pct": Decimal("0.10")},
+    #: Paired with the one stop positive on both pools. A far target caps nothing
+    #: on the downside, so this is the natural configuration rather than a sweep.
+    "tp5_orb30": {"take_profit_pct": Decimal("0.05"), "stop_orb": dt.timedelta(minutes=30)},
+    "tp8_orb30": {"take_profit_pct": Decimal("0.08"), "stop_orb": dt.timedelta(minutes=30)},
+    "tp10_orb30": {"take_profit_pct": Decimal("0.10"), "stop_orb": dt.timedelta(minutes=30)},
 }
 
 
@@ -93,13 +105,17 @@ def main() -> None:
         print(f"{day}  {line}   errors={errs}")
 
     print()
-    print(f"{'policy':12s} {'total':>10s} {'trades':>7s} {'losers':>7s} {'worst day':>11s}")
+    base_trades = sum(int(r["trades"]) for r in results["base"])
+    print(
+        f"{'policy':14s} {'total':>10s} {'trades':>7s} {'d_trades':>9s}"
+        f" {'losers':>7s} {'worst day':>11s}"
+    )
     for name, rows in results.items():
         tot = sum(float(r["net"]) for r in rows)
         tr = sum(int(r["trades"]) for r in rows)
         lo = sum(int(r["losers"]) for r in rows)
         print(
-            f"{name:12s} {tot:>+10,.0f} {tr:>7d} {lo:>7d}"
+            f"{name:14s} {tot:>+10,.0f} {tr:>7d} {tr - base_trades:>+9d} {lo:>7d}"
             f" {min(float(r['net']) for r in rows):>+11,.0f}"
         )
 
@@ -111,7 +127,7 @@ def main() -> None:
         v = judge(cand, base_map)
         verdicts[name] = v
         print(
-            f"{name:12s} p(mu>0)={v['p_mu_gt_0']:.3f} mu={v['mu_mean']:+,.0f}"
+            f"{name:14s} p(mu>0)={v['p_mu_gt_0']:.3f} mu={v['mu_mean']:+,.0f}"
             f" days>=0={v['days_ge_0']}/{v['n_days']}"
             f" worst {v['worst_day_candidate']:+,.0f} vs {v['worst_day_baseline']:+,.0f}"
             f" losers {v['loser_ratio_candidate']:.3f} vs {v['loser_ratio_baseline']:.3f}"
