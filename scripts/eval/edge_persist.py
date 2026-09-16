@@ -40,7 +40,7 @@ from pathlib import Path
 
 BP = 10_000
 COST = 0.00367
-HORIZONS = ("0", "1", "2", "5", "10")
+HORIZONS = ("0", "1", "2", "5", "10", "20", "40")
 
 
 def day_stats(by_day: dict[str, list[float]]) -> tuple[float, float, int, int, float]:
@@ -114,6 +114,12 @@ def main() -> None:
     ap.add_argument("--master", default="data/eval/prompt_v3/master.jsonl")
     ap.add_argument("--sigma", default="data/eval/prompt_v3/sigma.json")
     ap.add_argument("--cell", action="store_true", help="null = own volatility x liquidity cell")
+    ap.add_argument(
+        "--common-days",
+        action="store_true",
+        help="keep only days where EVERY horizon resolves, so a longer horizon is "
+        "not silently also an earlier sample",
+    )
     args = ap.parse_args()
 
     sigma = json.loads(Path(args.sigma).read_text()) if Path(args.sigma).exists() else None
@@ -130,8 +136,21 @@ def main() -> None:
             r["v2"] = v2.get(r["key"], {})
             rows.append(r)
 
+    # A +40d exit needs 40 trading days of future, which only the early days
+    # have -- the sample is 2026-03-17..09-15 and today is 2026-09-17. Left
+    # alone, "alpha grows with horizon" and "the long horizons are March and
+    # April" are the same statement. This makes them separable.
+    span = ""
+    if args.common_days:
+        ok = {r["day"] for r in rows if all(h in r["r"] for h in HORIZONS)}
+        dropped = len({r["day"] for r in rows}) - len(ok)
+        rows = [r for r in rows if r["day"] in ok]
+        span = f"   [common days only: {len(ok)} kept, {dropped} dropped]"
+
     null_name = "own sigma x liquidity cell" if args.cell else "whole top-300"
-    print(f"\n{len(rows):,} pairs   null = {null_name}   cost {COST * BP:.1f} bp per round trip")
+    print(
+        f"\n{len(rows):,} pairs   null = {null_name}   cost {COST * BP:.1f} bp per round trip{span}"
+    )
     print("\n=== 1. alpha by horizon (all pairs)\n" + HEAD)
     for h in HORIZONS:
         label = "same day" if h == "0" else f"+{h}d"
@@ -154,7 +173,46 @@ def main() -> None:
             print(row("same day" if h == "0" else f"+{h}d", summarise(sel, h, args.cell, sigma)))
         print()
 
-    print("=== 4. the intraday survivor at longer horizons: pre-entry move <= +1%\n")
+    print("=== 4. month by month: does the persistence ordering hold out of sample?\n")
+    print(
+        "    The pooled ordering above is in-sample over all 125 days. A contrast\n"
+        "    that is real should keep its sign in most months on its own; one that\n"
+        "    is a few months carrying the average should not.\n"
+    )
+    months = sorted({r["day"][:7] for r in rows})
+    lasting = [r for r in rows if r["v2"].get("persistence") in ("multi_quarter", "structural")]
+    one_off = [r for r in rows if r["v2"].get("persistence") == "one_off"]
+    key = "nc" if args.cell else "na"
+    print(f"    {'horizon':<10}{'pooled':>9}  " + "".join(f"{m[5:]:>8}" for m in months) + "   +/-")
+    for h in HORIZONS:
+        per_month = []
+        for m in months:
+            la = [
+                r["r"][h] - r[key][h]
+                for r in lasting
+                if r["day"][:7] == m and h in r["r"] and h in r[key]
+            ]
+            oo = [
+                r["r"][h] - r[key][h]
+                for r in one_off
+                if r["day"][:7] == m and h in r["r"] and h in r[key]
+            ]
+            per_month.append(
+                statistics.fmean(la) - statistics.fmean(oo)
+                if len(la) > 50 and len(oo) > 50
+                else None
+            )
+        la_all = [r["r"][h] - r[key][h] for r in lasting if h in r["r"] and h in r[key]]
+        oo_all = [r["r"][h] - r[key][h] for r in one_off if h in r["r"] and h in r[key]]
+        pooled = statistics.fmean(la_all) - statistics.fmean(oo_all)
+        marks = sum(1 for v in per_month if v is not None and v > 0)
+        have = sum(1 for v in per_month if v is not None)
+        label = "same day" if h == "0" else f"+{h}d"
+        cells = "".join(f"{v * BP:>+8.0f}" if v is not None else f"{'.':>8}" for v in per_month)
+        print(f"    {label:<10}{pooled * BP:>+9.1f}  {cells}   {marks}/{have}")
+    print()
+
+    print("=== 5. the intraday survivor at longer horizons: pre-entry move <= +1%\n")
     for label, sel in (
         ("keep <= +1%", [r for r in rows if (p := r.get("pre_move")) is not None and p <= 0.01]),
         ("drop  > +1%", [r for r in rows if (p := r.get("pre_move")) is not None and p > 0.01]),

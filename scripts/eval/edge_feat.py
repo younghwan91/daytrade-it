@@ -26,7 +26,15 @@ import re
 from collections.abc import Iterator
 from pathlib import Path
 
-COST = 0.00215
+#: The retired literal. It survives ONLY so the tables in
+#: docs/research/2026-09-16-edge-hunt-matched-null.md keep reproducing the
+#: figures they were published against (-52 / +18 / +39 bp). It is the sell tax
+#: plus ONE side of commission, with spread and slippage at zero, and it is
+#: 15+ bp below what the broker actually charges. Anything NEW takes its cost
+#: from `costs.round_trip`, which delegates to krx_quant_core -- see
+#: scripts/eval/costs.py and tests/unit/test_eval_costs.py.
+LEGACY_COST = 0.00215
+COST = LEGACY_COST
 #: leading "[...]" of a title -- 급등락주 / N마감체크 / 표 / 특징주 ...
 TAG = re.compile(r"^\s*\[([^\]]{1,16})\]")
 #: "[이데일리 ...]" / "[서울=뉴스핌] ..." -- the wire that filed the story

@@ -52,7 +52,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from edge_db import connect  # noqa: E402
 from edge_null import fetch, trading_days, universe_for  # noqa: E402
 
-HORIZONS = (0, 1, 2, 5, 10)
+HORIZONS = (0, 1, 2, 5, 10, 20, 40)
 MIN_CELL = 5
 
 

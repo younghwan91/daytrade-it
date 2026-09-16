@@ -32,7 +32,13 @@ import statistics
 from collections import defaultdict
 from pathlib import Path
 
-COST = 0.00215
+#: See edge_feat.LEGACY_COST -- kept so the ladder still reproduces the
+#: published -52 / +18 / +39 bp exactly, which is what calibrates the
+#: instrument against labels.jsonl. The `net` rows are labelled as legacy-cost
+#: in the writeup; the deltas this file exists to compute are cost-free, so
+#: nothing else moves.
+LEGACY_COST = 0.00215
+COST = LEGACY_COST
 BUY_SCORE = 0.15
 BP = 10_000
 
