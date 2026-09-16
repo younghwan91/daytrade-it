@@ -403,11 +403,16 @@ def run(
 
 
 def _replay_env(
-    days: list[dt.date], stocks: dict, dart: Path, work_root: Path, cache_dir: Path
+    days: list[dt.date],
+    stocks: dict,
+    dart: Path,
+    work_root: Path,
+    cache_dir: Path,
+    events_dir: Path | None = None,
 ) -> Env:
     from replay_common import day_net, load_day  # noqa: PLC0415
 
-    data = {d: load_day(d, cache_dir) for d in days}
+    data = {d: load_day(d, cache_dir, events_dir) for d in days}
     work = work_root / str(os.getpid())
 
     def evaluate(day: dt.date, policy: NewsPolicy) -> dict:
@@ -432,6 +437,13 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--base-policy", type=Path, help="default: live defaults")
     ap.add_argument("--out", type=Path, help="default: data/eval/opt/<stage>")
     ap.add_argument("--days", help="comma-separated; default: every replay events day")
+    ap.add_argument(
+        "--events",
+        type=Path,
+        default=None,
+        help="events directory (default data/eval/replay_events; A7 passes "
+        "data/eval/replay_events_universe_a7)",
+    )
     ap.add_argument("--dart", type=Path, default=DART)
     ap.add_argument("--work-root", type=Path, default=OPT_WORK)
     ap.add_argument("--cache-dir", type=Path, default=CACHE)
@@ -445,16 +457,17 @@ def main(argv: list[str] | None = None) -> None:
         print(
             "WARNING: stage3 without --base-policy searches on the live defaults", file=sys.stderr
         )
+    events_dir = args.events or EVENTS
     days = (
         [dt.date.fromisoformat(d) for d in args.days.split(",")]
         if args.days
-        else [dt.date.fromisoformat(p.stem) for p in sorted(EVENTS.glob("2026-*.jsonl"))]
+        else [dt.date.fromisoformat(p.stem) for p in sorted(events_dir.glob("2026-*.jsonl"))]
     )
     out = args.out or OPT_OUT / args.stage
     _export_quant_airflow_env()
     stocks = QuantAirflowDBClient().get_stock_master()
     for d in days:  # build any missing cache once, before the workers read it
-        load_day(d, args.cache_dir)
+        load_day(d, args.cache_dir, events_dir)
     started = time.monotonic()
     verdict = run(
         args.stage,
@@ -463,7 +476,9 @@ def main(argv: list[str] | None = None) -> None:
         trials=args.trials,
         jobs=args.jobs,
         out=out,
-        make_env=partial(_replay_env, days, stocks, args.dart, args.work_root, args.cache_dir),
+        make_env=partial(
+            _replay_env, days, stocks, args.dart, args.work_root, args.cache_dir, events_dir
+        ),
     )
     print(json.dumps(verdict, indent=1, ensure_ascii=False))
     print(f"wall {time.monotonic() - started:.0f}s -> {out}", file=sys.stderr)

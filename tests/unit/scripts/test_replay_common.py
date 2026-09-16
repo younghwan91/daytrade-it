@@ -123,7 +123,7 @@ def _cache_env(tmp: Path, monkeypatch, rows: list[int] | None = None):  # noqa: 
     (events_dir / f"{DAY}.jsonl").write_text('{"a": 1}\n')
     counts = rows if rows is not None else [100]
 
-    def fake_build(day: dt.date) -> DayData:
+    def fake_build(day: dt.date, events_dir: Path | None = None) -> DayData:  # noqa: ARG001
         calls.append(day)
         # The first build freezes the prev-close file, as prepare_day does.
         (prev_dir / f"{day}.json").write_text('{"closes": 1}')
@@ -211,3 +211,45 @@ def test_load_day_cache_key_carries_the_code_set_version(tmp_path: Path, monkeyp
     monkeypatch.setattr(replay_common, "CODES_VERSION", "test-next")
     load_day(DAY, **kw)
     assert len(calls) == 2  # a pickle built before 069500 joined the day codes is not reused
+
+
+def test_built_day_reads_the_events_dir_it_is_given(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    """A6/A7: the universe events live beside the stage-0 ones, so the dir is a parameter."""
+    import replay_parity  # noqa: PLC0415
+
+    default, other = tmp_path / "default", tmp_path / "other"
+    default.mkdir()
+    other.mkdir()
+    monkeypatch.setattr(replay_parity, "EVENTS", default)
+    read: list[Path] = []
+    monkeypatch.setattr(replay_common, "load_events", lambda p: read.append(p) or [])
+    monkeypatch.setattr(
+        replay_parity,
+        "prepare_day",
+        lambda day, events: ({}, FrozenPrevCloses(day=day, closes={}, krx={}), None, None),  # noqa: ARG005
+    )
+
+    replay_common._build_day(DAY)
+    assert read == [default / f"{DAY}.jsonl"]
+
+    read.clear()
+    replay_common._build_day(DAY, other)
+    assert read == [other / f"{DAY}.jsonl"]
+
+
+def test_load_day_builds_from_the_events_dir_it_is_given(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    seen: list[Path | None] = []
+
+    def fake_build(day: dt.date, events_dir: Path | None = None) -> DayData:
+        seen.append(events_dir)
+        (tmp_path / "prev" / f"{day}.json").write_text('{"closes": 1}')
+        return _data()
+
+    events_dir, prev_dir, cache = tmp_path / "events", tmp_path / "prev", tmp_path / "cache"
+    events_dir.mkdir()
+    prev_dir.mkdir()
+    (events_dir / f"{DAY}.jsonl").write_text('{"a": 1}\n')
+    monkeypatch.setattr(replay_common, "_build_day", fake_build)
+    monkeypatch.setattr(replay_common, "_bars_row_count", lambda _day, _events: 100)
+    load_day(DAY, cache_dir=cache, events_dir=events_dir, prev_close_dir=prev_dir)
+    assert seen == [events_dir]

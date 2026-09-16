@@ -47,11 +47,15 @@ class DayData:
     stale_before: dt.datetime
 
 
-def _build_day(day: dt.date) -> DayData:
-    """From kr_quant, as `replay_baseline` does (non-equity tickers dropped)."""
+def _build_day(day: dt.date, events_dir: Path | None = None) -> DayData:
+    """From kr_quant, as `replay_baseline` does (non-equity tickers dropped).
+
+    `events_dir` defaults to the stage-0 events; A6/A7 pass the universe-pool
+    directory, which holds the same days under different event sets.
+    """
     from replay_parity import EVENTS, prepare_day  # noqa: PLC0415
 
-    events = load_events(EVENTS / f"{day}.jsonl")
+    events = load_events((events_dir or EVENTS) / f"{day}.jsonl")
     bad = sorted({e.ticker for e in events if not VALID_TICKER.match(e.ticker)})
     if bad:
         print(f"{day}: dropping non-equity ticker(s) {bad}", file=sys.stderr)
@@ -106,7 +110,7 @@ def load_day(
     if path.exists():
         with path.open("rb") as fh:
             return pickle.load(fh)  # noqa: S301 -- our own cache file
-    data = _build_day(day)
+    data = _build_day(day, events_dir)
     path = cache_dir / f"{day}-{_input_key(day, events_dir, prev_close_dir)}.pkl"
     cache_dir.mkdir(parents=True, exist_ok=True)
     tmp = cache_dir / f".{path.name}.{uuid.uuid4().hex}.tmp"

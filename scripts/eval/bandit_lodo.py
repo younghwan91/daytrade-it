@@ -216,6 +216,12 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--base-policy", type=Path, help="default: live defaults")
     ap.add_argument("--out", type=Path, default=OUT)
     ap.add_argument("--dart", type=Path, default=DART)
+    ap.add_argument(
+        "--events",
+        type=Path,
+        default=None,
+        help="events directory (default data/eval/replay_events)",
+    )
     ap.add_argument("--work-root", type=Path, default=WORK)
     ap.add_argument("--cache-dir", type=Path, default=CACHE)
     ap.add_argument("--jobs", type=int, default=7)
@@ -227,14 +233,15 @@ def main(argv: list[str] | None = None) -> None:
     base = load_policy(args.base_policy) if args.base_policy else NewsPolicy()
     rows = load_rows(args.dataset)
     # Every event day is a fold, even one without a dataset row.
-    days = [dt.date.fromisoformat(p.stem) for p in sorted(EVENTS.glob("2026-*.jsonl"))]
+    events_dir = args.events or EVENTS
+    days = [dt.date.fromisoformat(p.stem) for p in sorted(events_dir.glob("2026-*.jsonl"))]
     extra = sorted({r["day"] for r in rows} - {str(d) for d in days})
     if extra:
         ap.error(f"dataset days without an events file: {extra}")
     _export_quant_airflow_env()
     stocks = QuantAirflowDBClient().get_stock_master()
     for d in days:
-        load_day(d, args.cache_dir)
+        load_day(d, args.cache_dir, events_dir)
     started = time.monotonic()
     verdict = run(
         rows,
@@ -242,7 +249,9 @@ def main(argv: list[str] | None = None) -> None:
         base,
         jobs=args.jobs,
         out=args.out,
-        make_env=partial(op._replay_env, days, stocks, args.dart, args.work_root, args.cache_dir),
+        make_env=partial(
+            op._replay_env, days, stocks, args.dart, args.work_root, args.cache_dir, events_dir
+        ),
     )
     print(json.dumps(verdict, indent=1, ensure_ascii=False))
     print(f"wall {time.monotonic() - started:.0f}s -> {args.out}", file=sys.stderr)

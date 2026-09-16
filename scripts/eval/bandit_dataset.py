@@ -180,16 +180,25 @@ def load_rows(path: Path) -> list[dict]:
 _WORKER: dict = {}
 
 
-def _init(stocks: dict, dart: Path, work_root: Path, cache_dir: Path, base: NewsPolicy) -> None:
+def _init(
+    stocks: dict,
+    dart: Path,
+    work_root: Path,
+    cache_dir: Path,
+    base: NewsPolicy,
+    events_dir: Path | None = None,
+) -> None:
     _WORKER.update(stocks=stocks, dart=dart, work=work_root / str(os.getpid()), cache=cache_dir)
     _WORKER["base"] = base
+    _WORKER["events"] = events_dir
 
 
 def _day_job(day: dt.date) -> list[dict]:
     from replay_common import load_day  # noqa: PLC0415
 
     w = _WORKER
-    return day_rows(load_day(day, w["cache"]), w["base"], w["stocks"], w["dart"], w["work"])
+    data = load_day(day, w["cache"], w["events"])
+    return day_rows(data, w["base"], w["stocks"], w["dart"], w["work"])
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -205,6 +214,12 @@ def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--base-policy", type=Path, help="default: live defaults")
     ap.add_argument("--days", help="comma-separated; default: every replay events day")
+    ap.add_argument(
+        "--events",
+        type=Path,
+        default=None,
+        help="events directory (default data/eval/replay_events)",
+    )
     ap.add_argument("--dart", type=Path, default=DART)
     ap.add_argument("--out", type=Path, default=OUT)
     ap.add_argument("--work-root", type=Path, default=WORK)
@@ -216,16 +231,17 @@ def main(argv: list[str] | None = None) -> None:
     if args.base_policy is not None and not args.base_policy.exists():
         ap.error(f"--base-policy {args.base_policy} does not exist")
     base = load_policy(args.base_policy) if args.base_policy else NewsPolicy()
+    events_dir = args.events or EVENTS
     days = (
         [dt.date.fromisoformat(d) for d in args.days.split(",")]
         if args.days
-        else [dt.date.fromisoformat(p.stem) for p in sorted(EVENTS.glob("2026-*.jsonl"))]
+        else [dt.date.fromisoformat(p.stem) for p in sorted(events_dir.glob("2026-*.jsonl"))]
     )
     _export_quant_airflow_env()
     stocks = QuantAirflowDBClient().get_stock_master()
     for d in days:
-        load_day(d, args.cache_dir)
-    init = partial(_init, stocks, args.dart, args.work_root, args.cache_dir, base)
+        load_day(d, args.cache_dir, events_dir)
+    init = partial(_init, stocks, args.dart, args.work_root, args.cache_dir, base, events_dir)
     with multiprocessing.Pool(min(args.jobs, len(days)), init) as pool:
         per_day = pool.map(_day_job, days, chunksize=1)
     rows = [r for day in per_day for r in day]
