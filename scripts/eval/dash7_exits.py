@@ -33,7 +33,6 @@ import argparse
 import dataclasses
 import datetime as dt
 import json
-from decimal import Decimal
 from pathlib import Path
 
 from daytrade_it.application.trading.policy import NewsPolicy
@@ -51,15 +50,33 @@ from daytrade_it.application.trading.policy import NewsPolicy
 #:
 #: `vwap_exit_hit` and `add_on_hit` are byte-identical between this branch and
 #: origin/main (verified by diff), so a result here transfers to live.
+#: Entry-window sweep. `entry_start` / `entry_end` ARE on main (unlike the exit
+#: knobs), and the enforcement is identical between branches -- my branch has one
+#: extra gate inside `_deferred_entries`, which is inert because nothing is ever
+#: deferred with entry timing at its defaults (verified).
+#:
+#: Motivation: on the dashboard pool the return decays monotonically through the
+#: day (09:00-09:01 +166 bp, 09:02-10:00 +42, 10:00-12:00 -63, 12:00+ -58), while
+#: detection DELAY shows nothing (spearman +0.051). Time of day is the candidate;
+#: latency is not.
+#:
+#: Note the trade-count effect runs the other way from an exit change: narrowing
+#: the window removes entries outright rather than freeing slots, so this is a
+#: comparison against a smaller book.
 CANDIDATES: dict[str, dict] = {}
-for _g in (None, Decimal("0.005"), Decimal("0.02"), Decimal("0.03")):
-    CANDIDATES[f"vwap_gap={_g}"] = {"vwap_exit_gap": _g}
-for _m in (Decimal("0.01"), Decimal("0.03"), Decimal("0.05")):
-    CANDIDATES[f"vwap_min_gain={_m}"] = {"vwap_exit_min_gain": _m}
-for _a in (None, Decimal("0.005"), Decimal("0.02"), Decimal("0.03")):
-    CANDIDATES[f"add_on={_a}"] = {"add_on_min_gain": _a}
-for _b in (Decimal("0.02"), Decimal("0.05")):
-    CANDIDATES[f"add_on_band={_b}"] = {"add_on_price_band": _b}
+for _h, _m in ((10, 0), (11, 0), (12, 0), (13, 0)):
+    CANDIDATES[f"entry_end={_h:02d}:{_m:02d}"] = {"entry_end": dt.time(_h, _m)}
+#: If the open batch carries the effect, the other half is whether we should take
+#: MORE of it -- the 09:01 batch currently competes for the same five slots as the
+#: whole day.
+for _n in (8, 10):
+    CANDIDATES[f"max_open={_n}"] = {"max_open_positions": _n}
+for _n in (15, 20):
+    CANDIDATES[f"max_entries={_n}"] = {"max_entries_per_day": _n}
+CANDIDATES["open_only+max_open=10"] = {
+    "entry_end": dt.time(10, 0),
+    "max_open_positions": 10,
+}
 
 
 def main() -> None:
