@@ -5,12 +5,22 @@ zero Kiwoom. kr_quant read with `default_transaction_read_only = on` throughout 
 never written. `~/git/daytrade-it`, the live daemon and the minute-bar backfill untouched;
 nothing committed in `~/git/daytrade-it-aplan`.
 
-**Verdict: no detectable edge from dashboard membership, and the test the brief specified
-cannot be run at all on current data.** The specified live-parity comparison yields **n = 0**.
-A judgment-free proxy that sidesteps both blockers does run, on 327 vs 14,666 pairs, and finds
-**+13 bp ± 23 bp** — indistinguishable from zero, against the ~64 bp this sample could have
-detected. What dashboard membership does change is **dispersion**: sd 415 bp vs 218 bp at a
-*lower* win rate. That is a more-volatile-names signature, not a better-news signature.
+**Verdict: no edge from dashboard membership.** The live-parity comparison the brief specified
+cannot be run at all — it yields **n = 0**. A judgment-free test does run, on 327 vs 14,666
+pairs, and on the *decontaminated* news-quality label (post-article maximum) dashboard
+membership first looks like a decisive win: **+102 bp, `bayes_judge` p(μ>0) = 0.963, 9/9 days,
+adopt = true**.
+
+That win is an artifact. Dashboard-selected names carry **twice the pre-entry minute volatility**
+(41 bp vs 21 bp), and a maximum scales with volatility mechanically. Measured per unit of
+volatility, dashboard is **−0.15σ against sweep-only and −0.46σ against random tickers**, and
+`bayes_judge` flips to **adopt = false, p(μ>0) = 0.432**. Had dashboard articles merely been
+*sweep-only quality* at their own volatility, their maximum would have been **+294 bp**; the
+observed figure is **+252 bp**, i.e. below what their volatility alone implies.
+
+This is the brief's **third outcome**: no edge. The dashboard pool's +39,915 KRW over 7 days is
+most economically explained as a volatility draw, and the live policy's evidence base is weaker
+than we have been treating it.
 
 ---
 
@@ -91,81 +101,114 @@ dashboard membership, so it thins the treatment group exactly as hard as the con
 
 So the brief's step 3/4 comparison is reported as **not runnable**, not as a null result.
 
-## 4. A judgment-free test that does run
+## 4. Retraction: the MFE framing in my earlier note was wrong
 
-Both blockers are about *judgments and replay*, not about prices. The economic core of the
-question — are dashboard-selected articles better news? — can be asked with prices alone: for
-every (article, ticker) pair on those days, the stock's forward return from the first completed
-minute at or after publication (pre-open publications enter at 09:00, as the live premarket
-batch does). Same days, same construction for both groups.
+I previously offered "mean MFE +154 bp against −51 bp realized" as motivation for exit work.
+**That was not evidence and I withdraw it.** A maximum over a path is at or above the entry for
+any stock and any entry, so the gap is partly just what maxima do. Every MFE figure below is
+therefore paired with a **null group**: entries on the same days, at the same minutes, on random
+tickers from that day's tradable universe (3 draws per real pair, 37,100 draws).
 
-**This is a proxy and the gaps are large:** no entry filter (the live policy trades a pair only
-if the v2 score clears 0.15 and the stock has not already run), no exit rule, no fill model, no
-costs (~23 bp of tax and commission alone), no concurrency or caps. It can settle the direction
-and rough size of a membership effect. It cannot price one.
+The null settles it immediately. Random entries reach **mfe_close +204 bp** — and our sweep-pool
+pairs reach only **+150 bp**, i.e. **53 bp below random** (se 2 bp). Our entries do not have
+unusual unrealized upside; they have *less* than random draws from the same universe at the same
+minutes. The "we are giving back large gains" story is retired.
 
-| group | n | r+30m | r+60m | r+120m | r→15:00 | win@close | sd(r→close) |
-|---|---|---|---|---|---|---|---|
-| dashboard (all, incl. non-universe) | 433 | +23 | +36 | +49 | **+55** | 0.416 | 521 |
-| **dashboard ∩ sweep** | **327** | −5 | +8 | +15 | **+23** | 0.401 | 415 |
-| **sweep-only** | **14,666** | +4 | +2 | +8 | **+11** | 0.441 | 218 |
+## 5. A judgment-free test that does run
 
-All figures in bp. The apples-to-apples rows are the middle two — same days, same universe,
-same construction. The top row is higher but not comparable: it includes the non-universe
-tickers, which are smaller and more volatile.
+Both blockers in §3 are about judgments and replay, not prices. So: for every (article, ticker)
+pair on those days, the stock's forward path from the first completed minute at or after
+publication (pre-open publications enter at 09:00, as the live premarket batch does). Same days,
+same construction, three groups.
 
-**Observed gap: +13 bp. Standard error of that gap: 23 bp.** 80% power at 5% would need a true
-gap of about **64 bp**. The comparison cannot distinguish the groups, and +13 bp should be read
-as "no measurable difference", not as a small positive.
+**This is a proxy.** No entry filter, no exit rule, no fill model, no costs (~23 bp of tax and
+commission alone), no concurrency or caps. It settles direction and size, not price.
 
-`bayes_judge` at the day level (mean forward return per day, 9 days with both groups present,
-`prior_sd` 50 bp to match the bp scale):
+### Endpoint return (bp)
 
-```
-p(mu>0) = 0.389   mu = -9.0 bp   days>=0 = 4/9   adopt = false
-  - p_mu_gt_0=0.3889 < 0.90
-  - worst_day_candidate=-190.8 < worst_day_baseline=-106.1
-  - loser_ratio_candidate=0.4037 > loser_ratio_baseline=0.3914
-  - days_ge_0=4 < ceil(5/7*9)=7
-```
+| group | n | r+30m | r+60m | r+120m | r→15:00 | win |
+|---|---|---|---|---|---|---|
+| dashboard ∩ sweep | 327 | −5 | +8 | +15 | +23 | 0.401 |
+| sweep-only | 14,702 | +3 | +2 | +8 | +11 | 0.441 |
+| **NULL (random)** | 37,100 | +10 | +10 | +16 | **+21** | 0.426 |
 
-Note the day-level mean is *negative* (−9.0 bp) where the pair-level mean is positive (+13 bp):
-weighting days equally rather than pairs equally flips the sign. An effect that changes sign
-under a reweighting that mild is not an effect.
+Note the null already beats the sweep pool on the endpoint too (+21 vs +11).
 
-## 5. What did differ: dispersion, not mean
+### Post-entry maximum — a RANKING label, never P&L (bp)
 
-The one clearly non-null difference is second-moment. Dashboard-present pairs have **sd 415 bp
-against sweep-only's 218 bp** — close to double — while their **win rate is lower** (0.401 vs
-0.441). Dashboard selection is picking names that move more in both directions, slightly more
-often down.
+| group | mfe+30m | mfe+60m | mfe+120m | mfe→close | **excess over null** |
+|---|---|---|---|---|---|
+| dashboard ∩ sweep | +135 | +167 | +205 | +252 | **+48** (se 23) |
+| sweep-only | +83 | +101 | +120 | +150 | **−53** (se 2) |
+| NULL (random) | +114 | +141 | +167 | +204 | — |
 
-For a strategy with a stop and a 15:00 flatten that is not automatically good news, and it is a
-plausible mechanical explanation for why the 7-day dashboard backtest looked strong: higher
-dispersion with the same slight positive drift produces a wide spread of daily outcomes, and 7
-days is few enough to land on a good draw. It does not establish that; it offers a reading that
-+39,915 KRW over 7 days cannot rule out.
+### The volatility control, which decides it
+
+| group | n | pre-entry σ | sd(r→close) | **mfe/σ** | r/σ |
+|---|---|---|---|---|---|
+| dashboard ∩ sweep | 204 | 41 bp | 415 bp | **5.29** | 1.01 |
+| sweep-only | 10,537 | 21 bp | 218 bp | **5.44** | 0.36 |
+| NULL (random) | 26,590 | 25 bp | 312 bp | **5.75** | 0.45 |
+
+dashboard − sweep-only: **−0.15σ** (se 0.68). dashboard − null: **−0.46σ** (se 0.68).
+
+Two things follow, and the second is the more important one.
+
+1. **Dashboard's raw MFE advantage is entirely a volatility effect.** Its names have ~2× the
+   minute volatility. Scaling sweep-only's +150 bp by that ratio predicts +294 bp; the observed
+   +252 bp is *below* it. Per unit of risk, dashboard articles are not better news.
+2. **All three groups sit at 5.3–5.8 σ of maximum**, random tickers included. That narrow band
+   *is* "what a maximum does". Once volatility is divided out, the post-article maximum carries
+   almost no cross-sectional information — which is a direct warning about relabelling entry
+   selection with MFE: a selector trained on raw MFE will mostly learn *which stock is volatile*,
+   not *which news is good*. Any MFE-labelled selector must be σ-normalised from the start.
+
+### Minutes from entry to the peak
+
+| group | p10 | p25 | median | p75 | p90 | mean |
+|---|---|---|---|---|---|---|
+| dashboard ∩ sweep | 0 | 0 | 14 | 177 | 319 | 94 |
+| sweep-only | 0 | 0 | 34 | 162 | 275 | 89 |
+| NULL (random) | 0 | 0 | 27 | 148 | 262 | 83 |
+
+The distribution is strongly bimodal: a quarter of entries peak in the *first minute*, and the
+upper quartile not until 2.5–5 hours later. "빨리 먹고 나와야지" is supported for the early mode —
+but the same shape appears in the random group (median 27 min), so it is a property of intraday
+price paths, not of our news.
+
+### `bayes_judge`, dashboard ∩ sweep vs sweep-only (9 days with both present)
+
+| label | p(μ>0) | μ | days ≥ 0 | pair-level gap ± se | adopt |
+|---|---|---|---|---|---|
+| realized endpoint | 0.389 | −9.0 bp | 4/9 | +13 ± 23 bp | **false** |
+| post-entry maximum | **0.963** | +56.6 bp | 9/9 | +102 ± 23 bp | **true** |
+| **maximum, in σ** | 0.432 | −0.1 | 4/9 | **−0.15 ± 0.68 σ** | **false** |
+
+The middle row is the one that would have been reported as a discovery without the volatility
+control. The bottom row is the same data with the mechanical channel removed.
 
 ## 6. Answering the brief
 
 | step | result |
 |---|---|
-| 1. overlap window | 10 trading days, 09-01..09-15; 09-02 has no dashboard rows (collection gap) |
-| 2. containment | **17.2% overall; 75.1% conditional on being poolable.** Key derivation verified on 1,346/1,346 |
-| 3. two-group per-pair reward | **not runnable — n = 0** (7 days fail the bar backfill, 2 more fail in-replay, the 1 clean day has no entries; and only 31 dashboard pairs are judged at all) |
-| 4. `bayes_judge` | on the price proxy: `adopt = false`, p(μ>0) = 0.389. Explicitly underpowered: se 23 bp, detectable gap ~64 bp, observed +13 bp |
-| 5. is membership predictable? | **not attempted** — the brief gated this on the edge being real, and it is not detectable |
+| 1. containment | **17.2% overall; 75.1% conditional on being poolable.** Key derivation verified 1,346/1,346 |
+| 2. does membership carry the edge? | **No.** Realized: +13 ± 23 bp (nothing). Raw maximum: +102 bp, adopt=true — but −0.15σ once volatility is divided out, adopt=false |
+| 3. is membership predictable? | **not attempted** — gated on the edge being real |
 
-**Recommendation on A-plan spend:** this is a clean negative on the specific hypothesis, and it
-argues against buying more sweep-pool judging days *for the purpose of chasing the dashboard's
-7-day result*. It does not close the question, because the proxy has no entry filter and so
-cannot rule out an interaction between membership and the v2 score.
+**On the subset argument.** "Dashboard ⊂ sweep, so sweep can never be worse — just discard the
+rest" is sound *where containment holds*, but it holds for a smaller slice than it sounds: two
+thirds of dashboard articles are not poolable at all (46% carry no ticker, 19% are outside
+N=300), and of the poolable remainder the sweep carries 75%. So the argument applies to roughly
+a fifth of the dashboard. And within the days we can measure, there is no quality difference to
+go and find — which makes "we are failing to identify the subset" the less likely reading.
 
-The cheap way to close it properly, when spend is available again: **judge the ~232
-dashboard ∩ pool articles' pairs directly** (roughly 378 pairs on these 10 days) instead of
-waiting for a stratified sample to cover them. That is targeted, small, and it is the only thing
-that turns step 3 from n = 0 into a real comparison. It also needs the minute-bar backfill to
-reach 09-01..09-15 first — currently ~1,050 codes/day there against ~1,290 in late August.
+**Which of the three outcomes:** the third. No edge. Reported plainly, as asked.
+
+**What would still change this.** The proxy has no entry filter, so a membership × v2-score
+interaction is not excluded — dashboard articles *that also score highly* were never tested
+separately. Closing that needs the ~232 dashboard ∩ pool articles' pairs (≈378 on these days)
+judged directly rather than waiting for a stratified sample, plus the minute-bar backfill
+reaching 09-01..09-15.
 
 ## 7. Artifacts
 
