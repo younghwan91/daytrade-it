@@ -34,6 +34,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import random
 import statistics
 from collections import defaultdict
 from pathlib import Path
@@ -43,11 +44,39 @@ COST = 0.00367
 HORIZONS = ("0", "1", "2", "5", "10", "20", "40")
 
 
-def day_stats(by_day: dict[str, list[float]]) -> tuple[float, float, int, int, float]:
-    means = [statistics.fmean(v) for v in by_day.values()]
+def day_stats(
+    by_day: dict[str, list[float]], block: int = 1, reps: int = 2000, seed: int = 11
+) -> tuple[float, float, int, int, float]:
+    """Day-clustered mean, with a block bootstrap when windows overlap.
+
+    A +40d hold started today and one started tomorrow share 39 of their 40
+    days. Treating those as two independent observations understates the
+    standard error by roughly sqrt(40). The moving-block bootstrap resamples
+    contiguous runs of `block` days, so the overlap is carried into the
+    resamples and the error comes out honest. `block = 1` is the ordinary
+    day-clustered case and reproduces the plain standard error.
+    """
+    days = sorted(by_day)
+    means = [statistics.fmean(by_day[d]) for d in days]
     n = len(means)
     mu = statistics.fmean(means)
-    se = statistics.stdev(means) / math.sqrt(n) if n > 1 else float("nan")
+    if n < 2:
+        return mu, float("nan"), n, sum(m >= 0 for m in means), min(means)
+    if block <= 1:
+        se = statistics.stdev(means) / math.sqrt(n)
+        return mu, se, n, sum(m >= 0 for m in means), min(means)
+
+    block = min(block, n)
+    rng = random.Random(seed)
+    n_blocks = max(1, n // block)
+    boots = []
+    for _ in range(reps):
+        sample: list[float] = []
+        for _ in range(n_blocks):
+            start = rng.randrange(0, n - block + 1)
+            sample += means[start : start + block]
+        boots.append(statistics.fmean(sample))
+    se = statistics.stdev(boots)
     return mu, se, n, sum(m >= 0 for m in means), min(means)
 
 
@@ -73,9 +102,11 @@ def summarise(
                 z_by[r["day"]].append(alpha / (s * math.sqrt(int(h) + 1)))
     if total < 200:
         return None
-    a_mu, a_se, n_days, _, _ = day_stats(a_by)
-    n_mu, _, _, n_ge, worst = day_stats(n_by)
-    z_mu, z_se = day_stats(z_by)[:2] if z_by else (float("nan"), float("nan"))
+    # windows of a +h hold overlap on h of their h+1 days
+    block = int(h) + 1
+    a_mu, a_se, n_days, _, _ = day_stats(a_by, block)
+    n_mu, _, _, n_ge, worst = day_stats(n_by, block)
+    z_mu, z_se = day_stats(z_by, block)[:2] if z_by else (float("nan"), float("nan"))
     days_held = max(int(h), 1)
     return {
         "n": total,

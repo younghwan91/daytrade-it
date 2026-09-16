@@ -128,7 +128,7 @@ At 632× the sample the baseline is not +1.27%, and it is not positive. The most
 
 ---
 
-## 2.5 The cost floor, which is 15 bp higher than every table in this repo assumes
+### 2.5 The cost floor, which is 15 bp higher than every table in this repo assumes
 
 If the whole question is a few bp of signal against a round trip, the round trip has to be right. `COST = 0.00215` — used by `prompt_ceiling.py`, `prompt_oracle_mine.py`, `prompt_dashboard_fanout.py` and every table above — is not the cost this system pays. It is the 0.20% sell tax plus **one side** of commission, with **no spread and no slippage at all**.
 
@@ -357,8 +357,10 @@ Ordered by how much the answer would move per unit of effort.
 **1. Real archive days. This is the binding constraint and it is nearly free.**
 Every claim that the live pool differs from the sweep pool rests on **two days**. They accrue at one per trading day and cost nothing but leaving the collector running. Twenty real archive days would settle §2 in a month, and until then the "live pool makes money" premise — which is the premise under which live trading was paused rather than stopped — is unsupported. Nothing else in this list is worth doing before this.
 
-**2. Do not buy more Haiku labelling to answer *this* question.**
+**2. Do not buy more Haiku labelling to answer *this* question — but see §8.7, which finds the one question where it would help.**
 The directive says to buy labels rather than accept a thin sample, and that is right in general, but it does not apply to the entry-selection question. The 132,185 already-judged pairs put the whole LLM field block at ±8 bp against a matched null with `score` non-monotone, and the character-n-gram bound on the raw text caps any possible prompt at 1.9% of the oracle gap. Buying labels buys more of a quantity that has now been measured at zero three independent ways, and a fourth measurement against a properly matched null. Labels **are** the binding constraint for the learning curve and for a bandit with enough days; they are not the binding constraint for "does the news tell us which stock to buy".
+
+That holds for the *entry-selection* question and for the intraday horizon, which is what this section is about. §8 opened a question it does not cover: `persistence` is the one judgment field that earns anything, it only earns it on a multi-day horizon, and the labels that carry it exist for 2026-03..09 only. Extending them is the single labelling purchase in this project with a live question attached to it.
 
 **3. Attack the ~36.7 bp, because the signal is not going to grow to meet it.**
 Per §2.5 the bar is about 36.7 bp, not 21.5, and the honest central estimate of our selection alpha is +1.6 ± 3.4 — a factor of roughly twenty. The entire cross-sectional spread of conditional means found anywhere in §4 is about ±30 bp, so even a perfect, costless selector over the free attribute set would not clear the floor. No feature search can close a gap this size; only the cost term can move.
@@ -378,7 +380,212 @@ The 56.8 bp open-to-close headwind is a property of long-only top-300 Korean equ
 
 ---
 
-## 7. Reproduction
+## 7. The arithmetic
+
+Everything above reduces to one sum. A trade earns the drift of its bucket, plus whatever our selection adds, minus the toll:
+
+```
+net  =  alpha  +  null  -  cost
+```
+
+This is an identity, not an estimate: `alpha` is *defined* as `ret - null`, so the three terms cannot double-count. What can go wrong is mixing components from different populations, and the numbers below are matched — each row's alpha and null come from the same acting-minute bucket.
+
+Per pair, in bp, over 125 days and 132,077 pairs, at the real round trip of 36.7 bp (§2.5). Every quantity is pair-weighted and day-clustered, and both the alpha and the drift come from the same stratum-matched null, so each row is an exact identity rather than three numbers from three places:
+
+| acting minute | n | share | alpha | se | null (drift) | se | t | **net** |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| **09:00 open** | 55,308 | 41.9% | −4.8 | 7.0 | **−56.3** | 18.8 | **−3.00** | **−97.8** |
+| 09:01–09:29 | 16,553 | 12.5% | −3.0 | 4.4 | −18.6 | 16.5 | −1.13 | −58.3 |
+| 09:30–09:59 | 14,091 | 10.7% | +5.2 | 5.2 | −25.8 | 15.1 | −1.71 | −57.3 |
+| 10:00–10:59 | 19,438 | 14.7% | +7.9 | 3.1 | −21.8 | 13.3 | −1.64 | −50.7 |
+| 11:00–12:59 | 12,279 | 9.3% | +2.4 | 2.9 | −5.0 | 10.2 | −0.49 | −39.3 |
+| **13:00+ (best case)** | 14,408 | 10.9% | −0.5 | 1.6 | **+5.6** | 5.1 | 1.10 | **−31.6** |
+
+**No row is positive, and the best row is not close.** The best case available — perfect timing, entering only after 13:00, and granting ourselves the drift at its point estimate — is **−31.6 bp per trade**. The worst case, where 42% of our pairs actually act, is **−97.8 bp**.
+
+(The drift figures here differ from §3's curve because the weighting differs and both are correct for their own question. §3 weights each acting minute once per day, which is what "what does the headwind look like through the session" asks. This table weights by pairs, which is what "what did we earn" asks. They agree at the open, where there is only one minute, and diverge intraday because our pairs cluster on particular minutes.)
+
+Three corrections to the version of this sum that was circulating:
+
+1. **The cost term is 36.7 bp, not 21.5.** Per §2.5 the research constant omits spread and slippage and counts commission once. This alone moves every row by −15.2 bp.
+2. **The afternoon drift does not survive its own standard error.** +5.6 bp has se 5.1, t = 1.10, and is positive on 73 of 125 days. It should be read as zero, which makes the best case **≈ −37 bp** rather than −31.6. The only rung in the table that is statistically solid is the one that hurts: the open at t = −3.00.
+3. **Alpha must come from the same bucket as the drift.** Pairing the pool-wide +1.6 bp with the 13:00+ drift overstates the best case; the 13:00+ bucket's own alpha is −0.5 bp.
+
+On order size: 36.7 bp is if anything optimistic for us. The tick-grid floor is size-independent — a 100,000 KRW order crosses the same one-tick spread as a large one — and a position that small cannot be worked across the book to do better.
+
+**So the conclusion is not "we have not found the edge yet."** It is:
+
+> Long-only intraday trading on this universe cannot clear its costs even with perfect entry timing, because the selection alpha is zero at every hour and the day's drift never exceeds the toll.
+
+Each of those qualifiers — *this universe*, *this horizon*, *long-only*, *a 21.8-minute lag*, *a 36.7 bp toll* — is a thing that could be changed rather than a law of nature, and §7.1 through §8 change them one at a time.
+
+### 7.1 Is the headwind ours or the market's? It is ours.
+
+Our universe is the top 300 by the *previous* day's traded value — a momentum screen wearing a liquidity costume. `scripts/eval/edge_universe.py`, equal-weight open-to-close, **2,454 days over 121 months, 2016-09 .. 2026-09**, with the round trip priced per universe from its own tick grid:
+
+| universe | drift | se | spread | cost | **net** | months > 0 |
+|---|---:|---:|---:|---:|---:|---:|
+| all traded codes | **−6.4** | 2.3 | 22.7 | 45.7 | −52.1 | 44/121 |
+| **top 300 by prior-day value (ours)** | **−28.6** | 2.6 | 13.4 | 36.4 | **−65.0** | **11/121** |
+| rank 301–600 | −16.4 | 2.8 | 13.6 | 36.6 | −52.9 | 30/121 |
+| rank 601–900 | −8.1 | 2.8 | 13.7 | 36.7 | **−44.8** | 45/121 |
+| our 300, **movers** third (top 1/3 by yesterday's |move|) | **−42.0** | 3.3 | 13.8 | 36.8 | −78.8 | **6/121** |
+| our 300, **calm** two-thirds | −21.8 | 2.5 | 13.2 | 36.2 | −58.0 | 20/121 |
+
+**This table corrects an earlier version of this document.** Measured over the six months of the news sample alone, the market-wide drift looked like −29.8 bp and the conclusion drawn was "about 30 bp is the market and is irreducible for any long-only intraday strategy". That was regime. Over ten years the market's intraday drift is **−6.4 bp** — small, if statistically negative. The earlier claim is withdrawn.
+
+What the ten-year view shows instead is worse for us and better for the project:
+
+- **The headwind is almost entirely our own screen.** Ours is −28.6 bp against the market's −6.4 — **22.2 bp of self-harm**, negative in **110 of 121 months**. That is structural, not regime, and it is a choice we made.
+- **The ranking decay is real** — monotone −28.6 → −16.4 → −8.1, with 11/121 → 30/121 → 45/121 positive months. (A six-month version of this table showed the decay reversing in three of seven months. That too was noise.)
+- **The movers third is the single most robust result in this investigation**: −42.0 bp, positive in **6 of 121 months**, across 2,454 days.
+- **The cheapest universe is not the best one.** "All traded codes" has the smallest drift but a 22.7 bp spread, because it includes low-priced names on a coarse relative tick grid; that eats the advantage and leaves it at −52.1 net. The spread penalty is real and it is why `net` is the column that matters.
+
+**By net the best available universe is rank 601–900 at −44.8 against our −65.0 — +20.2 bp, free.** Dropping the movers third from our own universe is worth +20.2 bp on the drift and keeps the universe's shape.
+
+It does not flip the sign: −44.8 is a smaller loss, not a profit, and nothing here is a path back to trading. But the framing changes. It is not that the market is against us. It is that **`select_universe` was chosen for sweep lap time rather than for returns, and has been costing about 22 bp a trade for the life of the project.** That is a fixable mistake rather than a law of nature.
+
+### 7.2 Trading less, and whether more data can rescue this
+
+**Fewer, larger trades.** Cost is charged per trade and alpha is zero, so trading less is strictly better and the limit of the argument is trading nothing. That is not a rhetorical flourish, it is the boundary condition: with `alpha ≈ 0`, expected P&L is `n × (null − cost)`, and since `null < cost` in every hour of the day (§7), the optimum over `n` is `n = 0`. Any proposal that increases trade count — pyramiding, add-ons, re-entries — moves the wrong way twice, because each additional round trip pays the full 36.7 bp rather than the 21.5 it was evaluated against.
+
+**Can more data rescue this?** No, and the power arithmetic is worth stating because it answers the question directly rather than by assertion. The day-level standard deviation of the pool's alpha is 38 bp (se 3.4 over 125 days). To detect an effect at t = 2:
+
+| effect to detect | trading days needed |
+|---:|---:|
+| **36.7 bp (the cost floor — the smallest tradeable effect)** | **4** |
+| 20 bp | 14 |
+| 12 bp | 40 |
+| 8 bp | 90 |
+| 5 bp | 231 |
+| **1.6 bp (what we actually measure)** | **2,256 (≈ 9 years)** |
+
+**An effect large enough to trade would have been visible in four days. We have 125.** The sample is not the constraint and never was; the effect is roughly twenty times too small. This is the quantitative form of the §6 argument against buying more labelling for the entry question, and it applies equally to buying more days of anything at daily or minute resolution.
+
+The corollary is the one useful thing in the table: because the bar is high, ruling things out is cheap. Forty days of any new data source is enough to detect a 12 bp effect and to reject a 36.7 bp one decisively.
+
+**Order flow, sized rather than argued.** `ticks` and `quotes` currently hold **18 trading days**, 2026-08-24 to 2026-09-16, at roughly 120–250 codes per day. A month of further collection takes that to about 38 days — which, per the table above, is enough to detect a 12 bp effect and more than enough to rule out a tradeable one. So the honest sizing of this lever is:
+
+- it is the only untested hypothesis class, since every result in this document lives at minute or daily resolution;
+- a month of collection makes it a **well-powered test**, not a well-powered strategy;
+- it costs nothing but leaving the collector running, and it runs in parallel with everything else;
+- and it should be scoped as "rule it in or out" rather than "build on it". If microstructure carried a 36.7 bp same-day edge on KRX top-300, it would be the best-documented anomaly in the market.
+
+The day-level sd of a tick-feature-selected subset will be larger than the pool's, since fewer pairs per day means a noisier daily mean, so 38 days is the optimistic end of that estimate.
+
+---
+
+## 8. Persistent news over multi-day horizons
+
+> This is a different strategy from day trading. It should be chosen knowingly, not drifted into. Everything below is a multi-day hold, which the live system cannot currently execute or manage, and which consumes capital across days rather than releasing it at the close.
+
+Two of this project's binding constraints weaken only on a longer horizon, and they are the two that closed off everything else tonight. We are ~21.8 minutes late to every article and most of that lag is upstream of us, so an impulse is unreachable — but if the news has *lasting* impact, arriving late costs little. And the 20 bp sell tax is charged per disposal, so it amortises: the 36.7 bp round trip is 36.7 bp/day at T+0 and 0.9 bp/day at T+40. Neither weakens intraday, which is why §7's arithmetic was closed.
+
+This is also the first time `persistence` has been scored on a horizon where it could possibly express itself. Every evaluation in this project's history has been same-day — a "structural" judgment has no way to show up by 15:00 on the day of the article — and the prompt that extracts it was validated on 209 pairs over 10 days.
+
+### 8.1 Two corrections without which this section would have been wrong
+
+**Common days.** A +40d exit needs 40 trading days of future. The sample ends 2026-09-15 and today is 2026-09-17, so only the early days resolve at long horizons. Left alone, "alpha grows with horizon" and "the long horizons are March and April" would have been the same statement. Everything below is restricted to the **86 days where every horizon resolves** (2026-03-17 .. 2026-07, 97,271 pairs), 39 days dropped.
+
+**Overlapping windows.** A +40d hold started today and one started tomorrow share 39 of their 40 days. Treating those as independent understates the standard error by roughly √40. All errors below come from a **moving-block bootstrap** with the block set to the holding length, so the overlap is carried into the resamples. This is the single most important number in the section and it is what stops the result being oversold: on the raw day-clustered error the +40d figure looked like t = 2.4; corrected, it does not.
+
+### 8.2 Does alpha grow with horizon? Yes — and so does the error, faster
+
+All pairs, 86 common days, `alpha` = return minus its own volatility × liquidity cell at the same horizon:
+
+| hold | n | alpha | se | t | z (σ) | net | net/day | worst day | losers |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| same day | 97,271 | +5.9 | 3.8 | **1.55** | +0.015 | −74.9 | −74.9 | −595.6 | 0.639 |
+| +1d | 97,271 | +13.4 | 9.8 | 1.37 | +0.024 | −89.0 | −89.0 | −756.6 | 0.606 |
+| +2d | 97,271 | +16.2 | 14.7 | 1.10 | +0.023 | −101.8 | −50.9 | −1039.3 | 0.603 |
+| +5d | 97,271 | +19.0 | 28.5 | 0.67 | +0.025 | −159.7 | −31.9 | −1445.8 | 0.601 |
+| +10d | 97,271 | +27.4 | 49.7 | 0.55 | +0.028 | −250.7 | −25.1 | −1914.3 | 0.625 |
+| +20d | 97,271 | +23.6 | 85.4 | 0.28 | +0.031 | −290.1 | −14.5 | −2084.3 | 0.622 |
+| +40d | 97,271 | +96.6 | 69.9 | 1.38 | +0.071 | −687.3 | −17.2 | −3401.0 | 0.685 |
+
+Alpha rises from +5.9 to +96.6 bp, and in σ units from +0.015 to +0.071 — so it is not merely the extra variance a longer hold brings. **But no horizon reaches t = 1.6.** The point estimates grow and the errors grow faster, which is what an underpowered measurement of a real effect and a measurement of nothing both look like.
+
+**Cost amortisation is real and does exactly what was predicted.** Net per capital-day improves more than fourfold, −74.9 → −17.2 bp/day. That is the only mechanism found tonight that moves the bar rather than trying to clear it, and it works. It is simply not enough on its own, because the drift term grows with horizon too.
+
+### 8.3 `persistence` orders the horizon response, at every horizon
+
+This is the first v2 field in this project to behave the way the prompt intends.
+
+`alpha` in bp, by `persistence` × horizon:
+
+| hold | one_off (n=43,405) | multi_quarter (n=35,662) | structural (n=18,204) | structural − one_off |
+|---|---:|---:|---:|---:|
+| same day | +3.9 | +7.3 | +8.4 | +4.5 |
+| +1d | +9.1 | +16.0 | +21.7 | +12.6 |
+| +2d | +11.0 | +17.9 | +26.8 | +15.8 |
+| +5d | +8.7 | +26.0 | +26.2 | +17.5 |
+| +10d | +5.6 | +45.1 | +42.1 | +36.5 |
+| +20d | −35.2 | +63.9 | +82.0 | +117.2 |
+| +40d | −9.7 | +151.6 | +247.0 | **+256.7** |
+
+The ordering `structural ≥ multi_quarter > one_off` holds at **all seven horizons**, the spread widens monotonically, and `structural` rises at every step while `one_off` flattens and turns negative. In σ units `structural` goes +0.020 → +0.133 and `one_off` +0.009 → +0.027.
+
+Month by month, the contrast (multi_quarter + structural, minus one_off), on the five months that resolve at every horizon:
+
+| hold | pooled | 03 | 04 | 05 | 06 | 07 | + months |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| same day | +8.1 | +6 | +24 | +4 | +6 | −3 | 4/5 |
+| +2d | +20.1 | +29 | +68 | +17 | −9 | +19 | 4/5 |
+| +10d | +48.7 | +243 | +62 | −87 | +39 | +113 | 4/5 |
+| +20d | +106.0 | +433 | +62 | −132 | +161 | +231 | 4/5 |
+| +40d | +187.2 | +473 | +87 | +19 | +307 | +260 | **5/5** |
+
+**What I am willing to claim.** The *ordinal* fact — that `persistence` ranks the horizon response in the direction the prompt intends, at every horizon, widening monotonically, 4/5 to 5/5 months — is the strongest signal this investigation has produced. It is seven consistent checks of one ordering rather than one lucky bucket.
+
+**What I am not willing to claim.** The magnitudes. At +20d and +40d there are roughly **two independent windows** in 86 days, and no standard error computed from two observations is trustworthy — including the flattering ones the bootstrap produces for `structural`. March carries a large share of the pooled contrast at every long horizon (+243, +433, +473). Treat the long-horizon numbers as ordinal evidence, not as effect sizes.
+
+### 8.4 The arithmetic, and the one honest route to a positive number
+
+Net is **negative at every horizon and in every bucket**. The best is `structural` at +20d, −10.7 bp per capital-day against −74.9 for the same-day pool. Better, never positive.
+
+The reason is not the cost any more — it is the drift. By construction `net = alpha + null − cost`, and over this sample the universe fell steadily, so the `null` term swamps everything at long horizons. For `structural` at +40d: alpha **+247.0**, null **≈ −697**, cost −36.7, net **−486.9**.
+
+Which points at the one thing that would make this a strategy rather than a curiosity. `alpha` is market-neutral by construction. **If the market exposure were hedged, the return would be `alpha − cost`** — for `structural` at +40d, +247.0 − 36.7 = **+210 bp per trade over 40 days, about +5.3 bp per capital-day.** KRX retail cannot short individual names, but index futures and inverse ETFs are available, so a hedged version is executable in principle.
+
+I am flagging that rather than recommending it. It is untested, it rests on the same two independent windows, the hedge carries its own round trip and tracking error, and a market-neutral multi-day book is a different business from news day trading in every operational respect.
+
+### 8.5 The intraday survivor does not survive
+
+`pre_entry_move ≤ +1%`, the only conditioning that survived §4, is an intraday effect only:
+
+| hold | keep ≤ +1% | drop > +1% | spread |
+|---|---:|---:|---:|
+| same day | +11.0 | −17.4 | **+28.4** |
+| +2d | +12.1 | −13.3 | +25.4 |
+| +10d | +8.9 | −3.1 | +12.0 |
+| +40d | +26.8 | +28.9 | **−2.1** |
+
+The separation decays monotonically and is gone by +40d. That is consistent with it being what it looked like — a short-horizon mean-reversion effect on names that have already run — and it means the two findings do not compose: the gate belongs to the intraday strategy that §7 closed, not to the multi-day one.
+
+### 8.6 What a longer hold brings with it
+
+Being adversarial about the costs that are not in the mean:
+
+- **The tail gets much worse.** Worst day −595.6 → −3,401.0 bp; loser ratio 0.639 → 0.685. Against an objective that weights loss size above expectancy, a 40-day hold is strictly worse on the dimension that matters most, and the mean improvement per capital-day does not price that.
+- **Capital.** A multi-day position occupies a slot for the whole holding period. The live 5-slot budget would support 5 positions per 40 days rather than 5 per day — a ~40× reduction in trade count. `net/day` is the right comparison and it is the one reported, but the operational consequence is that the strategy is almost entirely idle.
+- **Live parity: the current system cannot do this.** The news exit path flattens by the close and `SESSION_CLOSE`/signal expiry are same-day; a multi-day hold would need new position management, overnight risk handling, and corporate-action handling that does not exist. This is a build, not a config change.
+- **Market beta.** The null does more work at longer horizons, so any mismatch in it matters more. This is why §8.2 reports σ-normalised alpha alongside raw — the growth survives normalisation, which is the check that matters.
+- **Sample.** Five months, ~two independent 40-day windows, in a period when the market fell. Everything here would need re-measuring on a longer history before it could carry weight.
+
+### 8.7 Verdict
+
+The strategy class **does not close**, which is a different answer from every other avenue tonight, and I want to be precise about why rather than let it read as encouragement.
+
+- Alpha grows with horizon, in bp and in σ. Not significant at any horizon once window overlap is honestly priced.
+- `persistence` orders that growth correctly at all seven horizons, 4/5 to 5/5 months. This is the first time an LLM judgment field has earned anything in this project.
+- Long-only it still loses at every horizon, because the market drift grows faster than the alpha.
+- Hedged, the arithmetic would be positive on these point estimates — and those point estimates rest on two independent windows.
+
+So: not demonstrated, and not excluded. That is genuinely different from the intraday case, where the confidence interval excludes anything tradeable. The next step is not to build it; it is to measure it on a longer history, where the 40-day window has enough independent observations to carry a standard error. `daily_bars_adjusted` reaches back to 2016-09-09, so the drift and the horizon arithmetic can be extended immediately — but the `persistence` labels only exist for 2026-03..09, and extending those is the one place in this project where buying more Haiku labelling would answer the question that is actually open.
+
+---
+
+## 9. Reproduction
 
 From `~/git/daytrade-it-edge` on simnode, `data` symlinked to `~/git/daytrade-it/data`. Credentials come from `~/git/quant-airflow/.env` via `edge_db.py`; nothing is written into the repo.
 
@@ -406,7 +613,7 @@ uv run python scripts/eval/bayes_judge.py --candidate data/eval/edge/budget_cand
 uv run python scripts/eval/edge_cost.py                         # the cost floor (no DB)
 ```
 
-## 8. Coordination
+## 10. Coordination
 
 - `rl-builder` confirmed the lane split and supplied two corrections used above: `minute_bars.trade_value` is exactly `close × volume` (a derived column, not exchange-reported 거래대금), and the `ci-local` pre-push hook leaves a worktree HEAD detached — `git rev-parse HEAD origin/<branch> | uniq -c` must print `2` on one line after every push. Their `dash_forward.py` independently found random tickers beating our own pairs (r_close +21 bp vs +11) on the September window, which is the same conclusion as §2.3 from a different direction.
 - The 09:00 batch check in §3.1 was the one the team lead asked to be run once; it was run here and not duplicated.
