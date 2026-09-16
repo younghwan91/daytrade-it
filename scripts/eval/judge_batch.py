@@ -170,7 +170,14 @@ def cache_row_valid(row: dict, pair: dict, model: str) -> bool:
     if the pair's current input hash equals the hash of the input the old
     pipeline sent -- body = the raw C1 summary (no title fallback) -- i.e. the
     pair's input didn't change.
+
+    An **empty row is never valid**: callers that look a key up with
+    ``cache.get(key, {})`` would otherwise fall into the legacy branch, where
+    the absent row hashes to the pair's own current input and every unjudged
+    pair reports as judged.
     """
+    if not row:
+        return False
     current = pair_input_hash(pair, model)
     if "input_hash" in row:
         return row["input_hash"] == current

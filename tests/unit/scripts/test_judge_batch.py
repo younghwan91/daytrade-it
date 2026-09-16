@@ -16,6 +16,7 @@ from judge_batch import (  # noqa: E402
     BudgetExceeded,
     SubmitUncertain,
     build_request,
+    cache_row_valid,
     custom_id_of,
     estimate_cost,
     pair_input_hash,
@@ -699,3 +700,31 @@ def test_select_days_rejects_a_pairs_row_without_a_day() -> None:
 
 def test_select_days_can_select_nothing() -> None:
     assert judge_batch.select_days(_day_pairs(), "2026-05-01") == []
+
+
+def test_cache_row_valid_rejects_an_empty_row() -> None:
+    """`cache.get(key, {})` must not report an unjudged pair as judged.
+
+    Without this guard the empty row misses `input_hash`, falls into the legacy
+    branch, and hashes to the pair's own current input -- so every pair with no
+    cache row at all looked cached.
+    """
+    pair = {
+        "key": "k",
+        "code": "005930",
+        "name": "삼성전자",
+        "market": "KOSPI",
+        "sector": "반도체",
+        "title": "제목",
+        "body": "본문",
+        "category": "",
+    }
+    assert cache_row_valid({}, pair, judge_batch.DEFAULT_MODEL) is False
+    assert (
+        cache_row_valid(
+            {"input_hash": pair_input_hash(pair, judge_batch.DEFAULT_MODEL)},
+            pair,
+            judge_batch.DEFAULT_MODEL,
+        )
+        is True
+    )
