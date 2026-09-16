@@ -475,6 +475,34 @@ The day-level sd of a tick-feature-selected subset will be larger than the pool'
 
 ---
 
+### 7.3 Which conclusions in this project rest on six months
+
+Three published claims were retracted in one night, and all three failed the same way: a pooled average over 2026-03..09 that did not survive a decade. That is a pattern, not three accidents, and it deserves an inventory rather than a resolution to be careful.
+
+`daily_bars_adjusted` reaches back to **2016-09-09**, so anything that depends only on prices can be re-checked for the cost of a few minutes of compute. Anything that depends on the LLM judgments cannot, because those exist only for 2026-03..09.
+
+**Checkable on price history alone — and what happened when checked:**
+
+| claim | six-month version | ten-year version | status |
+|---|---|---|---|
+| market-wide intraday drift | −29.8 bp | **−6.4 bp** | **retracted** (§7.1) |
+| our universe's intraday drift | −61.1 bp | −28.6 bp, 110/121 months negative | confirmed, magnitude halved |
+| turnover-ranking decay | reversed in 3 of 7 months | monotone, 11/121 → 30/121 → 45/121 | **restored** — the six-month reversal was noise |
+| movers vs calm third | 7 of 7 months | 6 of 121 months positive | **confirmed and strengthened** |
+| multi-day drift by horizon (the `null` term in §8) | −697 bp at +40d | §8 addendum | **in progress — this one carries §8's arithmetic** |
+| tick-grid spread floor by universe | 12.7–13.9 bp | price levels are available for the whole window | checkable, not yet run |
+
+**Not checkable without labels**, and therefore still resting on 2026-03..09:
+
+- everything involving `alpha`, since it needs the judged pairs: the +1.6 bp selection result (§2.3), the 22-axis conditioning scan (§4), the `pre_entry_move` survivor (§4.4), and the entire `persistence` × horizon result (§8.3).
+- the dashboard pool comparison (§2), which rests on **two** genuine archive days.
+- the founding +1.27% baseline replication (§2.4).
+- the headwind-by-acting-minute curve (§3), which needs minute bars — those begin far later than the daily series, so it cannot be extended even though it is price-only.
+
+**The rule I would draw from this.** The retracted claims were all *magnitudes* of a pooled average. The claims that survived the decade were *orderings* — which universe is worse than which, whether movers are worse than calm. Orderings held; levels did not. That is worth carrying into how the remaining label-bound results are read: §8.3's contribution is that `persistence` **orders** the horizon response at all seven horizons, and I have deliberately declined to claim its magnitudes for exactly this reason.
+
+---
+
 ## 8. Persistent news over multi-day horizons
 
 > This is a different strategy from day trading. It should be chosen knowingly, not drifted into. Everything below is a multi-day hold, which the live system cannot currently execute or manage, and which consumes capital across days rather than releasing it at the close.
@@ -566,7 +594,7 @@ The separation decays monotonically and is gone by +40d. That is consistent with
 
 Being adversarial about the costs that are not in the mean:
 
-- **The tail gets much worse.** Worst day −595.6 → −3,401.0 bp; loser ratio 0.639 → 0.685. Against an objective that weights loss size above expectancy, a 40-day hold is strictly worse on the dimension that matters most, and the mean improvement per capital-day does not price that.
+- **The tail gets much worse, and this is a trade the user has to be shown explicitly.** Worst day **−595.6 → −3,401.0 bp**; loser ratio **0.639 → 0.685**. The stated objective is asymmetric — 잃는 게 안 버느니만 못하다, losing is worse than not earning — so the dimension that matters most moves the wrong way as the horizon extends. Whatever the significance question resolves to, **a longer horizon buys expectancy by selling tail protection.** The mean improves per capital-day (−74.9 → −17.2) and the worst day gets 5.7× deeper at the same time. Those two facts belong in the same sentence whenever this strategy is described, because the improving mean is the part that is easy to quote and the deepening tail is the part the objective actually weights.
 - **Capital.** A multi-day position occupies a slot for the whole holding period. The live 5-slot budget would support 5 positions per 40 days rather than 5 per day — a ~40× reduction in trade count. `net/day` is the right comparison and it is the one reported, but the operational consequence is that the strategy is almost entirely idle.
 - **Live parity: the current system cannot do this.** The news exit path flattens by the close and `SESSION_CLOSE`/signal expiry are same-day; a multi-day hold would need new position management, overnight risk handling, and corporate-action handling that does not exist. This is a build, not a config change.
 - **Market beta.** The null does more work at longer horizons, so any mismatch in it matters more. This is why §8.2 reports σ-normalised alpha alongside raw — the growth survives normalisation, which is the check that matters.
