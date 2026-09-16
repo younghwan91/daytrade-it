@@ -59,7 +59,18 @@ def daily_history(cur, lo: dt.date, hi: dt.date) -> dict[str, list[tuple[dt.date
 
 
 def sigma_at(hist: list[tuple[dt.date, float, float]], day: dt.date) -> float | None:
-    """sd of the last 20 close-to-close returns ending at the previous session."""
+    """sd of the last 20 close-to-close returns ending at the previous session.
+
+    NOTE ON RANGE: this filters the whole history on every call, so it is
+    quadratic when called per day across a long one. It is correct at the
+    125-day range it was written for and merely slow over ten years -- but a
+    caller who truncates the history to make it fast silently loses the
+    trailing window for early codes and drops them into a degenerate
+    volatility cell, which mis-specifies any null built on those cells. That
+    happened once; see the correction in section 8.12 of
+    docs/research/2026-09-16-edge-hunt-matched-null.md. Over a long history use
+    a bisect index instead -- edge_overnight.sigma_index / sigma_of.
+    """
     closes = [c for d, c, _ in hist if d < day]
     if len(closes) < 11:
         return None
