@@ -38,34 +38,28 @@ from pathlib import Path
 
 from daytrade_it.application.trading.policy import NewsPolicy
 
-CANDIDATES: dict[str, dict] = {
-    "trail_2_1": {"trail_after_gain": Decimal("0.02"), "trail_gap": Decimal("0.01")},
-    "orb30": {"stop_orb": dt.timedelta(minutes=30)},
-    "consensus": {
-        "trail_after_gain": Decimal("0.01"),
-        "trail_gap": Decimal("0.005"),
-        "stop_orb": dt.timedelta(minutes=30),
-    },
-    #: Pyramiding off. On the sweep pool it costs 31 bp/trade and is worse on
-    #: 95 of 95 days -- but so was trailing, and trailing did not transfer,
-    #: because this pool has positive drift and that one does not. Same test.
-    "no_add_ons": {"add_on_min_gain": None},
-    #: Every early exit off: hold to 15:00. prompt-opt measures this at -34 bp
-    #: against the live rules' -94 bp on the rows we share.
-    "hold_to_close": {"vwap_exit_gap": None},
-    #: Far targets. prompt-opt's sigma-normalised travel-distance lift concentrates
-    #: at large moves (9.2x at +10%, 1.12x at +1%), so if travel distance is
-    #: monetisable it is here -- not at a +2% take-profit and not under a tight
-    #: trailing stop, both of which the rows above already rule out on this pool.
-    "tp5": {"take_profit_pct": Decimal("0.05")},
-    "tp8": {"take_profit_pct": Decimal("0.08")},
-    "tp10": {"take_profit_pct": Decimal("0.10")},
-    #: Paired with the one stop positive on both pools. A far target caps nothing
-    #: on the downside, so this is the natural configuration rather than a sweep.
-    "tp5_orb30": {"take_profit_pct": Decimal("0.05"), "stop_orb": dt.timedelta(minutes=30)},
-    "tp8_orb30": {"take_profit_pct": Decimal("0.08"), "stop_orb": dt.timedelta(minutes=30)},
-    "tp10_orb30": {"take_profit_pct": Decimal("0.10"), "stop_orb": dt.timedelta(minutes=30)},
-}
+#: A COORDINATE sweep, not a grid: each entry moves ONE live knob off its current
+#: value, everything else at the live default. With 7 days and ~35 trades a full
+#: cross would be a multiple-comparison machine; the question worth asking here is
+#: narrower and answerable -- "is the hand-set value near the optimum on this axis,
+#: or clearly off it?" Nothing here is a selection.
+#:
+#: These three knobs are the live-expressible exit surface that is currently ON,
+#: and all three were set by leave-one-day-out over 6 days -- the methodology
+#: `learning-curve` showed is invalid (40 LODO folds sharing 39/40 training days
+#: are one model forty times over).
+#:
+#: `vwap_exit_hit` and `add_on_hit` are byte-identical between this branch and
+#: origin/main (verified by diff), so a result here transfers to live.
+CANDIDATES: dict[str, dict] = {}
+for _g in (None, Decimal("0.005"), Decimal("0.02"), Decimal("0.03")):
+    CANDIDATES[f"vwap_gap={_g}"] = {"vwap_exit_gap": _g}
+for _m in (Decimal("0.01"), Decimal("0.03"), Decimal("0.05")):
+    CANDIDATES[f"vwap_min_gain={_m}"] = {"vwap_exit_min_gain": _m}
+for _a in (None, Decimal("0.005"), Decimal("0.02"), Decimal("0.03")):
+    CANDIDATES[f"add_on={_a}"] = {"add_on_min_gain": _a}
+for _b in (Decimal("0.02"), Decimal("0.05")):
+    CANDIDATES[f"add_on_band={_b}"] = {"add_on_price_band": _b}
 
 
 def main() -> None:
