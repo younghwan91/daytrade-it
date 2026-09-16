@@ -128,6 +128,66 @@ and 45 of 84 positive days. It wins on 3 of 5 folds and loses clearly on 2026-08
 supported on *stability* grounds, and the volatility-scaled form is what I would carry forward.
 It is not supported on money, on this sample.
 
+## 4b. Does the corrected bug invalidate the decision that turned trailing off? **No.**
+
+The bug I fixed lived in `scripts/eval/exit_lab.py` and `scripts/eval/exit_fast.py` — both
+written today, used only by this offline search, and never by any production decision. The 7-day
+test whose result keeps trailing and stop-loss switched off in live ran through the **replay
+engine**, which models the exit correctly:
+
+- `auto_trader.manage()` (line 775) calls `flatten()` on **every tick** at or after `flatten_at`,
+  and `_exit_or_retry` re-prices an unfilled sell after `exit_retry_after` with a widening,
+  capped discount.
+- `SimBroker` holds sells as **resting orders**, filling on whichever later bar satisfies
+  `b.high >= limit` (line 167).
+
+Neither depends on a bar existing at 15:00. So the engine already did what my lab got wrong.
+
+Rather than rest that on a reading of the code, the candidates were re-run through the real
+engine on the 7 dashboard-pool days (`scripts/eval/dash7_exits.py`, 0 errors on all 7 days):
+
+| policy | total | trades | losers | worst day | p(μ>0) | days ≥ 0 | adopt |
+|---|---|---|---|---|---|---|---|
+| **base (live default)** | **+39,915** | 35 | 12 | −2,838 | — | — | — |
+| `trail_2_1` | **−547** | 51 | 21 | −8,560 | **0.016** | 1/7 | false |
+| `orb30` | **+42,717** | 39 | 17 | −2,774 | **0.801** | 5/7 | false |
+| `consensus` (my folds' 5/5 config) | **−1,973** | 59 | 31 | −4,680 | **0.004** | 0/7 | false |
+
+**The old result reproduces to the won**: base +39,915, `trail_2_1` −547, p = 0.016, μ = −5,043,
+1/7 days — identical to the pre-registered table in `2026-09-16-bayes-pipeline-eval.md`. `orb30`
+likewise reproduces at p = 0.801, 5/7.
+
+**The evidence that turned trailing off still stands.** It was not an artifact of the bug.
+
+**And my own sweep-pool finding does not transfer.** The configuration my monthly folds selected
+5 out of 5 times is the *worst* of the four on the dashboard pool: −1,973, p = 0.004, 0 of 7 days
+positive. I am not going to argue for it on the strength of a pool that loses money.
+
+The two pools disagree for a reason that is economic, not methodological. **Trailing caps winners
+and cuts losers.** The dashboard pool is profitable (34% losing trades); the sweep pool is not
+(64% losing trades, −52 bp/trade). A rule that trades away upside to limit downside helps the
+second and hurts the first — which is exactly the asymmetry that makes a trailing stop dangerous
+on a pool with positive drift: it exits near the bottom of a retrace on the names that would have
+recovered.
+
+One mechanism worth noting: **trailing raises the trade count** (35 → 51 → 59). Exiting early
+frees a concurrent-position slot, so more entries get in. Trailing is not only an exit change; it
+changes which entries the day takes.
+
+**The one finding with support on both pools is `stop_orb = 30`** — p = 0.801 and a better worst
+day on the dashboard pool, chosen in 4 of 5 sweep folds. It is still short of the 0.90 bar, on
+both.
+
+### Recommendation for tomorrow
+
+**Do not change the live exit configuration.** The reason trailing is off is real, reproduces
+exactly, and my contrary sweep-pool evidence comes from a different pool with opposite drift.
+Seven days could not clear the bar anyway, and nothing here asks it to.
+
+If anything is worth queuing for more evidence it is `stop_orb = 30`, the only candidate that
+improves the worst day on both pools. That is a "collect more days" recommendation, not a
+"change live tomorrow" one.
+
 ## 5. Pyramiding — `add_on_min_gain = 0.01`, measured across all 97 days
 
 Measured engine-against-engine on the same entries, so the add-on effect is not mixed with the
