@@ -171,6 +171,26 @@ I have not re-run the tables at 36.7 bp, because the deltas are unaffected — c
 
 ---
 
+### 2.6 Does saving spread cost signal?
+
+Tick width is a function of price, price correlates with company size, and small caps react harder to news — so a universe chosen to save spread might quietly be selling the signal. Our measured selection alpha is +1.6 ± 3.4 bp, so there is probably nothing to sell, but that is an assumption and it is one line of analysis to test.
+
+Quintiles cut on our own tick/price distribution (edges 7.1 / 10.3 / 13.4 / 17.8 bp; mean 12.5), `scripts/eval/edge_tick.py`:
+
+| tick bucket | n | mean tick | alpha | se | months |
+|---|---:|---:|---:|---:|---|
+| <7 bp (highest-priced) | 26,388 | 5.9 | **−4.2** | 6.6 | `--++--+` |
+| 7–10 | 26,405 | 8.7 | **+10.8** | 4.5 | `+++++++` |
+| 10–13 | 26,393 | 11.7 | +5.6 | 5.2 | `+++++--` |
+| 13–18 | 26,429 | 15.4 | +1.6 | 6.0 | `++--+--` |
+| >18 (lowest-priced) | 26,462 | 20.7 | −1.8 | 6.3 | `+-+---+` |
+
+**No.** The narrowest-tick bucket is the worst, not the best, so moving toward high-priced names to save spread does not look like it discards signal. The spread saving is realisable and the alpha differences here sit on the same ±3–6 bp noise floor as everything else in this pool.
+
+The 7–10 bp bucket at +10.8 bp with **7 of 7 months positive** is the only cell worth a second look, and it is one of five buckets chosen after the fact, so it is recorded as an observation rather than a candidate.
+
+---
+
 ## 3. The structural headwind
 
 `alpha` is flat, so everything the pool earns or loses is the null. The null, by acting minute, over 125 days:
@@ -443,7 +463,43 @@ What the ten-year view shows instead is worse for us and better for the project:
 
 **By net the best available universe is rank 601–900 at −44.8 against our −65.0 — +20.2 bp, free.** Dropping the movers third from our own universe is worth +20.2 bp on the drift and keeps the universe's shape.
 
-It does not flip the sign: −44.8 is a smaller loss, not a profit, and nothing here is a path back to trading. But the framing changes. It is not that the market is against us. It is that **`select_universe` was chosen for sweep lap time rather than for returns, and has been costing about 22 bp a trade for the life of the project.** That is a fixable mistake rather than a law of nature.
+It does not flip the sign: −44.8 is a smaller loss, not a profit, and nothing here is a path back to trading. But the framing changes. It is not that the market is against us. It is that **the universe was chosen for sweep lap time rather than for returns, and has been costing about 22 bp a trade in every backtest in this document.** That is a fixable mistake rather than a law of nature — but see §7.1.1 before applying it to live, which does not use this screen and carries a smaller version of the same drag for a different reason.
+
+### 7.1.1 Does LIVE trade this universe? No — and it still inherits most of the drag
+
+§7.1 is a statement about the **sweep pool**, and it was nearly mis-applied. `select_universe`'s top-300-by-prior-day-turnover exists to bound the 1-req/s company-news sweep's lap time. **It has never gated a live entry.** Live trades whatever tickers Toss tags on a dashboard article, filtered only by the stock master. So "we chose a bad universe and have paid 22 bp a trade for the life of the project" is true of every sweep-pool backtest number in this document — which is most of them — and says nothing by itself about live.
+
+The dashboard-tagged ticker set exists for seven days of 2026-09, two of them genuine archive, so it cannot be measured over a decade directly. It can be *characterised* by properties observable before the open, and that characterisation can be measured over a decade.
+
+**Profile** (percentile within that day's traded names; 1.0 = most traded / biggest mover):
+
+| pool | prior-day turnover pct (p25 / med / p75) | prior-day \|move\| pct |
+|---|---|---|
+| dashboard, all 7 days | 0.72 / **0.90** / 0.97 | 0.32 / 0.59 / 0.82 |
+| dashboard, archive days only | 0.70 / 0.89 / 0.96 | 0.33 / 0.56 / 0.81 |
+| dashboard, reconstructed days | 0.73 / 0.90 / 0.98 | 0.29 / 0.60 / 0.82 |
+| sweep pool, same 7 days | 0.87 / 0.94 / 0.98 | 0.34 / 0.60 / 0.81 |
+| sweep pool, all 125 days | 0.87 / 0.93 / 0.97 | 0.34 / 0.62 / 0.85 |
+
+Archive and reconstructed days give the same profile, so this is not a provenance artifact.
+
+**Implied drift**: weighting the ten-year drift of each (turnover percentile × prior-move percentile) cell by the dashboard's own weight in it gives **−20.9 bp**, against market −6.8, our top-300 −28.6, movers third −42.0, calm two-thirds −21.8.
+
+**So the Toss dashboard is a momentum screen by editorial accident.** Its median tagged name sits at the 90th percentile of prior-day turnover. Live inherits roughly **14 bp** of drag against the market that nobody chose — less than the sweep pool's 22 bp, and nowhere near neutral. The correction to §7.1 is therefore a narrowing, not a withdrawal: the magnitude belongs to research, the direction belongs to both.
+
+#### The direct measurement is uninterpretable, and it is the founding trap again
+
+On those seven days the dashboard-tagged set drifted **+233.5 bp**, against +23.1 for the top-300 and +3.4 for all traded codes. That number must not be used, and it is worth keeping precisely because of *why*.
+
+Dashboard membership is determined **intraday**. A stock jumps at 10:00, news follows at 10:05, the article tags it, and its open-to-close return is large and positive by construction. Measuring "the drift of names the dashboard tagged today" therefore conditions on the day's outcome.
+
+This is the same mechanism that produced the +1.27% founding baseline retracted in §2.4, arriving in a new place four sections later. It is the most persistent error in this project and it has now been caught three times: once in the founding eval, once in the dashboard pool's forward maximum, and once here.
+
+#### What is actionable, and it is live-expressible
+
+The ten-year cells are monotone in **prior-day |move| percentile**, and the top 1% is severe — **−93.9, −114.0 and −147.3 bp** depending on the turnover bucket, against roughly zero for the bottom half of movers. Prior-day bars are available at decision time, so excluding yesterday's biggest movers is a filter live can apply today without new data, new labelling, or any model.
+
+That is the movers/calm finding arriving for the third time by an independent route — first in the ten-year universe table (§7.1, 6 of 121 months positive), then inside our own judged pool across horizons (§8.9), and now on the pool live actually trades.
 
 ### 7.2 Trading less, and whether more data can rescue this
 
