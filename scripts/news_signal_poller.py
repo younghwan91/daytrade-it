@@ -40,16 +40,19 @@ nothing is shared with live dedup state: judgments go to
 (dedup by (article, ticker) is in memory, plus the paper judgment log across
 restarts). Not in cron.
 
-Single instance: `run()` holds `<repo>/data/auto_trader/poller.lock`
+Single instance per mode: `run()` holds `<repo>/data/auto_trader/poller.lock`
+(live/dry-run) or `<repo>/data/auto_trader_paper/poller.lock` (`--paper`)
 (krx-quant-core `InstanceLock`, anchored to the repo root, not the cwd) for its
-whole life; a second poller logs an ERROR with the holder pid and returns
-(exit 0) before building any client. `news_signal_daemon.sh` keeps its own
-flock too.
+whole life; a second poller of the same mode logs an ERROR with the holder pid
+and returns (exit 0) before building any client. Paper and live never block
+each other. `news_signal_daemon.sh` keeps its own flock too.
 
-⚠️ 장중 trader 에서 poller 를 손으로 띄우지 말 것 — 실데몬이 하루 종일 쉰다.
-(Do not start a poller by hand on trader during market hours -- paper mode
-included: the cron daemon's restarts all exit on the lock and live trading
-idles for the rest of the day.)
+⚠️ 장중 trader 에서 live poller(`--paper` 없이)를 손으로 띄우지 말 것 — 실데몬이
+하루 종일 쉰다. (A hand-started non-paper poller holds the live lock: the cron
+daemon's restarts all exit on it and live trading, exits included, idles for the
+rest of the day.) `--paper` uses its own lock and is independent of the live
+daemon, but it still calls Claude for every judged pair -- it spends the same
+Anthropic credits the live daemon needs.
 
 Kill switch `data/live_STOP`: stops new signals and entries; exits keep
 being managed until the close.
@@ -119,6 +122,11 @@ JUDGMENT_DIR_PAPER = Path("data/news_judgments_paper")
 #: Anchored to the repo root (not the cwd) so a poller started by hand from
 #: another directory still collides with the cron daemon's lock.
 POLLER_LOCK_PATH = Path(__file__).resolve().parents[1] / "data" / "auto_trader" / "poller.lock"
+#: `--paper` shares no state with live (own ledger/judgments, no DB writes,
+#: paper_STOP), so it takes its own lock -- a paper run never idles the live daemon.
+PAPER_POLLER_LOCK_PATH = (
+    Path(__file__).resolve().parents[1] / "data" / "auto_trader_paper" / "poller.lock"
+)
 JUDGMENT_DIR = Path("data/news_judgments")
 DETAIL_ARCHIVE_DIR = Path("data/toss_detail")
 DETAIL_HTTP_HEADERS = {
@@ -468,13 +476,14 @@ async def run(
     exits_until: dt.time = EXITS_UNTIL,
     paper: bool = False,
 ) -> None:
-    """Hold the single-instance lock, then poll/trade until the stop time."""
-    lock = InstanceLock(POLLER_LOCK_PATH)
+    """Hold this mode's single-instance lock, then poll/trade until the stop time."""
+    lock_path = PAPER_POLLER_LOCK_PATH if paper else POLLER_LOCK_PATH
+    lock = InstanceLock(lock_path)
     try:
         lock.acquire()
     except AlreadyRunning:
         try:
-            holder_pid = POLLER_LOCK_PATH.read_text().strip() or "unknown"
+            holder_pid = lock_path.read_text().strip() or "unknown"
         except OSError:
             holder_pid = "unknown"
         # ERROR, not WARNING: if the holder is a hand-started poller, the cron
@@ -482,7 +491,7 @@ async def run(
         logger.error(
             "news_signal_poller: another poller holds the instance lock -- exiting "
             "(if that is a hand-started poller during market hours, the live daemon is idle)",
-            lock=str(POLLER_LOCK_PATH),
+            lock=str(lock_path),
             holder_pid=holder_pid,
         )
         return

@@ -318,3 +318,61 @@ async def test_scoring_failure_stop_file_is_live_only_in_live_mode(
 
     assert live_stop.exists() is (not paper)
     assert paper_stop.exists() is paper
+
+
+def test_paper_lock_is_separate_and_repo_anchored() -> None:
+    import news_signal_poller
+
+    repo = Path(news_signal_poller.__file__).resolve().parents[1]
+    paper_lock = news_signal_poller.PAPER_POLLER_LOCK_PATH
+    live_lock = news_signal_poller.POLLER_LOCK_PATH
+    assert paper_lock == repo / "data" / "auto_trader_paper" / "poller.lock"
+    assert live_lock == repo / "data" / "auto_trader" / "poller.lock"
+
+
+@pytest.mark.parametrize("held, paper", [("live", True), ("paper", False)])
+def test_live_and_paper_locks_do_not_block_each_other(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, held: str, paper: bool
+) -> None:
+    """A paper run never idles the live daemon, and vice versa: holding one
+    mode's lock, the other mode gets past the lock (to building its clients)."""
+    import asyncio
+
+    import news_signal_poller
+    from krx_quant_core.execution.oms import InstanceLock
+
+    live_lock = tmp_path / "auto_trader" / "poller.lock"
+    paper_lock = tmp_path / "auto_trader_paper" / "poller.lock"
+    monkeypatch.setattr(news_signal_poller, "POLLER_LOCK_PATH", live_lock)
+    monkeypatch.setattr(news_signal_poller, "PAPER_POLLER_LOCK_PATH", paper_lock)
+
+    class _PastTheLock(Exception):
+        pass
+
+    def reached(*args: object, **kwargs: object) -> None:
+        raise _PastTheLock
+
+    monkeypatch.setenv("GPTQ_DATABASE_URL", "postgresql+asyncpg://unused/unused")
+    monkeypatch.setattr(news_signal_poller, "DatabaseManager", reached)
+
+    with InstanceLock(live_lock if held == "live" else paper_lock):
+        with pytest.raises(_PastTheLock):
+            asyncio.run(
+                news_signal_poller.run(
+                    once=True,
+                    stop_at=dt.time(15, 20),
+                    execute=True,
+                    confirm_real=not paper,
+                    paper=paper,
+                )
+            )
+        # ...and the same mode is still refused while its own lock is held.
+        asyncio.run(
+            news_signal_poller.run(
+                once=True,
+                stop_at=dt.time(15, 20),
+                execute=True,
+                confirm_real=held == "live",
+                paper=held == "paper",
+            )
+        )
