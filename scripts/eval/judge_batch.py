@@ -194,6 +194,29 @@ def estimate_cost(requests: list[dict], chars_per_token: float, output_tokens: i
     }
 
 
+def select_days(pairs: list[dict], spec: str) -> list[dict]:
+    """The pairs whose ``day`` is in ``spec``: ``A..B`` (inclusive) or a comma list.
+
+    A7 needs *whole* days judged: the stratified sample spreads a partial budget
+    evenly over every day, so a wave that stops early leaves no day complete and
+    no day usable for the universe backtest. Restricting the pairs file to a few
+    days first makes those days finish. File order is kept, so the downstream
+    sample stays deterministic. A row without ``day`` raises ``KeyError``.
+    """
+    if ".." in spec:
+        lo, hi = (dt.date.fromisoformat(x) for x in spec.split("..", 1))
+
+        def wanted(day: dt.date) -> bool:
+            return lo <= day <= hi
+    else:
+        days = {dt.date.fromisoformat(x) for x in spec.split(",") if x}
+
+        def wanted(day: dt.date) -> bool:
+            return day in days
+
+    return [p for p in pairs if wanted(dt.date.fromisoformat(p["day"]))]
+
+
 def _stratum(pair: dict, fields: list[str]) -> tuple[str, ...]:
     return tuple(str(pair.get(f)) for f in fields)
 
@@ -796,6 +819,12 @@ def main() -> None:
         help="submit at most N chunks this run (Batch API caps ~100k requests in flight)",
     )
     ap.add_argument(
+        "--days",
+        default=None,
+        help="restrict the pairs file to A..B (inclusive) or a comma list of days, so a "
+        "partial budget finishes whole days instead of thinning every day",
+    )
+    ap.add_argument(
         "--collect-only",
         action="store_true",
         help="collect the batches already created and submit nothing (no spend, no --pairs read)",
@@ -814,6 +843,10 @@ def main() -> None:
         if args.collect_only
         else [json.loads(line) for line in args.pairs.open() if line.strip()]
     )
+    if args.days and not args.collect_only:
+        pairs = select_days(pairs, args.days)
+        if not pairs:
+            ap.error(f"--days {args.days} selects no pair in {args.pairs}")
     with httpx.Client() as client:
         judge = BatchJudge(
             client=client,

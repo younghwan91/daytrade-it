@@ -668,3 +668,34 @@ def test_collect_only_is_idempotent_and_reads_no_pairs(tmp_path: Path) -> None:
     )
     assert summary["succeeded"] == 0  # nothing left unprocessed
     assert len(list((tmp_path / "cache.jsonl").open())) == rows
+
+
+# --- A7: day filter ------------------------------------------------------
+
+
+def _day_pairs() -> list[dict]:
+    return [
+        {"key": "a|000660", "day": "2026-03-17"},
+        {"key": "b|005930", "day": "2026-03-18"},
+        {"key": "c|005930", "day": "2026-03-19"},
+        {"key": "d|005930", "day": "2026-04-01"},
+    ]
+
+
+def test_select_days_range_is_inclusive() -> None:
+    kept = judge_batch.select_days(_day_pairs(), "2026-03-18..2026-03-19")
+    assert [p["key"] for p in kept] == ["b|005930", "c|005930"]
+
+
+def test_select_days_comma_list_keeps_file_order() -> None:
+    kept = judge_batch.select_days(_day_pairs(), "2026-04-01,2026-03-17")
+    assert [p["key"] for p in kept] == ["a|000660", "d|005930"]
+
+
+def test_select_days_rejects_a_pairs_row_without_a_day() -> None:
+    with pytest.raises(KeyError):
+        judge_batch.select_days([{"key": "a|000660"}], "2026-03-17")
+
+
+def test_select_days_can_select_nothing() -> None:
+    assert judge_batch.select_days(_day_pairs(), "2026-05-01") == []
