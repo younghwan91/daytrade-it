@@ -11,6 +11,16 @@ The single most useful number in this document is not about selection at all. Bu
 
 ---
 
+> ## Two rules this investigation earned, before any result
+>
+> **1. No sweep-pool result transfers to live.** Six times in one session a candidate passed on the 132,185-pair sweep pool and reversed on the dashboard pool — trailing, hold-to-close, add-ons-off, two stop families, and the movers filter of §4.5. At six this stops being a caveat and becomes a rule: **nothing is a candidate until it has been frozen onto dashboard days**, and every sweep-pool number in this document is labelled as such.
+>
+> **2. But the dashboard pool cannot currently validate anything either.** Seven days, two of them genuine archive, 35 trades in a capped book, measured against a baseline that is itself the September 09:00-batch artifact. Candidates pass or fail there by noise against a bent yardstick. **Fixing the yardstick outranks generating candidates**, and it is free: real archive days accrue at one per trading day for as long as the daemon runs. Twenty of them is four weeks and no money.
+>
+> Rule 2 is why rule 1 currently disqualifies everything without confirming anything. That is the state of the project, not a defect in a particular result.
+
+---
+
 ## 1. The instrument, and why it should be believed
 
 Every previous comparison in this repo has compared our pool to *something else measured differently*. This one does not.
@@ -334,6 +344,8 @@ Everything above is the **sweep pool**. Five exit families were retracted tonigh
 With n = 194 and 90 and se 52 and 72 bp, this does not *refute* the filter — the difference is inside noise in both directions. But the burden was on the candidate and it did not clear it, and an underpowered test pointing the wrong way is not neutral evidence. Adopting on the sweep-pool result alone would repeat exactly what the five retracted exit families did.
 
 **And the dashboard baselines are themselves unusable.** A 7-day book baseline of +189.5 bp net, and +347.8 bp on **ten** archive-day trades, are not plausible figures; they are the 09:00 batch on a favourable window, which §3.1 showed was +134.8 bp on those days and is a September artifact. The book fills earliest-minute-first, so it loads precisely the trades that artifact inflates.
+
+**And the reversal is measured against the same bent yardstick.** The filter failing to validate is the right conclusion — the burden was on the candidate — but the *magnitude* of that failure is not interpretable either. Nobody should read "+65.8 bp for the movers third on live" as evidence **for** buying yesterday's movers; it is a number from a pool whose baseline is an artifact, and it says only that the filter did not clear its burden.
 
 **The larger point, which outranks the filter.** The dashboard pool cannot currently validate anything: seven days, two real, 35 trades in a capped book, measured against a baseline that is itself an artifact. That is the binding constraint on every candidate this project produces — ahead of labelling, compute or modelling. Twenty real archive days would make it an instrument instead of a rumour, and they accrue at one per trading day for free.
 
