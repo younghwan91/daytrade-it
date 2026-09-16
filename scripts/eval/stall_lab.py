@@ -156,7 +156,18 @@ def label(lim: TradingLimits) -> str:
 
 
 def day_score(days: np.ndarray, rewards: np.ndarray, lam: float) -> float:
-    """Downside-weighted daily total: losing days count `lam` times."""
+    """Downside-weighted daily total: losing days count `lam` times.
+
+    LATENT COMPOSITION -- read before routing a candidate selected by this into
+    `bayes_judge`. This penalises bad DAYS, which is the same shape as the gate's
+    `worst_day` criterion. Selecting on it and then gating on `worst_day` would be
+    a select-on-X / gate-on-X composition: the gate cannot catch a distortion the
+    selector introduced in the statistic they share. Today this feeds descriptive
+    tables only, so the composition is latent rather than active. If you change
+    that, weight the day term by the day's trade count, or judge on a criterion
+    the selector does not touch (`loser_ratio` is trade-weighted on both sides and
+    no selector uses it).
+    """
     per = defaultdict(float)
     for d, r in zip(days.tolist(), rewards.tolist(), strict=True):
         per[d] += r
