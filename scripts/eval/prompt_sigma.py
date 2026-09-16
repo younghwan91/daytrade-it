@@ -164,6 +164,36 @@ def main() -> None:
     )
     print("\n(the raw row is in bp; the normalised row is in sigmas)")
 
+    # rl-builder's point: a trailing DAILY sigma is a poor scaler for premarket
+    # judgments, which enter at the 09:00 open where the overnight gap dominates
+    # and intraday sigma is undefined. Split the two rather than let one
+    # definition cover both.
+    print("\n=== split by session (a daily sigma scales these two differently) ===")
+    whole = rows
+    for label_s, keep in (
+        ("premarket (enters at the open)", lambda lb: lb["act_min"] == 0),
+        ("intraday", lambda lb: lb["act_min"] > 0),
+    ):
+        sub = [r for r in whole if keep(r[1])]
+        print(f"\n--- {label_s}: n={len(sub)} ---")
+        bym.clear()
+        for r in sub:
+            bym[r[0]["month"]].append(r)
+        print(
+            f"  pool mfe {st.mean([lb['mfe'] for _, lb, _ in sub]) * 1e4:+.0f} bp   "
+            f"pool mfe/sigma {st.mean([lb['mfe'] / s for _, lb, s in sub]):+.3f}"
+        )
+        run(
+            lambda lb, s: lb["mfe"],
+            f"raw MFE, {label_s}",
+            lambda xs: st.mean([lb["mfe"] for lb, _ in xs]) * 1e4,
+        )
+        run(
+            lambda lb, s: lb["mfe"] / s,
+            f"MFE / sigma, {label_s}",
+            lambda xs: st.mean([lb["mfe"] / s for lb, s in xs]),
+        )
+
     # where does the raw lift concentrate -- which target levels?
     print("\n=== hit rate at each target, model top-5 vs pool (last fold trained OOS) ===")
     i = len(months) - 1
