@@ -50,6 +50,12 @@ export GPTQ_QUANT_AIRFLOW_DB_DBNAME=${_portdb#*/}
 unset _dsn _rest _hostpart _portdb
 export GPTQ_KIWOOM_IS_MOCK=false
 
+# 판정 전 사전필터: 시황 묶음·표·관련 종목 11개 초과·지수 해설 기사를 버린다.
+# 97,721 건 측정 기준 쌍의 29.0% 를 줄이고 매수 후보는 0.373% 만 잃는다.
+# 끄려면 이 줄을 0 으로. 한도만 바꾸려면 DAYTRADE_NEWS_PREFILTER_MAX_CODES /
+# DAYTRADE_NEWS_PREFILTER_INDEX_MIN_CODES.
+export DAYTRADE_NEWS_PREFILTER=1
+
 # 재시작 루프도 15:30 까지 -- 청산 창에서 크래시해도 다시 떠야 한다.
 END=$(date -d "15:30" +%s)
 while [ "$(date +%s)" -lt "$END" ]; do

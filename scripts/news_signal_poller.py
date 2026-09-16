@@ -49,6 +49,7 @@ import httpx
 from kiwoom_client import KiwoomAPI
 from sqlalchemy import select
 
+from daytrade_it.application.news.mention_prefilter import skip_reason
 from daytrade_it.application.signals.entry_filter import generate_no_chase_confirmation
 from daytrade_it.application.trading.auto_trader import AutoTrader, rank_batch
 from daytrade_it.domain.entities.news import NewsArticle
@@ -148,6 +149,43 @@ async def process_pair(
     """
     pair_key = f"{article.id}|{ticker.value}"
     if judgments.seen(pair_key):
+        return
+
+    # 판정 전에 버릴 쌍은 버린다 -- 시황 묶음·표·지수 해설은 97,721 건에서 매수
+    # 후보가 거의 나오지 않았다. 제목과 관련 종목 수만 보므로 백테스트와 같은
+    # 판단을 한다(본문은 두 세계가 서로 다르다).
+    reason = skip_reason(article.title, len(article.tickers))
+    if reason is not None:
+        logger.info(
+            "news_signal_poller: prefilter skipped",
+            ticker=ticker.value,
+            name=stock.name,
+            reason=reason,
+            related_n=len(article.tickers),
+            title=(article.title or "")[:80],
+        )
+        # 판정한 쌍과 같은 형식으로 남긴다 -- 이 아카이브를 재생하는 백테가
+        # 운영이 실제로 판정한 풀을 그대로 보게.
+        judgments.append(
+            pair_key,
+            {
+                "article_id": str(article.id),
+                "ticker": ticker.value,
+                "name": stock.name,
+                "title": article.title,
+                "category": article.category,
+                "published_at": article.published_at.isoformat(),
+                "judged_at": dt.datetime.now(KST).isoformat(),
+                "full_body_chars": 0,
+                "prefilter_skipped": True,
+                "prefilter_reason": reason,
+                "prefilter_tag": (
+                    reason.split(":", 1)[1] if reason.startswith("roundup:") else None
+                ),
+                "v2": None,
+                "v4_shadow": None,
+            },
+        )
         return
 
     # Dedup across restarts (TossNewsClient's seen-id cache is in-memory).
