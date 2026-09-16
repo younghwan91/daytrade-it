@@ -10,10 +10,13 @@ from __future__ import annotations
 import pytest
 
 from daytrade_it.application.news.mention_prefilter import (
+    FANOUT_MAX,
     ROUNDUP_TAGS,
+    fanout_max,
     prefilter_enabled,
     roundup_tag,
     should_judge,
+    skip_reason,
 )
 
 REAL = ("기아", "000270", "기아 ‘PV7’, 獨 하노버서 세계 첫 공개", "기아가 상용 PBV PV7을 공개했다.")
@@ -132,3 +135,94 @@ class TestPrefilterEnabled:
         assert prefilter_enabled(False) is False
         monkeypatch.delenv("DAYTRADE_NEWS_PREFILTER", raising=False)
         assert prefilter_enabled(True) is True
+
+
+class TestFanout:
+    """Second filter: articles Toss tags with many companies are roundups.
+
+    Measured on the same 97,721 judged pairs (report §2a): fan-out > 15
+    combined with the roundup tags skips 22.94% at 0.183% BUY recall loss.
+    """
+
+    def test_default_threshold_is_the_adopted_one(self) -> None:
+        assert FANOUT_MAX == 15
+
+    def test_unknown_fanout_never_drops(self) -> None:
+        """A caller that cannot count related codes must behave as before."""
+        assert should_judge(*REAL, None, enabled=True) is True
+        assert should_judge("삼성전자", "005930", "진짜 뉴스", "", None, enabled=True) is True
+
+    def test_small_fanout_is_judged(self) -> None:
+        assert should_judge("삼성전자", "005930", "진짜 뉴스", "", 1, enabled=True) is True
+        assert should_judge("삼성전자", "005930", "진짜 뉴스", "", FANOUT_MAX, enabled=True) is True
+
+    def test_large_fanout_is_skipped(self) -> None:
+        assert (
+            should_judge("삼성전자", "005930", "진짜 뉴스", "", FANOUT_MAX + 1, enabled=True)
+            is False
+        )
+        assert should_judge("삼성전자", "005930", "진짜 뉴스", "", 99, enabled=True) is False
+
+    def test_off_by_default_keeps_a_huge_fanout(self) -> None:
+        assert should_judge("삼성전자", "005930", "진짜 뉴스", "", 999) is True
+
+    def test_threshold_override_wins(self) -> None:
+        judged = should_judge("삼성전자", "005930", "진짜 뉴스", "", 20, enabled=True, max_codes=25)
+        assert judged is True
+        assert (
+            should_judge("삼성전자", "005930", "진짜 뉴스", "", 6, enabled=True, max_codes=5)
+            is False
+        )
+
+    def test_zero_threshold_disables_the_fanout_rule(self) -> None:
+        assert (
+            should_judge("삼성전자", "005930", "진짜 뉴스", "", 999, enabled=True, max_codes=0)
+            is True
+        )
+
+    def test_a_real_dropped_buy_from_the_measurement(self) -> None:
+        """`[오늘의 주요공시] SK하이닉스·HLB·…` -- 28 codes, a disclosure roundup."""
+        title = "[오늘의 주요공시] SK하이닉스·HLB·진에어·포스코홀딩스·네이버·대우건설 등"
+        assert should_judge("SK하이닉스", "000660", title, "", 28, enabled=True) is False
+
+
+class TestSkipReason:
+    def test_none_when_off(self) -> None:
+        assert skip_reason("[표] 어쩌고", 99, enabled=False) is None
+
+    def test_none_for_real_news(self) -> None:
+        assert skip_reason("삼성 3조 수주", 2, enabled=True) is None
+
+    def test_roundup_reason_names_the_tag(self) -> None:
+        assert skip_reason("[표] 어쩌고", 1, enabled=True) == "roundup:표"
+
+    def test_fanout_reason_names_the_count(self) -> None:
+        assert skip_reason("진짜 뉴스", 40, enabled=True) == "fanout:40"
+
+    def test_roundup_wins_when_both_apply(self) -> None:
+        assert skip_reason("[표] 어쩌고", 40, enabled=True) == "roundup:표"
+
+    def test_should_judge_agrees_with_skip_reason(self) -> None:
+        for title in ("[표] 어쩌고", "진짜 뉴스"):
+            for n in (None, 1, 15, 16, 99):
+                assert should_judge("이름", "000000", title, "", n, enabled=True) is (
+                    skip_reason(title, n, enabled=True) is None
+                )
+
+
+class TestFanoutMax:
+    def test_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("DAYTRADE_NEWS_PREFILTER_MAX_CODES", raising=False)
+        assert fanout_max() == FANOUT_MAX
+
+    def test_env_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("DAYTRADE_NEWS_PREFILTER_MAX_CODES", "7")
+        assert fanout_max() == 7
+
+    def test_bad_env_falls_back_to_the_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("DAYTRADE_NEWS_PREFILTER_MAX_CODES", "nonsense")
+        assert fanout_max() == FANOUT_MAX
+
+    def test_explicit_override_wins(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("DAYTRADE_NEWS_PREFILTER_MAX_CODES", "7")
+        assert fanout_max(30) == 30

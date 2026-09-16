@@ -11,7 +11,7 @@ import datetime as dt
 import json
 import sys
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +35,7 @@ REAL_TITLE = "삼성 3조 수주"
 class _Article:
     id: uuid.UUID
     title: str
+    tickers: list[Ticker] = field(default_factory=list)
     summary: str | None = "요약"
     content: str | None = "본문"
     category: str | None = "stock"
@@ -70,12 +71,18 @@ class _Claude:
 STOCK = StockInfo(code="005930", name="삼성전자", market="거래소", sector="반도체")
 
 
-async def _run(title: str, tmp_path: Path, prefilter: bool | None) -> tuple[_Claude, list[dict]]:
+async def _run(
+    title: str, tmp_path: Path, prefilter: bool | None, related_n: int = 1
+) -> tuple[_Claude, list[dict]]:
     judging.prefilter_skips = 0
     claude = _Claude()
     log = JudgmentLog(tmp_path, dt.date(2026, 9, 15))
     await judge_pair(
-        _Article(id=uuid.uuid4(), title=title),
+        _Article(
+            id=uuid.uuid4(),
+            title=title,
+            tickers=[Ticker(value=f"{i:06d}") for i in range(related_n)],
+        ),
         Ticker(value="005930"),
         STOCK,
         claude,  # type: ignore[arg-type]
@@ -112,6 +119,7 @@ class TestJudgePair:
         _, rows = await _run(ROUNDUP_TITLE, tmp_path, True)
         assert len(rows) == 1
         assert rows[0]["prefilter_skipped"] is True
+        assert rows[0]["prefilter_reason"] == "roundup:표"
         assert rows[0]["prefilter_tag"] == "표"
         assert rows[0]["v2"] is None
         assert rows[0]["ticker"] == "005930"
@@ -197,3 +205,81 @@ class TestDayPairs:
         )
         assert len(pairs) == 1
         assert stats["prefiltered"] == 0
+
+
+class TestJudgePairFanout:
+    """The live paths read the article's own related-code list (dashboard
+    `stockCodes`, sweep `companyCodes`), so the count is the same thing the
+    backtest's C1 related-code tuple carries."""
+
+    @pytest.mark.asyncio
+    async def test_off_by_default_judges_a_wide_article(self, tmp_path: Path) -> None:
+        claude, rows = await _run(REAL_TITLE, tmp_path, None, related_n=40)
+        assert claude.calls == 1
+
+    @pytest.mark.asyncio
+    async def test_on_skips_a_wide_article(self, tmp_path: Path) -> None:
+        claude, rows = await _run(REAL_TITLE, tmp_path, True, related_n=40)
+        assert claude.calls == 0
+        assert judging.prefilter_skips == 1
+        assert rows[0]["prefilter_reason"] == "fanout:40"
+        assert rows[0]["prefilter_tag"] is None
+
+    @pytest.mark.asyncio
+    async def test_on_judges_a_narrow_article(self, tmp_path: Path) -> None:
+        claude, _ = await _run(REAL_TITLE, tmp_path, True, related_n=3)
+        assert claude.calls == 1
+
+
+def _c1_wide(root: Path, codes: list[str], title: str) -> None:
+    for code in codes:
+        _c1(root, code, title)
+
+
+class TestDayPairsFanout:
+    def _pairs(self, root: Path, codes: list[str], prefilter: bool) -> tuple[list[dict], dict]:
+        stats: dict = {}
+        pairs = day_pairs(
+            load_articles(root),
+            dt.date(2026, 9, 15),
+            dt.date(2026, 9, 14),
+            codes,
+            None,
+            stats,
+            None,
+            prefilter,
+        )
+        return pairs, stats
+
+    def test_on_drops_every_pair_of_a_wide_article(self, tmp_path: Path) -> None:
+        root = tmp_path / "c1"
+        codes = [f"{i:06d}" for i in range(1, 21)]
+        _c1_wide(root, codes, REAL_TITLE)
+        pairs, stats = self._pairs(root, codes, True)
+        assert pairs == []
+        assert stats["prefiltered"] == 20
+
+    def test_on_keeps_a_narrow_article(self, tmp_path: Path) -> None:
+        root = tmp_path / "c1"
+        codes = [f"{i:06d}" for i in range(1, 4)]
+        _c1_wide(root, codes, REAL_TITLE)
+        pairs, stats = self._pairs(root, codes, True)
+        assert len(pairs) == 3
+        assert stats["prefiltered"] == 0
+
+    def test_off_by_default_keeps_a_wide_article(self, tmp_path: Path) -> None:
+        root = tmp_path / "c1"
+        codes = [f"{i:06d}" for i in range(1, 21)]
+        _c1_wide(root, codes, REAL_TITLE)
+        pairs, _ = self._pairs(root, codes, False)
+        assert len(pairs) == 20
+
+    def test_pairs_carry_related_n_for_judge_batch(self, tmp_path: Path) -> None:
+        from build_universe_events import pair_rows  # noqa: PLC0415
+
+        root = tmp_path / "c1"
+        codes = [f"{i:06d}" for i in range(1, 21)]
+        _c1_wide(root, codes, REAL_TITLE)
+        pairs, _ = self._pairs(root, codes, False)
+        rows = pair_rows(pairs, {})
+        assert {r["related_n"] for r in rows} == {20}

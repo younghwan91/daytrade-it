@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING
 
 from krx_quant_core.market.session import KST
 
-from daytrade_it.application.news.mention_prefilter import roundup_tag, should_judge
+from daytrade_it.application.news.mention_prefilter import skip_reason
 from daytrade_it.shared.logging import get_logger
 
 if TYPE_CHECKING:
@@ -93,15 +93,20 @@ async def judge_pair(
     Returns the v2 features, or None if scoring failed (logged, never raised) or
     the pre-LLM filter dropped the pair (off by default).
     """
-    if not should_judge(stock.name, ticker.value, article.title, None, enabled=prefilter):
+    # Fan-out is the article's full related-code list -- the dashboard feed's
+    # `stockCodes` live, the detail call's `companyCodes` in the sweep -- taken
+    # before the universe/tradability narrowing, so it matches the C1
+    # related-code count the backtest passes.
+    reason = skip_reason(article.title, len(article.tickers), enabled=prefilter)
+    if reason is not None:
         global prefilter_skips
         prefilter_skips += 1
-        tag = roundup_tag(article.title)
         logger.info(
             "news_signal_poller: prefilter skipped",
             ticker=ticker.value,
             name=stock.name,
-            tag=tag,
+            reason=reason,
+            related_n=len(article.tickers),
             title=article.title[:80],
             total_skips=prefilter_skips,
         )
@@ -109,7 +114,7 @@ async def judge_pair(
         # the same universe the live daemon judged.
         judgments.append(
             pair_key(article, ticker),
-            prefilter_skipped_record(article, ticker, stock, tag),
+            prefilter_skipped_record(article, ticker, stock, reason),
         )
         return None
 
@@ -169,13 +174,15 @@ def prefilter_skipped_record(
     article: NewsArticle,
     ticker: Ticker,
     stock: StockInfo,
-    tag: str | None,
+    reason: str | None,
     judged_at: dt.datetime | None = None,
 ) -> dict:
     """Archive row for a pair the pre-LLM filter dropped.
 
     Same shape as `judgment_record` minus the model output, so readers can tell a
     skipped pair (`prefilter_skipped: true`, `v2: None`) from a judged one.
+    `reason` is `skip_reason`'s `"roundup:<tag>"` / `"fanout:<n>"`; the legacy
+    `prefilter_tag` key keeps the bare tag so old readers still work.
     """
     return {
         "article_id": str(article.id),
@@ -187,7 +194,10 @@ def prefilter_skipped_record(
         "judged_at": (judged_at or dt.datetime.now(KST)).isoformat(),
         "full_body_chars": 0,
         "prefilter_skipped": True,
-        "prefilter_tag": tag,
+        "prefilter_reason": reason,
+        "prefilter_tag": (
+            reason.split(":", 1)[1] if reason and reason.startswith("roundup:") else None
+        ),
         "v2": None,
         "v4_shadow": None,
     }

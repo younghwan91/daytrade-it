@@ -278,7 +278,12 @@ def day_pairs(
                 continue
             s = stocks.get(code) if stocks is not None else None
             if not should_judge(
-                s.name if s else code, code, a["title"], a.get("summary"), enabled=prefilter
+                s.name if s else code,
+                code,
+                a["title"],
+                a.get("summary"),
+                len(a["codes"]),
+                enabled=prefilter,
             ):
                 prefiltered += 1
                 continue
@@ -287,6 +292,10 @@ def day_pairs(
                     **{
                         k: a[k] for k in ("news_id", "title", "summary", "category", "published_at")
                     },
+                    # Historical twin of the live detail call's `companyCodes`
+                    # count -- the fan-out prefilter's input, carried into the
+                    # pairs file so `judge_batch` can apply the same rule.
+                    "related_n": len(a["codes"]),
                     "key": f"{aid}|{code}",
                     "article_id": aid,
                     "code": code,
@@ -413,6 +422,7 @@ def pair_rows(pairs: list[dict], stocks: dict) -> list[dict]:
                 "month": str(p["day"])[:7],
                 "session": p["session"],
                 "published_at": p["published_at"].isoformat(),
+                "related_n": p.get("related_n"),
             }
         )
     return rows

@@ -661,7 +661,13 @@ class BatchJudge:
         ]
         # Pre-LLM filter (off by default): drop pairs that can never be a BUY
         # before they cost anything. Same function the live daemon calls.
-        kept = [p for p in todo if should_judge(p.get("name"), p.get("code"), p.get("title"), None)]
+        # `related_n` is written by `build_universe_events.pair_rows`; an older
+        # pairs file without it leaves the fan-out rule inert (None = unknown).
+        kept = [
+            p
+            for p in todo
+            if should_judge(p.get("name"), p.get("code"), p.get("title"), None, p.get("related_n"))
+        ]
         prefiltered = len(todo) - len(kept)
         if prefiltered:
             self.log(f"prefilter skipped {prefiltered} of {len(todo)} eligible pairs")
