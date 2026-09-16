@@ -8,10 +8,11 @@ As of Task 13 (Phase 5), this handler:
     ``QuantAirflowDBClient`` (``daily_bars_adjusted``, split-adjusted KRW
     OHLCV) instead of the previously-wired-but-dead ``PolygonClient``
     (flagged as never actually connected in Task 8's report).
-  - Prices every simulated fill through the shared
-    ``domain.services.cost_model.KoreanCostModel`` (증권거래세 + 위탁수수료 +
-    slippage), the same model ``PaperBroker`` uses -- see
-    ``cost_model.py`` for the researched/placeholder rate sources.
+  - Replays the bars through krx-quant-core's ``run_replay`` (2026-09-16):
+    orders go through core ``OrderManager``/``PaperBroker`` with conservative
+    through-close limit fills, and every closed trade is costed by core
+    ``PositionBook`` with the shared ``KoreanCostModel`` (증권거래세 +
+    위탁수수료) -- see ``_simulate``.
 
 ``QuantAirflowDBClient``'s query methods are blocking (``psycopg2``, no
 async driver) -- each per-ticker fetch is run via ``asyncio.to_thread`` so
@@ -24,12 +25,20 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from dataclasses import fields as dataclass_fields
-from datetime import UTC, datetime
+from datetime import UTC, datetime, time
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
+import pandas as pd
 import structlog
 from krx_quant_core.backtest.ledger import performance_metrics
+from krx_quant_core.backtest.replay import run_replay
+from krx_quant_core.execution.book import PositionBook
+from krx_quant_core.execution.engine import Bar, Event, StrategyContext
+from krx_quant_core.execution.events import Fill
+from krx_quant_core.execution.guards import OrderGuardConfig
+from krx_quant_core.execution.orders import OrderIntent
+from krx_quant_core.market.session import KST
 
 from daytrade_it.domain.entities.stock import Exchange
 from daytrade_it.domain.services.cost_model import KoreanCostModel
@@ -42,6 +51,18 @@ if TYPE_CHECKING:
     )
 
 logger = structlog.get_logger(__name__)
+
+#: Daily bars are known at the close; core ``Bar.ts`` is when a bar closed.
+_BAR_CLOSE = time(15, 30)
+#: The replay sizes positions at 10% of capital, so the guard's per-order
+#: quantity cap (live default 1 share) is lifted; band/count limits are off.
+_REPLAY_GUARD = OrderGuardConfig(
+    max_qty=10**9,
+    max_qty_hard_cap=10**9,
+    price_band_pct=0.0,
+    max_orders_per_code=0,
+    max_orders_total=0,
+)
 
 
 @dataclass
@@ -227,187 +248,81 @@ class BacktestHandler:
         strategy: str,
         params: dict,
     ) -> tuple[list[BacktestTrade], list[dict]]:
-        """
-        Run the backtest simulation.
+        """Replay the daily bars through krx-quant-core's ``run_replay``.
+
+        Each daily bar is a core ``Bar`` event stamped at that day's 15:30 KST
+        close. ``_generate_signal`` still makes every decision (wrapped in
+        ``_SignalStrategy``); orders go through core ``OrderManager`` to its
+        ``PaperBroker``, and costs through ``PositionBook`` with this handler's
+        cost model -- the same order/fill/book code the live engines use.
+
+        Fill model (changed from the old next-open fill): a signal decided on
+        day t becomes a limit order at day t's close and fills at that limit
+        only when a later close trades *through* it (buy: close < limit, sell:
+        close > limit). An unfilled order is cancelled and re-decided on the
+        next bar. Positions still open at the end are liquidated at their last
+        close (commission + tax deducted), as before.
 
         Returns:
             Tuple of (trades, equity_curve).
         """
-        trades: list[BacktestTrade] = []
-        equity_curve: list[dict] = []
-
-        capital = float(initial_capital)
-        positions: dict[str, dict] = {}  # ticker -> {quantity, entry_price, entry_date}
-        # ticker -> signal generated from a PRIOR day's bar, staged to fill
-        # at the NEXT available bar's open (see the same-bar look-ahead
-        # fix below).
-        pending_signals: dict[str, dict] = {}
-        # Running peak equity, updated once per day instead of recomputed
-        # from the whole equity_curve every iteration (was O(n^2) over the
-        # backtest window; trivial fix, whole-branch review minor finding).
-        running_peak = float(initial_capital)
-
-        # Index each ticker's bars by ISO date string for O(1) same-day
-        # lookups below (AdjustedDailyBar.date is already a real date, so
-        # this replaces the old code's brittle string-slicing of
-        # ambiguous "timestamp"/"date" dict keys).
-        bars_by_ticker_date: dict[str, dict[str, AdjustedDailyBar]] = {
-            ticker: {bar.date.isoformat(): bar for bar in bars}
-            for ticker, bars in price_data.items()
-        }
-
-        all_dates: set[str] = set()
-        for bars_by_date in bars_by_ticker_date.values():
-            all_dates.update(bars_by_date.keys())
-
-        sorted_dates = sorted(all_dates)
-
-        for date_str in sorted_dates:
-            date = datetime.fromisoformat(date_str).replace(tzinfo=UTC)
-
-            # Get prices for this date
-            day_prices = {}
-            for ticker, bars_by_date in bars_by_ticker_date.items():
-                bar = bars_by_date.get(date_str)
-                if bar is None:
-                    continue
-                day_prices[ticker] = {
-                    "open": float(bar.open) if bar.open is not None else float(bar.close),
-                    "high": float(bar.high) if bar.high is not None else float(bar.close),
-                    "low": float(bar.low) if bar.low is not None else float(bar.close),
-                    "close": float(bar.close),
-                    "volume": float(bar.volume) if bar.volume is not None else 0.0,
-                }
-
-            if not day_prices:
-                continue
-
-            # Execute trades STAGED from a prior day's signal, filling at
-            # TODAY's open -- see the same-bar look-ahead fix below for
-            # why this runs before today's own signal generation.
-            for ticker in list(pending_signals.keys()):
-                if ticker not in day_prices:
-                    continue  # no bar today for this ticker; keep staged
-                staged_signal = pending_signals.pop(ticker)
-                fill_prices = dict(day_prices[ticker])
-                # Fill reference is the CURRENT bar's open (the earliest
-                # price observable today), not its close -- the signal was
-                # decided using a PRIOR day's data, so today's open is the
-                # first tradeable price after that decision.
-                fill_prices["close"] = fill_prices["open"]
-                trade = self._execute_backtest_trade(
-                    ticker=ticker,
-                    signal=staged_signal,
-                    prices=fill_prices,
-                    date=date,
-                    capital=capital,
-                    positions=positions,
-                )
-                if trade and trade.pnl != 0:  # Closing trade
-                    capital += float(trade.pnl)
-                    trades.append(trade)
-
-            # Generate signals for each ticker from TODAY's bar (including
-            # today's full volume) and STAGE them -- do not fill today.
-            #
-            # Same-bar look-ahead bias fix (whole-branch review finding
-            # #9): a live system cannot know a full day's volume/close
-            # before that day's close, so a signal generated from day t's
-            # bar cannot legitimately fill at day t's own close (the old
-            # behavior). Signals are now filled at the next available
-            # bar's open (handled above, at the top of the NEXT
-            # iteration) -- this day's own close is still a legitimate
-            # input to the signal *decision* (you know it once today's
-            # bar closes), it just can't be the fill price for a decision
-            # made from that same bar.
-            for ticker, prices in day_prices.items():
-                if ticker in pending_signals:
-                    continue  # already have an unfilled signal staged
-                signal = self._generate_signal(
-                    ticker=ticker,
-                    prices=prices,
-                    strategy=strategy,
-                    params=params,
-                    position=positions.get(ticker),
-                )
-                if signal and signal["action"]:
-                    pending_signals[ticker] = signal
-
-            # Calculate portfolio value
-            portfolio_value = capital
-            for ticker, pos in positions.items():
-                if ticker in day_prices:
-                    portfolio_value += pos["quantity"] * day_prices[ticker]["close"]
-
-            # Calculate drawdown against the running peak equity so far.
-            running_peak = max(running_peak, portfolio_value)
-            drawdown = (running_peak - portfolio_value) / running_peak if running_peak > 0 else 0
-
-            equity_curve.append(
-                {
-                    "date": date.isoformat(),
-                    "equity": portfolio_value,
-                    "drawdown": drawdown,
-                    "cash": capital,
-                }
+        bars = [
+            Bar(
+                ts=datetime.combine(bar.date, _BAR_CLOSE, tzinfo=KST),
+                code=str(ticker),
+                open=float(bar.open if bar.open is not None else bar.close),
+                high=float(bar.high if bar.high is not None else bar.close),
+                low=float(bar.low if bar.low is not None else bar.close),
+                close=float(bar.close),
+                volume=float(bar.volume or 0),
             )
+            for ticker, ticker_bars in price_data.items()
+            for bar in ticker_bars
+        ]
+        bars.sort(key=lambda b: (b.ts, b.code))
+        runner = _SignalStrategy(self, float(initial_capital), strategy, params)
+        replay = await asyncio.to_thread(
+            run_replay,
+            runner,
+            bars,
+            guard_config=_REPLAY_GUARD,
+            market_of=lambda _code: self._market.value,
+        )
 
-        # Any signal staged on the very last date (no subsequent bar to
-        # fill it against) simply never fills -- consistent with the
-        # look-ahead fix above (a signal must wait for the next bar), and
-        # harmless: it just means the backtest window ended one day too
-        # early to observe that trade, not a bug to work around here.
-        pending_signals.clear()
-
-        # Close any remaining open positions at the last available price
-        # (end-of-backtest forced liquidation), applying the same cost
-        # model as a normal SELL -- an open position that was never exited
-        # by a signal shouldn't get a cost-free exit just because the
-        # backtest window ended. This is intentionally still same-bar
-        # (last_bar.close): there is no further bar to defer to at the
-        # end of the backtest window, so this terminal liquidation isn't
-        # subject to the same look-ahead concern as an in-window signal.
-        for ticker, pos in list(positions.items()):
-            bars = price_data.get(ticker)
-            if not bars:
-                continue
-            last_bar = bars[-1]
-            reference_price = Decimal(str(last_bar.close))
-            quantity = Decimal(str(pos["quantity"]))
-            trade_cost = self._cost_model.cost_of_trade(
-                price=reference_price,
-                quantity=quantity,
-                side="SELL",
-                market=self._market,
-            )
-            close_price = float(trade_cost.fill_price)
-            close_date = datetime.combine(last_bar.date, datetime.min.time()).replace(tzinfo=UTC)
-
-            exit_cost = float(trade_cost.commission + trade_cost.tax)
-            entry_commission = float(pos.get("entry_commission", 0.0))
-            gross_pnl = (close_price - pos["entry_price"]) * pos["quantity"]
-            pnl = gross_pnl - exit_cost - entry_commission
-            pnl_pct = (
-                (close_price - pos["entry_price"]) / pos["entry_price"]
-                if pos["entry_price"]
-                else 0.0
-            )
-
-            trades.append(
-                BacktestTrade(
-                    ticker=ticker,
-                    direction="BUY",
-                    entry_date=pos["entry_date"],
-                    entry_price=Decimal(str(pos["entry_price"])),
-                    exit_date=close_date,
-                    exit_price=Decimal(str(round(close_price, 2))),
-                    quantity=Decimal(str(pos["quantity"])),
-                    pnl=Decimal(str(round(pnl, 2))),
-                    pnl_pct=Decimal(str(round(pnl_pct, 4))),
+        # Re-book the fills with this handler's cost model (run_replay's own
+        # book uses core default rates), then liquidate what is still open.
+        book = PositionBook(market_of=lambda _code: self._market.value, cost_model=self._cost_model)
+        for row in replay.fills.to_dict("records"):
+            book.apply(Fill(**{**row, "ts": pd.Timestamp(row["ts"]).to_pydatetime()}))
+        last_bar = {bar.code: bar for bar in bars}
+        for code, holding in book.positions().items():
+            bar = last_bar[code]
+            book.apply(
+                Fill(
+                    ord_no="END",
+                    code=code,
+                    side="sell",
+                    qty=holding.qty,
+                    price=int(bar.close),
+                    ts=bar.ts,
                 )
             )
 
-        return trades, equity_curve
+        trades = [
+            BacktestTrade(
+                ticker=row["code"],
+                direction="SELL",
+                entry_date=pd.Timestamp(row["entry_ts"]).to_pydatetime(),
+                entry_price=Decimal(str(round(row["entry_price"], 2))),
+                exit_date=pd.Timestamp(row["exit_ts"]).to_pydatetime(),
+                exit_price=Decimal(str(row["exit_price"])),
+                quantity=Decimal(str(row["qty"])),
+                pnl=Decimal(str(round(row["pnl"], 2))),
+                pnl_pct=Decimal(str(round(row["exit_price"] / row["entry_price"] - 1, 4))),
+            )
+            for row in book.to_frame().to_dict("records")
+        ]
+        return trades, runner.equity_curve
 
     def _generate_signal(
         self,
@@ -446,95 +361,6 @@ class BacktestHandler:
 
         return None
 
-    def _execute_backtest_trade(
-        self,
-        ticker: str,
-        signal: dict,
-        prices: dict,
-        date: datetime,
-        capital: float,
-        positions: dict,
-    ) -> BacktestTrade | None:
-        """Execute a trade in the backtest simulation.
-
-        Fill price, 위탁수수료 (commission), and 증권거래세 (sell-side tax)
-        all come from the shared ``KoreanCostModel`` -- see Task 13's
-        ``domain/services/cost_model.py`` for the researched/placeholder
-        rate sources. This is the same model ``PaperBroker`` uses, so
-        backtest and paper-trading costs are computed identically.
-        """
-        action = signal["action"]
-
-        if action == "BUY" and ticker not in positions:
-            # Calculate position size (10% of capital)
-            position_value = capital * 0.1
-            reference_price = Decimal(str(prices["close"]))
-            fill_price = self._cost_model.apply_slippage(
-                reference_price, side="BUY", market=self._market
-            )
-            if fill_price <= 0:
-                return None
-            quantity = int(Decimal(str(position_value)) / fill_price)
-
-            if quantity > 0:
-                trade_cost = self._cost_model.cost_of_trade(
-                    price=reference_price,
-                    quantity=Decimal(quantity),
-                    side="BUY",
-                    market=self._market,
-                )
-                price = float(trade_cost.fill_price)
-
-                positions[ticker] = {
-                    "quantity": quantity,
-                    "entry_price": price,
-                    "entry_commission": float(trade_cost.commission),
-                    "entry_date": date,
-                }
-
-                return BacktestTrade(
-                    ticker=ticker,
-                    direction="BUY",
-                    entry_date=date,
-                    entry_price=Decimal(str(round(price, 2))),
-                    quantity=Decimal(str(quantity)),
-                )
-
-        elif action == "SELL" and ticker in positions:
-            pos = positions.pop(ticker)
-            reference_price = Decimal(str(prices["close"]))
-            quantity = Decimal(str(pos["quantity"]))
-            trade_cost = self._cost_model.cost_of_trade(
-                price=reference_price,
-                quantity=quantity,
-                side="SELL",
-                market=self._market,
-            )
-            price = float(trade_cost.fill_price)
-
-            # Net P&L = gross P&L - entry commission - exit commission - 증권거래세
-            exit_cost = float(trade_cost.commission + trade_cost.tax)
-            entry_commission = float(pos.get("entry_commission", 0.0))
-            gross_pnl = (price - pos["entry_price"]) * pos["quantity"]
-            net_pnl = gross_pnl - exit_cost - entry_commission
-            pnl_pct = (
-                (price - pos["entry_price"]) / pos["entry_price"] if pos["entry_price"] else 0.0
-            )
-
-            return BacktestTrade(
-                ticker=ticker,
-                direction="SELL",
-                entry_date=pos["entry_date"],
-                entry_price=Decimal(str(round(pos["entry_price"], 2))),
-                exit_date=date,
-                exit_price=Decimal(str(round(price, 2))),
-                quantity=Decimal(str(pos["quantity"])),
-                pnl=Decimal(str(round(net_pnl, 2))),
-                pnl_pct=Decimal(str(round(pnl_pct, 4))),
-            )
-
-        return None
-
     def _calculate_metrics(
         self,
         trades: list[BacktestTrade],
@@ -559,3 +385,83 @@ class BacktestHandler:
         return BacktestMetrics(
             **{f.name: getattr(m, f.name) for f in dataclass_fields(BacktestMetrics)}
         )
+
+
+class _SignalStrategy:
+    """Core replay ``Strategy`` that asks ``BacktestHandler._generate_signal``.
+
+    Per bar: cancel this ticker's unfilled order, ask for a signal given the
+    current core-book position, and place a limit at the bar's close (BUY:
+    10% of cash; SELL: the whole position). Records one equity point per day.
+    """
+
+    def __init__(
+        self, handler: BacktestHandler, initial_capital: float, strategy: str, params: dict
+    ) -> None:
+        self._handler = handler
+        self._initial = initial_capital
+        self._strategy = strategy
+        self._params = params
+        self._peak = initial_capital
+        self._by_date: dict[str, dict] = {}
+
+    @property
+    def equity_curve(self) -> list[dict]:
+        return list(self._by_date.values())
+
+    def on_event(self, ev: Event, ctx: StrategyContext) -> None:
+        assert isinstance(ev, Bar)
+        oms = ctx.oms
+        for order in oms.broker.open_orders():
+            if order.code == ev.code:
+                intent = OrderIntent(order.side, order.code, order.qty, order.price)
+                oms.cancel(order.ord_no, intent)
+
+        holding = oms.book.position(ev.code)
+        prices = {
+            "open": ev.open,
+            "high": ev.high,
+            "low": ev.low,
+            "close": ev.close,
+            "volume": ev.volume,
+        }
+        position = {"entry_price": holding.avg_price} if holding is not None else None
+        signal = self._handler._generate_signal(
+            ticker=ev.code,
+            prices=prices,
+            strategy=self._strategy,
+            params=self._params,
+            position=position,
+        )
+        cash = (
+            self._initial
+            + oms.book.realized_krw
+            - sum(h.qty * h.avg_price for h in oms.book.positions().values())
+        )
+        price = int(ev.close)
+        action = signal["action"] if signal else None
+        if action == "BUY" and holding is None and price > 0:
+            qty = int(cash * 0.1 / price)
+            if qty > 0:
+                oms.buy(ev.code, qty, price, ref_price=ev.close)
+        elif action == "SELL" and holding is not None:
+            oms.sell(ev.code, holding.qty, price)
+
+        self._record_equity(ev, ctx, cash)
+
+    def _record_equity(self, ev: Bar, ctx: StrategyContext, cash: float) -> None:
+        book = ctx.oms.book
+        equity = self._initial + book.realized_krw
+        for code, h in book.positions().items():
+            last = ctx.last.get(code)
+            close = last.close if isinstance(last, Bar) else h.avg_price
+            equity += h.qty * (close - h.avg_price)
+        self._peak = max(self._peak, equity)
+        drawdown = (self._peak - equity) / self._peak if self._peak > 0 else 0
+        day = datetime.combine(ev.ts.date(), time.min, tzinfo=UTC)
+        self._by_date[day.isoformat()] = {
+            "date": day.isoformat(),
+            "equity": equity,
+            "drawdown": drawdown,
+            "cash": cash,
+        }

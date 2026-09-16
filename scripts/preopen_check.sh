@@ -144,6 +144,79 @@ else
     warn "자격증명 없어 5)를 건너뜀"
 fi
 
+# ─────────────────────── 5b. 보유 대사 -- 보고만 (krx-quant-core KiwoomBroker, 읽기 전용)
+sec "5b) 보유 대사 -- core KiwoomBroker(dry_run) vs daytrade KiwoomBroker (보고만, FAIL 없음)"
+# 같은 kt00018 을 두 어댑터가 따로 읽어 수량이 같은지 본다. 코어 OrderManager 로 옮기기 전
+# 파싱 차이를 미리 드러내려는 것이다. 무엇이 달라도 WARN 만 내고 종료코드는 안 바꾼다.
+if [ -n "${GPTQ_KIWOOM_APP_KEY:-}" ] && [ -n "${GPTQ_KIWOOM_APP_SECRET:-}" ]; then
+    RECON_OUT=$(uv run python - <<'PY' 2>&1
+import os
+import signal
+
+
+# BaseException: 조회 쪽 `except Exception` 재시도(core KiwoomBroker._read)에 삼켜지지 않게.
+class _Timeout(BaseException):
+    pass
+
+
+def _alarm(signum, frame):
+    raise _Timeout("20초 안에 끝나지 않음")
+
+
+# 키움 조회가 멈춰도 점검 전체가 막히지 않게 20초에서 끊는다(WARN).
+signal.signal(signal.SIGALRM, _alarm)
+signal.alarm(20)
+try:
+    from kiwoom_client import KiwoomAPI
+    from krx_quant_core.execution.kiwoom_broker import KiwoomBroker as CoreKiwoomBroker
+
+    from daytrade_it.infrastructure.brokers.kiwoom_broker import KiwoomBroker
+
+    api = KiwoomAPI(
+        app_key=os.environ["GPTQ_KIWOOM_APP_KEY"],
+        app_secret=os.environ["GPTQ_KIWOOM_APP_SECRET"],
+        is_mock=os.environ.get("GPTQ_KIWOOM_IS_MOCK", "true").lower() != "false",
+    )
+    broker = KiwoomBroker(api=api)
+    if not broker.connect():
+        raise RuntimeError("connect failed")
+    try:
+        core = {c: h.qty for c, h in CoreKiwoomBroker(api, dry_run=True).holdings().items()}
+        mine = {p.ticker: int(p.quantity) for p in broker.get_positions()}
+    finally:
+        broker.disconnect()
+    print(f"INFO core holdings {len(core)}종목: {', '.join(sorted(core)) or '-'}")
+    diff = {
+        c: (core.get(c, 0), mine.get(c, 0))
+        for c in sorted(set(core) | set(mine))
+        if core.get(c, 0) != mine.get(c, 0)
+    }
+    if diff:
+        print("WARN 수량 불일치(core, daytrade): " + ", ".join(f"{c}={v}" for c, v in diff.items()))
+    else:
+        print("OK")
+except _Timeout as exc:
+    print(f"WARN 대사 시간 초과: {exc}")
+except Exception as exc:  # 보고만 한다 -- 어떤 예외도 FAIL 로 만들지 않는다
+    print(f"WARN 대사 실행 실패: {type(exc).__name__}: {exc}")
+finally:
+    signal.alarm(0)
+PY
+) || true
+    while IFS= read -r line; do
+        case "$line" in
+            "INFO "*) printf '  INFO %s\n' "${line#INFO }" ;;
+            "WARN "*) warn "${line#WARN }" ;;
+            OK) ok "core·daytrade 보유 수량 일치" ;;
+        esac
+    done <<< "$RECON_OUT"
+    if ! echo "$RECON_OUT" | grep -qE '^(OK|WARN )'; then
+        warn "보유 대사 결과를 읽지 못함: $(echo "$RECON_OUT" | tail -1)"
+    fi
+else
+    warn "자격증명 없어 5b)를 건너뜀"
+fi
+
 # ─────────────────────────────────────────── 6. 데몬이 읽는 DB·키 (데몬과 같은 출처)
 sec "6) 데몬 전제 -- DB·Anthropic 키 (news_signal_daemon.sh 와 같은 출처)"
 # 2026-09-13: kr-quant 가 이 호스트에서 사라지며 데몬이 옛 ../kr-quant/.env 를 읽어

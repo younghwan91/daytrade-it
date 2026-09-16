@@ -1,0 +1,123 @@
+"""BacktestHandler over krx-quant-core run_replay (Bar events, through-close fills).
+
+Fill model (core PaperBroker, conservative): a signal decided on day t's bar
+becomes a limit order at day t's close; it fills at that limit only when a
+LATER bar's close trades through it (buy: close < limit, sell: close > limit).
+Costs (commission + 증권거래세) come from core PositionBook with the handler's
+cost model.
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+from decimal import Decimal
+
+from krx_quant_core.execution.book import PositionBook
+from krx_quant_core.execution.events import Fill
+
+from daytrade_it.application.handlers.backtest import BacktestCommand, BacktestHandler
+from daytrade_it.domain.services.cost_model import KoreanCostModel
+from daytrade_it.infrastructure.brokers.base import KST
+from daytrade_it.infrastructure.external.quant_airflow_db_client import AdjustedDailyBar
+
+
+def _bar(day: int, close: float, volume: int = 0) -> AdjustedDailyBar:
+    return AdjustedDailyBar(
+        code="005930",
+        date=dt.date(2026, 9, day),
+        open=close,
+        high=close,
+        low=close,
+        close=close,
+        volume=volume,
+        source="test",
+    )
+
+
+class _FakeMarketData:
+    def __init__(self, bars: list[AdjustedDailyBar]) -> None:
+        self._bars = bars
+
+    def get_adjusted_daily_bars(self, ticker, *, start, end):  # noqa: ANN001, ANN201
+        return self._bars
+
+
+def _command() -> BacktestCommand:
+    return BacktestCommand(
+        tickers=["005930"],
+        start_date=dt.datetime(2026, 9, 1, tzinfo=dt.UTC),
+        end_date=dt.datetime(2026, 9, 30, tzinfo=dt.UTC),
+        initial_capital=Decimal("10000000"),
+        strategy="news_momentum",
+    )
+
+
+def _expected_pnl(qty: int, buy: int, sell: int, sell_day: int) -> float:
+    book = PositionBook(cost_model=KoreanCostModel())
+    ts = dt.datetime(2026, 9, 1, 15, 30, tzinfo=KST)
+    book.apply(Fill(ord_no="b", code="005930", side="buy", qty=qty, price=buy, ts=ts))
+    sell_ts = dt.datetime(2026, 9, sell_day, 15, 30, tzinfo=KST)
+    return book.apply(Fill(ord_no="s", code="005930", side="sell", qty=qty, price=sell, ts=sell_ts))
+
+
+async def test_round_trip_fills_through_the_next_close_at_the_limit() -> None:
+    bars = [
+        _bar(1, 10_000, volume=2_000_000),  # high volume -> BUY, limit 10,000
+        _bar(2, 9_900),  # closes through 10,000 -> bought at 10,000
+        _bar(3, 10_600),  # +6% -> SELL, limit 10,600
+        _bar(4, 10_700),  # closes through 10,600 -> sold at 10,600
+    ]
+    handler = BacktestHandler(market_data_client=_FakeMarketData(bars))  # type: ignore[arg-type]
+
+    result = await handler.handle(_command())
+
+    [trade] = result.trades
+    qty = int(10_000_000 * 0.1 / 10_000)
+    assert trade.entry_price == Decimal("10000")
+    assert trade.exit_price == Decimal("10600")
+    assert trade.quantity == Decimal(qty)
+    assert trade.entry_date == dt.datetime(2026, 9, 2, 15, 30, tzinfo=KST)
+    assert trade.exit_date == dt.datetime(2026, 9, 4, 15, 30, tzinfo=KST)
+    assert float(trade.pnl) == round(_expected_pnl(qty, 10_000, 10_600, 4), 2)
+    assert result.metrics.total_trades == 1
+    assert result.metrics.winning_trades == 1
+    assert [p["date"][:10] for p in result.equity_curve] == [
+        "2026-09-01",
+        "2026-09-02",
+        "2026-09-03",
+        "2026-09-04",
+    ]
+    assert result.final_capital == Decimal(str(result.equity_curve[-1]["equity"]))
+
+
+async def test_limit_that_is_never_traded_through_does_not_fill() -> None:
+    bars = [
+        _bar(1, 10_000, volume=2_000_000),
+        _bar(2, 10_000),  # touch, not through -> no fill
+        _bar(3, 10_100),
+    ]
+    handler = BacktestHandler(market_data_client=_FakeMarketData(bars))  # type: ignore[arg-type]
+
+    result = await handler.handle(_command())
+
+    assert result.trades == []
+    assert result.metrics.total_trades == 0
+    assert result.final_capital == Decimal("10000000")
+
+
+async def test_open_position_is_liquidated_at_the_last_close_with_costs() -> None:
+    bars = [
+        _bar(1, 10_000, volume=2_000_000),
+        _bar(2, 9_900),  # bought at 10,000
+        _bar(3, 10_100),  # +1%: no exit signal
+    ]
+    handler = BacktestHandler(market_data_client=_FakeMarketData(bars))  # type: ignore[arg-type]
+
+    result = await handler.handle(_command())
+
+    [trade] = result.trades
+    qty = int(10_000_000 * 0.1 / 10_000)
+    assert trade.exit_price == Decimal("10100")
+    assert float(trade.pnl) == round(_expected_pnl(qty, 10_000, 10_100, 3), 2)
+    gross = (trade.exit_price - trade.entry_price) * trade.quantity
+    assert trade.pnl != gross

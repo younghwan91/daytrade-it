@@ -247,6 +247,22 @@ modules above (`risk_gate.py`, `cost_model.py`, `tick_size.py`,
 thin re-exports — change the logic in core, not here. Strategy code,
 `AutoTrader` and `execute_trade` stay in this repo.
 
+#### krx-quant-core 공용 엔진 사용 (v0.5.0)
+
+| 쓰는 곳 | 코어 엔진 | 비고 |
+|---|---|---|
+| `scripts/news_signal_poller.py` | `execution.oms.InstanceLock` | `<레포>/data/auto_trader/poller.lock` — 두 번째 poller 는 잡고 있는 pid 를 ERROR 로 남기고 exit 0 (셸 flock 도 유지) |
+| `news_signal_poller.py --execute --paper` | `execution.paper.PaperBroker` | `infrastructure/brokers/core_paper_broker.py` — 시세는 실 키움(읽기), 주문은 모의 체결, 원장 `data/auto_trader_paper/`, 판정 `data/news_judgments_paper/`, 신호는 DB 에 안 씀. `--confirm-real` 과 같이 못 씀, 크론 없음 |
+| `scripts/preopen_check.sh` 5b | `execution.kiwoom_broker.KiwoomBroker(dry_run=True).holdings()` | daytrade 보유와 수량 대사 — WARN 만, 종료코드 불변 |
+| MCP `backtest` (`application/handlers/backtest.py`) | `backtest.replay.run_replay` + `PositionBook` | 일봉 = 15:30 KST `Bar`. 체결은 보수적 through-close 지정가(다음 종가가 뚫어야 체결) |
+| `research/nightly.toml` + `deploy/crontab.simnode` | `kqc nightly .` | simnode 평일 18:30, job `mcp-backtest-smoke`(최근 20거래일 × 5종목). 로그 `~/.kqc/nightly/<날짜>/` |
+
+실주문 경로(`AutoTrader`·`execute_trade`·`KiwoomBroker`)는 아직 코어 `OrderManager` 를 쓰지 않는다.
+
+> ⚠️ **장중 trader 에서 poller 를 손으로 띄우지 말 것 — 실데몬이 하루 종일 쉰다.** `--paper` 도 마찬가지다.
+> 손으로 띄운 poller 가 `poller.lock` 을 잡고 있으면 크론 데몬의 재시작이 전부 잠금에서 끝난다
+> (`data/news_signal_daemon.log` 에 `holder_pid` 가 찍힌 ERROR).
+
 - Position sizing by account risk percentage, per-ticker position limits
 - KRX trading-window enforcement (09:00–15:30 KST)
 - Daily loss limits

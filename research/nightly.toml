@@ -1,0 +1,8 @@
+# `kqc nightly .` (krx-quant-core runtime.nightly) 가 읽는 simnode 야간 job 목록.
+# deploy/crontab.simnode 가 평일 18:30 에 돌린다. 로그: ~/.kqc/nightly/<날짜>/daytrade-it-<job>.log
+
+[[job]]
+name = "mcp-backtest-smoke"
+cmd = ["uv", "run", "python", "scripts/research/backtest_smoke.py"]
+timeout_min = 20
+weekdays_only = true

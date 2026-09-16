@@ -1,0 +1,9 @@
+# 이 파일은 dotfiles 의 cron-install 이 simnode 의 사용자 crontab 에 설치한다.
+# 매일 07:50 동기화(pull-all --ci-gate → cron-install)가 origin/main 기준으로 반영한다.
+# 크론을 바꾸려면 crontab -e 가 아니라 이 파일을 고쳐 커밋·푸시할 것 — 손으로 고친 건 다음 설치에 덮인다.
+
+# daytrade-it 야간 시뮬레이션 (2026-09-16 추가) — 실주문 없음. krx-quant-core `kqc nightly` 가
+# research/nightly.toml 의 job 을 각자 timeout 으로 돌린다(지금은 mcp-backtest-smoke 하나:
+# 최근 20거래일 × 5종목 백테스트, core run_replay 경로 확인). job 로그는 ~/.kqc/nightly/<날짜>/.
+# DB DSN(KR_QUANT_DB)은 scalp-it 배치와 같은 출처 ../quant-airflow/.env 에서 읽는다.
+30 18 * * 1-5 cd /home/young/git/daytrade-it && mkdir -p data && export $(grep -v "^#" ../quant-airflow/.env | xargs) && /home/young/.local/bin/uv run kqc nightly . >> data/nightly.log 2>&1

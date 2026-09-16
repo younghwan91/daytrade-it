@@ -27,6 +27,29 @@ Usage:
     uv run python scripts/news_signal_poller.py --execute                # + dry-run trading
     uv run python scripts/news_signal_poller.py --execute --confirm-real # + REAL orders
     uv run python scripts/news_signal_poller.py --once                   # single poll
+    uv run python scripts/news_signal_poller.py --execute --paper        # + PAPER orders
+
+Paper mode (`--execute --paper`, never with `--confirm-real`): quotes and
+minute bars still come from the real Kiwoom API (read-only), but orders go
+to `CorePaperBroker` -- krx-quant-core's `PaperBroker`, filled against those
+real quotes -- and AutoTrader writes its ledger to `data/auto_trader_paper/`,
+never `data/auto_trader/`. Paper cash starts at 10,000,000 KRW. Pairs are
+judged exactly as in live mode (same prefilter, same Claude calls), but
+nothing is shared with live dedup state: judgments go to
+`data/news_judgments_paper/` and signals are NOT persisted to the gptquant DB
+(dedup by (article, ticker) is in memory, plus the paper judgment log across
+restarts). Not in cron.
+
+Single instance: `run()` holds `<repo>/data/auto_trader/poller.lock`
+(krx-quant-core `InstanceLock`, anchored to the repo root, not the cwd) for its
+whole life; a second poller logs an ERROR with the holder pid and returns
+(exit 0) before building any client. `news_signal_daemon.sh` keeps its own
+flock too.
+
+⚠️ 장중 trader 에서 poller 를 손으로 띄우지 말 것 — 실데몬이 하루 종일 쉰다.
+(Do not start a poller by hand on trader during market hours -- paper mode
+included: the cron daemon's restarts all exit on the lock and live trading
+idles for the rest of the day.)
 
 Kill switch `data/live_STOP`: stops new signals and entries; exits keep
 being managed until the close.
@@ -47,6 +70,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import httpx
 from kiwoom_client import KiwoomAPI
+from krx_quant_core.execution.oms import AlreadyRunning, InstanceLock
 from sqlalchemy import select
 
 from daytrade_it.application.news.mention_prefilter import skip_reason
@@ -79,6 +103,9 @@ from daytrade_it.shared.logging import get_logger
 logger = get_logger(__name__)
 
 KILL_SWITCH_PATH = Path("data/live_STOP")
+#: Where `--paper` writes the consecutive-scoring-failure stop instead -- paper
+#: mode must never write the live kill file (it would block tomorrow's entries).
+PAPER_KILL_SWITCH_PATH = Path("data/paper_STOP")
 DEFAULT_STOP_TIME = dt.time(15, 20)  # KST -- news polling stops here
 #: With --execute, the process keeps managing exits until the closing auction
 #: ends (KRX continuous trading ends 15:20; the auction runs to 15:30).
@@ -87,6 +114,11 @@ SESSION_CLOSE = dt.time(15, 20)  # signals expire here; day trades are flat by t
 FIRST_POLL = dt.time(9, 0, 30)
 MANAGE_TICK_SECONDS = 30
 LEDGER_DIR = Path("data/auto_trader")
+PAPER_LEDGER_DIR = Path("data/auto_trader_paper")
+JUDGMENT_DIR_PAPER = Path("data/news_judgments_paper")
+#: Anchored to the repo root (not the cwd) so a poller started by hand from
+#: another directory still collides with the cron daemon's lock.
+POLLER_LOCK_PATH = Path(__file__).resolve().parents[1] / "data" / "auto_trader" / "poller.lock"
 JUDGMENT_DIR = Path("data/news_judgments")
 DETAIL_ARCHIVE_DIR = Path("data/toss_detail")
 DETAIL_HTTP_HEADERS = {
@@ -149,11 +181,15 @@ async def process_pair(
     judgments: JudgmentLog,
     full_body_text: str | None,
     pending: list | None = None,
+    paper_seen: set[str] | None = None,
 ) -> None:
     """Judge one (article, company) pair; persist a BUY signal if one emerges.
 
     Every failure is caught and logged, never raised -- one bad pair must
     not stop the loop or the other pairs in the batch.
+
+    `paper_seen` (paper mode only): dedup in this set instead of the signal DB,
+    and never persist -- live's dedup state must not see paper signals.
     """
     pair_key = f"{article.id}|{ticker.value}"
     if judgments.seen(pair_key):
@@ -197,19 +233,23 @@ async def process_pair(
         return
 
     # Dedup across restarts (TossNewsClient's seen-id cache is in-memory).
-    try:
-        async with UnitOfWork(db) as uow:
-            existing = await uow.session.execute(
-                select(TradingSignalModel.id).where(
-                    TradingSignalModel.news_article_id == article.id,
-                    TradingSignalModel.ticker == ticker.value,
+    if paper_seen is not None:
+        if pair_key in paper_seen:
+            return
+    else:
+        try:
+            async with UnitOfWork(db) as uow:
+                existing = await uow.session.execute(
+                    select(TradingSignalModel.id).where(
+                        TradingSignalModel.news_article_id == article.id,
+                        TradingSignalModel.ticker == ticker.value,
+                    )
                 )
-            )
-            if existing.first() is not None:
-                return
-    except Exception:
-        logger.exception("news_signal_poller: dedup lookup failed", article_id=str(article.id))
-        return
+                if existing.first() is not None:
+                    return
+        except Exception:
+            logger.exception("news_signal_poller: dedup lookup failed", article_id=str(article.id))
+            return
 
     try:
         features = await claude.score_article(
@@ -234,8 +274,9 @@ async def process_pair(
             # 판정을 못 하면 뉴스 매매의 근거가 없다. 09-16 에는 크레딧이 떨어져
             # 09:07~14:58 동안 86 건이 실패했는데도 데몬이 조용히 계속 돌았고,
             # 아무도 장이 끝날 때까지 몰랐다. 신규 진입만 막고 청산은 계속 돈다.
-            KILL_SWITCH_PATH.parent.mkdir(parents=True, exist_ok=True)
-            KILL_SWITCH_PATH.write_text(
+            stop_path = KILL_SWITCH_PATH if paper_seen is None else PAPER_KILL_SWITCH_PATH
+            stop_path.parent.mkdir(parents=True, exist_ok=True)
+            stop_path.write_text(
                 f"{dt.datetime.now(KST).isoformat()} 판정 연속 실패 "
                 f"{SCORING_FAILURE_LIMIT} 회로 신규 진입을 자동 중단한다.\n"
                 f"마지막 오류: {type(exc).__name__}: {exc}\n"
@@ -333,13 +374,17 @@ async def process_pair(
         }
     )
 
-    try:
-        async with UnitOfWork(db) as uow:
-            saved = await uow.signals.add(composite)
-            await uow.commit()
-    except Exception:
-        logger.exception("news_signal_poller: failed to persist signal", ticker=ticker.value)
-        return
+    if paper_seen is not None:
+        paper_seen.add(pair_key)
+        saved = composite  # in memory only; AutoTrader looks it up by its id
+    else:
+        try:
+            async with UnitOfWork(db) as uow:
+                saved = await uow.signals.add(composite)
+                await uow.commit()
+        except Exception:
+            logger.exception("news_signal_poller: failed to persist signal", ticker=ticker.value)
+            return
 
     logger.info(
         "news_signal_poller: ACTIONABLE SIGNAL PERSISTED",
@@ -421,6 +466,47 @@ async def run(
     execute: bool,
     confirm_real: bool,
     exits_until: dt.time = EXITS_UNTIL,
+    paper: bool = False,
+) -> None:
+    """Hold the single-instance lock, then poll/trade until the stop time."""
+    lock = InstanceLock(POLLER_LOCK_PATH)
+    try:
+        lock.acquire()
+    except AlreadyRunning:
+        try:
+            holder_pid = POLLER_LOCK_PATH.read_text().strip() or "unknown"
+        except OSError:
+            holder_pid = "unknown"
+        # ERROR, not WARNING: if the holder is a hand-started poller, the cron
+        # daemon's restart loop keeps landing here and live trading idles all day.
+        logger.error(
+            "news_signal_poller: another poller holds the instance lock -- exiting "
+            "(if that is a hand-started poller during market hours, the live daemon is idle)",
+            lock=str(POLLER_LOCK_PATH),
+            holder_pid=holder_pid,
+        )
+        return
+    try:
+        await _run_locked(
+            once=once,
+            stop_at=stop_at,
+            execute=execute,
+            confirm_real=confirm_real,
+            exits_until=exits_until,
+            paper=paper,
+        )
+    finally:
+        lock.release()
+
+
+async def _run_locked(
+    *,
+    once: bool,
+    stop_at: dt.time,
+    execute: bool,
+    confirm_real: bool,
+    exits_until: dt.time,
+    paper: bool,
 ) -> None:
     db = DatabaseManager(database_url=os.environ["GPTQ_DATABASE_URL"])
     api = KiwoomAPI(
@@ -463,7 +549,22 @@ async def run(
             await asyncio.sleep(wait)
 
     trader: AutoTrader | None = None
-    if execute:
+    if execute and paper:
+        # Imported here so the live poller never loads the paper engine.
+        from daytrade_it.infrastructure.brokers.core_paper_broker import (  # noqa: PLC0415
+            CorePaperBroker,
+        )
+
+        # live=True: AutoTrader places nothing when live=False. Orders go to
+        # the in-process paper broker; quotes stay real (read-only).
+        trader = AutoTrader(CorePaperBroker(broker), PAPER_LEDGER_DIR, live=True)
+        logger.warning(
+            "news_signal_poller: auto-trading enabled",
+            live=False,
+            mode="PAPER (krx-quant-core PaperBroker on real quotes)",
+            ledger=str(PAPER_LEDGER_DIR),
+        )
+    elif execute:
         trader = AutoTrader(broker, LEDGER_DIR, live=confirm_real)
         logger.warning(
             "news_signal_poller: auto-trading enabled",
@@ -472,7 +573,8 @@ async def run(
         )
 
     try:
-        judgments = JudgmentLog(JUDGMENT_DIR, today)
+        judgments = JudgmentLog(JUDGMENT_DIR_PAPER if paper else JUDGMENT_DIR, today)
+        paper_seen: set[str] | None = set() if paper else None
         async with (
             AnthropicClient() as claude,
             TossNewsClient() as news_client,
@@ -532,6 +634,7 @@ async def run(
                             judgments=judgments,
                             http=http,
                             pending=pending,
+                            paper_seen=paper_seen,
                         )
                     if trader is not None and pending:
                         await enter_batch(trader, pending)
@@ -554,7 +657,7 @@ def _parse_time(value: str) -> dt.time:
     return dt.time(int(hour), int(minute))
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--once", action="store_true", help="Poll once and exit (for testing/cron)")
     parser.add_argument(
@@ -579,9 +682,29 @@ def main() -> None:
         action="store_true",
         help="With --execute: send REAL orders to the live account",
     )
-    args = parser.parse_args()
+    parser.add_argument(
+        "--paper",
+        action="store_true",
+        help="With --execute: paper orders on real quotes (ledger data/auto_trader_paper)",
+    )
+    return parser
+
+
+def parse_args(
+    parser: argparse.ArgumentParser, argv: list[str] | None = None
+) -> argparse.Namespace:
+    args = parser.parse_args(argv)
     if args.confirm_real and not args.execute:
         parser.error("--confirm-real requires --execute")
+    if args.paper and args.confirm_real:
+        parser.error("--paper and --confirm-real are mutually exclusive")
+    if args.paper and not args.execute:
+        parser.error("--paper requires --execute")
+    return args
+
+
+def main() -> None:
+    args = parse_args(build_parser())
     asyncio.run(
         run(
             once=args.once,
@@ -589,6 +712,7 @@ def main() -> None:
             execute=args.execute,
             confirm_real=args.confirm_real,
             exits_until=args.exits_until,
+            paper=args.paper,
         )
     )
 

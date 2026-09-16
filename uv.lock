@@ -899,7 +899,7 @@ requires-dist = [
     { name = "hypothesis", marker = "extra == 'dev'", specifier = ">=6.98.0" },
     { name = "kiwoom-client", specifier = ">=0.4.0" },
     { name = "krx-news-client", specifier = ">=0.4.0" },
-    { name = "krx-quant-core", specifier = "==0.4.1" },
+    { name = "krx-quant-core", specifier = "==0.5.0" },
     { name = "mlflow", specifier = ">=2.10.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.8.0" },
     { name = "numpy", specifier = ">=1.26.0" },
@@ -1668,16 +1668,16 @@ wheels = [
 
 [[package]]
 name = "krx-quant-core"
-version = "0.4.1"
+version = "0.5.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "kiwoom-client" },
     { name = "numpy" },
     { name = "pandas" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/a0/33/96464da0831f1b23ffd7104cd1815d7efffc651c884238e9ea9a75de09fa/krx_quant_core-0.4.1.tar.gz", hash = "sha256:8d9fc84e0cbffbf16db5a5f4992221ade1f38707e6448b0f3c863f698628746e", size = 200715, upload-time = "2026-09-15T14:37:46.987Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/fa/4c/347b87d6f63de824bbd77d5e43f5070b23819231620b8f6bd1559c872031/krx_quant_core-0.5.0.tar.gz", hash = "sha256:843de4596c4770c0e8f0b98bace1d641f286a04a32ad44ec0fb0dea475d42fae", size = 295255, upload-time = "2026-09-16T15:07:15.593Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/09/d2/3830ae8d3696311d55aa61aa7620d0f4b4d08004cd845b17094125d508ec/krx_quant_core-0.4.1-py3-none-any.whl", hash = "sha256:bdc8499105e2e3409213ef13af3f287b6cfc3ea67dfbdc12abda7d4d3d92da9b", size = 124050, upload-time = "2026-09-15T14:37:45.677Z" },
+    { url = "https://files.pythonhosted.org/packages/48/40/913324c22c0e285c014dd7dc069c788a139ba91ef432a9f47384fbdda30e/krx_quant_core-0.5.0-py3-none-any.whl", hash = "sha256:bd3143106be44f82e357a6fe22d1a5f1b091a9d7fe30d8e1e2842cabfe59dda8", size = 170831, upload-time = "2026-09-16T15:07:13.815Z" },
 ]
 
 [[package]]
