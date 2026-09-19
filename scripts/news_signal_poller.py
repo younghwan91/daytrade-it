@@ -236,6 +236,15 @@ def _sweep_tick_pins() -> None:
         logger.warning("news_signal_poller: tick pin sweep failed")
 
 
+#: v4 그림자 판정(본문 전체). 기본 꺼짐 -- 백테스트가 본문을 못 구해 운영과
+#: 조건이 달라지므로 쓸 수 없다고 결론이 났다. 켜면 판정 비용이 두 배가 된다.
+V4_SHADOW_ENABLED = os.environ.get("DAYTRADE_NEWS_V4_SHADOW", "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+
 #: 판정 연속 실패가 이만큼 쌓이면 신규 진입을 자동으로 멈춘다. 한 번의 일시적
 #: 오류로 하루를 날리지 않을 만큼 크고, 크레딧 소진·키 만료처럼 계속되는 고장을
 #: 장 초반에 잡을 만큼 작은 값.
@@ -408,10 +417,13 @@ async def process_pair(
         title=article.title[:80],
     )
 
-    # Shadow v4 (full body): recorded for a forward comparison, never used
-    # for signals. See anthropic_client._USER_TEMPLATE_FULL_BODY.
+    # v4 그림자(본문 전체)는 2026-09-20 부터 기본으로 끈다. 백테스트는 본문을
+    # 구할 수 없어 운영과 조건이 달라지므로 v4 는 쓸 수 없다고 이미 결론이
+    # 났는데, 하루 122 건씩 계속 호출하고 있었다 -- 판정 비용의 절반($0.23/일,
+    # 월 $4.70)이 쓰지 않기로 한 것에 나가고 있었다.
+    # 다시 켜려면 DAYTRADE_NEWS_V4_SHADOW=1.
     shadow: ArticleFeatures | None = None
-    if full_body_text:
+    if full_body_text and V4_SHADOW_ENABLED:
         try:
             shadow = await claude.score_article(
                 code=ticker.value,
