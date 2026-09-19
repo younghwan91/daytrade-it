@@ -144,19 +144,29 @@ def kill_switch_active() -> bool:
 #: 예외를 삼킨다 -- 체결 데이터 수집은 있으면 좋은 것이지 매매의 전제가 아니다.
 TICK_PIN_PATH = Path.home() / "git" / "scalp-it" / "data" / "collect_pins_extra.txt"
 
-#: 한 번에 핀할 수 있는 종목 수. 키움 동시 구독 상한이 100 이고 그 자리를
-#: scalp-it 실매매와 나눠 쓴다. 우리 매수 판정은 하루 70 건 전후라 전부 핀하면
-#: 상한을 혼자 다 먹는다 -- 실제로 09-17 에는 10 시부터 커버리지가 13% 로
-#: 무너졌다. 최신 30 개면 그날 후반 뉴스가 들어갈 자리가 남는다.
+#: 후보를 핀해 두는 시간. 호가·체결은 "도착 시점의 체결 흐름이 그 뒤 움직임을
+#: 알려주는가"를 보려고 받는다 -- 분 단위 미시구조 질문이다. 며칠짜리 흐름은
+#: 분봉으로 충분하고 그건 전 종목 이미 있다. 우리는 기사보다 중앙값 22 분 늦게
+#: 도착하므로 폭등의 **시작**은 못 본다. 볼 수 있는 건 "이미 시작된 것이 계속
+#: 가는가"이고, 60 분이면 그 판단 재료(도착 시점 흐름 + 그 뒤 실제 움직임)가
+#: 다 들어온다. 실측 동시 수요: 30 분 13~14 종목, 60 분 19~24, 120 분 33~39.
+TICK_PIN_TTL = dt.timedelta(minutes=60)
+
+#: 보유 종목은 종가까지 둔다 -- 청산 판단은 이미 구독이 warm-up 된 상태라
+#: 미시구조를 실제로 쓸 수 있는 유일한 자리다.
+TICK_PIN_HELD_UNTIL = dt.time(15, 30)
+
+#: 안전 상한. 키움 동시 구독 100 을 scalp-it 실매매와 나눠 쓰므로 혼자 다
+#: 먹지 않는다. TTL 이 먼저 걸려 보통 여기까지 오지 않는다.
 TICK_PIN_MAX = 30
 
-#: 삽입 순서를 유지해야 오래된 것부터 버릴 수 있어 set 이 아니라 list 다.
-_pinned_codes: list[str] = []
+#: code -> 만료 시각. 순서와 만료를 같이 들고 있어야 해서 dict 다(3.7+ 삽입 순서 유지).
+_pinned_codes: dict[str, dt.datetime] = {}
 _pin_day: dt.date | None = None
 
 
-def _pin_for_tick_collection(code: str) -> None:
-    """매수 판정이 난 종목을 수집기 핀 목록에 넣는다. 하루 단위로 새로 쓴다.
+def _pin_for_tick_collection(code: str, *, held: bool = False) -> None:
+    """매수 판정이 난 종목을 수집기 핀 목록에 넣고, 시간이 지나면 뺀다.
 
     **덧붙이기만 하면 스스로를 막는다.** 키움 실시간 구독은 동시 100 종목이
     상한이고 그 자리를 scalp-it 실매매와 나눠 쓴다. 09-17 에 70 개를 핀했더니
@@ -164,27 +174,66 @@ def _pin_for_tick_collection(code: str) -> None:
     판정 이후 호가 커버리지가 31% -> 23% 로 떨어졌다. 어제 관심 종목이 오늘
     관심 종목을 막는 구조였다.
 
-    그래서 날짜가 바뀌면 목록을 비우고, 한 번에 `TICK_PIN_MAX` 개까지만 둔다.
-    상한을 넘으면 **오래된 것부터** 버린다 -- 뉴스는 최신일수록 값이 있고,
-    자리가 없으면 새 종목이 아예 못 들어오기 때문이다.
+    개수가 아니라 **시간**으로 자른다. 뉴스는 하루 종일 흩어져 들어오므로,
+    각 종목을 `TICK_PIN_TTL` 만 잡고 놓으면 동시 수요가 70 이 아니라 19~24 로
+    떨어진다. 개수 상한만 두면 뉴스가 몰릴 때 10 분 만에 밀려나고 뜸할 때는
+    세 시간을 들고 있어, 필요한 창과 어긋난다.
+
+    `held=True`(실제로 담은 종목)는 종가까지 둔다 -- 청산 판단은 구독이 이미
+    warm-up 된 상태라 미시구조를 실제로 쓸 수 있는 유일한 자리다.
     """
     global _pin_day
-    today = dt.datetime.now(KST).date()
-    if _pin_day != today:
-        _pin_day = today
+    now = dt.datetime.now(KST)
+    if _pin_day != now.date():
+        _pin_day = now.date()
         _pinned_codes.clear()
-    if code in _pinned_codes:
+
+    close = dt.datetime.combine(now.date(), TICK_PIN_HELD_UNTIL, tzinfo=KST)
+    expiry = close if held else min(now + TICK_PIN_TTL, close)
+    # 보유로 승격되면 만료를 늘리기만 한다(후보로 먼저 핀돼 있어도 안 줄어든다).
+    if expiry <= _pinned_codes.get(code, now):
         return
-    _pinned_codes.append(code)
-    del _pinned_codes[:-TICK_PIN_MAX]  # 오래된 것부터 버린다
+    _pinned_codes[code] = expiry
+
+    live = {c: e for c, e in _pinned_codes.items() if e > now}
+    if len(live) > TICK_PIN_MAX:  # 안전 상한 -- 만료가 이른 것부터 버린다
+        live = dict(sorted(live.items(), key=lambda kv: kv[1])[-TICK_PIN_MAX:])
+    _pinned_codes.clear()
+    _pinned_codes.update(live)
+
     try:
         if TICK_PIN_PATH.parent.is_dir():
             TICK_PIN_PATH.write_text(
-                f"# daytrade-it {today.isoformat()} 매수 판정 종목 (매일 새로 씀)\n"
+                f"# daytrade-it {now.date().isoformat()} 매수 판정 종목 "
+                f"(TTL {int(TICK_PIN_TTL.total_seconds() // 60)}분, 보유분은 종가까지)\n"
                 + "".join(f"{c}\n" for c in _pinned_codes)
             )
     except Exception:  # noqa: BLE001 -- 수집 실패가 매매를 멈춰서는 안 된다
         logger.warning("news_signal_poller: tick pin write failed", code=code)
+
+
+def _sweep_tick_pins() -> None:
+    """만료된 핀을 걷어낸다. 주기적으로 불러야 한다.
+
+    핀은 새 매수 판정이 날 때만 다시 쓰이므로, 한 시간 동안 판정이 없으면
+    만료된 종목이 파일에 남아 자리를 계속 먹는다 -- 날짜 초기화를 안 했을 때와
+    같은 결함의 작은 판이다. 루프에서 불러 시간이 지나면 실제로 빠지게 한다.
+    """
+    now = dt.datetime.now(KST)
+    live = {c: e for c, e in _pinned_codes.items() if e > now}
+    if len(live) == len(_pinned_codes):
+        return
+    _pinned_codes.clear()
+    _pinned_codes.update(live)
+    try:
+        if TICK_PIN_PATH.parent.is_dir():
+            TICK_PIN_PATH.write_text(
+                f"# daytrade-it {now.date().isoformat()} 매수 판정 종목 "
+                f"(TTL {int(TICK_PIN_TTL.total_seconds() // 60)}분, 보유분은 종가까지)\n"
+                + "".join(f"{c}\n" for c in _pinned_codes)
+            )
+    except Exception:  # noqa: BLE001
+        logger.warning("news_signal_poller: tick pin sweep failed")
 
 
 #: 판정 연속 실패가 이만큼 쌓이면 신규 진입을 자동으로 멈춘다. 한 번의 일시적
@@ -674,6 +723,15 @@ async def _run_locked(
                         trader.manage()
                     except Exception:
                         logger.exception("news_signal_poller: trader.manage failed")
+                    # 보유 중인 종목은 종가까지 핀을 연장한다 -- 청산 판단은
+                    # 구독이 warm-up 된 유일한 자리라 미시구조를 실제로 쓸 수 있다.
+                    try:
+                        for _held in trader._own_holdings():
+                            _pin_for_tick_collection(_held, held=True)
+                    except Exception:  # noqa: BLE001 -- 수집이 매매를 막지 않는다
+                        logger.warning("news_signal_poller: held-pin refresh failed")
+
+                _sweep_tick_pins()  # 만료된 핀을 실제로 뺀다
 
                 # 모드별 스위치를 본다. 종이매매는 `data/paper_STOP` 만 따르므로,
                 # 실매매가 `data/live_STOP` 으로 멈춰 있는 동안에도 판정·기록은
