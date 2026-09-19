@@ -110,3 +110,43 @@ class TestScoringFailureGuard:
         poller._scoring_failures = 5
         globals_reset = 'globals()["_scoring_failures"] = 0'
         assert globals_reset in Path(poller.__file__).read_text()
+
+
+class TestTickPinRotation:
+    """핀 목록은 매일 새로 쓰고 상한을 넘기지 않는다.
+
+    09-17 에 70 개를 덧붙였더니 09-18 에는 그 70 개가 구독 자리를 잡고 있어
+    새 뉴스 종목이 못 들어갔다 -- 판정 이후 호가 커버리지 31% -> 23%.
+    넣는 코드만 있고 빼는 코드가 없으면 기능이 스스로를 막는다.
+    """
+
+    def test_cap_keeps_the_newest(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(poller, "TICK_PIN_PATH", tmp_path / "pins.txt")
+        monkeypatch.setattr(poller, "_pinned_codes", [])
+        monkeypatch.setattr(poller, "_pin_day", None)
+        for i in range(poller.TICK_PIN_MAX + 10):
+            poller._pin_for_tick_collection(f"{i:06d}")
+        kept = [
+            line
+            for line in (tmp_path / "pins.txt").read_text().splitlines()
+            if not line.startswith("#")
+        ]
+        assert len(kept) == poller.TICK_PIN_MAX
+        assert kept[-1] == f"{poller.TICK_PIN_MAX + 9:06d}"  # 최신이 남는다
+        assert "000000" not in kept  # 가장 오래된 것이 버려진다
+
+    def test_new_day_clears(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(poller, "TICK_PIN_PATH", tmp_path / "pins.txt")
+        monkeypatch.setattr(poller, "_pinned_codes", ["005930"])
+        monkeypatch.setattr(poller, "_pin_day", dt.date(2020, 1, 1))
+        poller._pin_for_tick_collection("000660")
+        kept = [
+            line
+            for line in (tmp_path / "pins.txt").read_text().splitlines()
+            if not line.startswith("#")
+        ]
+        assert kept == ["000660"]  # 어제 종목은 오늘 자리를 막지 않는다
+
+    def test_cap_leaves_room_under_the_broker_limit(self) -> None:
+        """키움 동시 구독 상한 100 을 혼자 다 먹지 않는다."""
+        assert 0 < poller.TICK_PIN_MAX <= 50

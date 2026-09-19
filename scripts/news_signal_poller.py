@@ -143,18 +143,46 @@ def kill_switch_active() -> bool:
 #: 그쪽은 경고만 찍고 지나간다. 우리 쪽 실패도 매매를 막아서는 안 되므로 모든
 #: 예외를 삼킨다 -- 체결 데이터 수집은 있으면 좋은 것이지 매매의 전제가 아니다.
 TICK_PIN_PATH = Path.home() / "git" / "scalp-it" / "data" / "collect_pins_extra.txt"
-_pinned_codes: set[str] = set()
+
+#: 한 번에 핀할 수 있는 종목 수. 키움 동시 구독 상한이 100 이고 그 자리를
+#: scalp-it 실매매와 나눠 쓴다. 우리 매수 판정은 하루 70 건 전후라 전부 핀하면
+#: 상한을 혼자 다 먹는다 -- 실제로 09-17 에는 10 시부터 커버리지가 13% 로
+#: 무너졌다. 최신 30 개면 그날 후반 뉴스가 들어갈 자리가 남는다.
+TICK_PIN_MAX = 30
+
+#: 삽입 순서를 유지해야 오래된 것부터 버릴 수 있어 set 이 아니라 list 다.
+_pinned_codes: list[str] = []
+_pin_day: dt.date | None = None
 
 
 def _pin_for_tick_collection(code: str) -> None:
-    """매수 판정이 난 종목을 수집기 핀 목록에 한 번만 덧붙인다."""
+    """매수 판정이 난 종목을 수집기 핀 목록에 넣는다. 하루 단위로 새로 쓴다.
+
+    **덧붙이기만 하면 스스로를 막는다.** 키움 실시간 구독은 동시 100 종목이
+    상한이고 그 자리를 scalp-it 실매매와 나눠 쓴다. 09-17 에 70 개를 핀했더니
+    09-18 에는 그 70 개가 자리를 잡고 있어 새 뉴스 종목이 못 들어갔다 --
+    판정 이후 호가 커버리지가 31% -> 23% 로 떨어졌다. 어제 관심 종목이 오늘
+    관심 종목을 막는 구조였다.
+
+    그래서 날짜가 바뀌면 목록을 비우고, 한 번에 `TICK_PIN_MAX` 개까지만 둔다.
+    상한을 넘으면 **오래된 것부터** 버린다 -- 뉴스는 최신일수록 값이 있고,
+    자리가 없으면 새 종목이 아예 못 들어오기 때문이다.
+    """
+    global _pin_day
+    today = dt.datetime.now(KST).date()
+    if _pin_day != today:
+        _pin_day = today
+        _pinned_codes.clear()
     if code in _pinned_codes:
         return
-    _pinned_codes.add(code)
+    _pinned_codes.append(code)
+    del _pinned_codes[:-TICK_PIN_MAX]  # 오래된 것부터 버린다
     try:
         if TICK_PIN_PATH.parent.is_dir():
-            with TICK_PIN_PATH.open("a") as f:
-                f.write(f"{code}\n")
+            TICK_PIN_PATH.write_text(
+                f"# daytrade-it {today.isoformat()} 매수 판정 종목 (매일 새로 씀)\n"
+                + "".join(f"{c}\n" for c in _pinned_codes)
+            )
     except Exception:  # noqa: BLE001 -- 수집 실패가 매매를 멈춰서는 안 된다
         logger.warning("news_signal_poller: tick pin write failed", code=code)
 
@@ -590,6 +618,16 @@ async def _run_locked(
         from daytrade_it.infrastructure.brokers.core_paper_broker import (  # noqa: PLC0415
             CorePaperBroker,
         )
+
+        # 종이매매는 `data/paper_STOP` 만 따른다. 기본값은 실매매 스위치
+        # `data/live_STOP` 이라, 실매매를 멈춰 두면 종이 진입까지 전부 거부됐다
+        # -- 09-17·09-18 이틀 동안 실제로 74 건이 그렇게 거부돼, 판정 기록은
+        # 쌓였는데 "무엇을 샀을 것인가"는 한 건도 안 남았다. 폴러 루프는 이미
+        # 모드별로 나뉘어 있었고(위 `stop_now`) 주문 경로만 안 따르고 있었다.
+        # 프로세스당 한 모드이고 잠금이 두 폴러를 막으므로 전역 치환이 안전하다.
+        from daytrade_it.interfaces.mcp import tools as _mcp_tools  # noqa: PLC0415
+
+        _mcp_tools._KILL_SWITCH_PATH = PAPER_KILL_SWITCH_PATH
 
         # live=True: AutoTrader places nothing when live=False. Orders go to
         # the in-process paper broker; quotes stay real (read-only).
