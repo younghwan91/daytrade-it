@@ -34,7 +34,7 @@ from decimal import Decimal
 from pathlib import Path as FsPath
 
 import numpy as np
-from exit_fast import OPEN_MINUTE, Reduced, first_exit, reduce_path
+from exit_fast import OPEN_MINUTE, Reduced, barrier, first_exit, reduce_path
 from exit_lab import FLATTEN, Path, mfe_mae, simulate
 from replay_baseline import BUY_COST, SELL_COST
 
@@ -138,11 +138,29 @@ class Stack:
         self.entry_per_path = np.array([r.entry for r in reduced])
         self.valid = np.isfinite(self.vwap)
         self.idx = np.arange(self.minute.size)
+        self._barriers: dict[tuple[str, str, int], np.ndarray] = {}
 
     def _per_element(self, per_path: np.ndarray) -> np.ndarray:
         """Broadcast one value per path across that path's decision minutes."""
         lens = np.diff(np.append(self.starts, self.minute.size))
         return np.repeat(per_path, lens)
+
+    def _barrier(self, which: str, pct, sign: int) -> np.ndarray:
+        """`exit_fast.barrier` over `self.entry` or `self.peak`, memoised.
+
+        The live predicate computes every `x * (1 +/- pct)` threshold in Decimal,
+        so an exactly-hit target is a HIT; float64 misses it and exits a minute
+        late (see `exit_fast.barrier`). The search scores ~4,300 configurations
+        over the same arrays, but only ~20 distinct `(array, pct, sign)` triples
+        exist, so the Decimal work is done once per triple and never inside the
+        configuration loop.
+        """
+        key = (which, str(pct), sign)
+        hit = self._barriers.get(key)
+        if hit is None:
+            hit = barrier(self.entry if which == "entry" else self.peak, pct, sign)
+            self._barriers[key] = hit
+        return hit
 
     def rewards(
         self,
@@ -155,19 +173,25 @@ class Stack:
         a context-dependent threshold enters: the same rule, a different level for
         each entry (e.g. a multiple of that stock's own volatility) instead of one
         constant for all of them. `None` keeps the scalar on `lim`.
+
+        The scalar thresholds go through `_barrier`, which reproduces the live
+        rule's Decimal arithmetic exactly. The per-path overrides do NOT and stay
+        in float: no live rule computes `a x sigma`, so there is nothing to be a
+        twin of, and `a x sigma` is a full-mantissa float that cannot land on a
+        tick-exact price the way a round percentage of a round entry does.
         """
         e, v = self.entry, self.valid
         fire = self.minute == self.flat  # the flatten minute always exits
         if stop_pct is not None:
             fire |= (self.close <= e * (1 - self._per_element(stop_pct))) & v
         elif lim.stop_loss_pct is not None:
-            fire |= (self.close <= e * (1 - float(lim.stop_loss_pct))) & v
+            fire |= (self.close <= self._barrier("entry", lim.stop_loss_pct, -1)) & v
         if lim.stop_vwap_gap is not None:
             fire |= (self.close < e) & (self.close < self.vwap * (1 - float(lim.stop_vwap_gap))) & v
         if lim.stop_time is not None:
             fire |= (
                 (self.elapsed >= lim.stop_time.total_seconds() / 60)
-                & (self.close < e * (1 + float(lim.stop_time_min_gain)))
+                & (self.close < self._barrier("entry", lim.stop_time_min_gain, +1))
                 & v
             )
         if lim.stop_orb is not None:
@@ -179,24 +203,24 @@ class Stack:
         if tp_pct is not None:
             fire |= (self.close >= e * (1 + self._per_element(tp_pct))) & v
         elif lim.take_profit_pct is not None:
-            fire |= (self.close >= e * (1 + float(lim.take_profit_pct))) & v
+            fire |= (self.close >= self._barrier("entry", lim.take_profit_pct, +1)) & v
         if trail_after is not None:
             fire |= (
                 self.has_peak
                 & (self.peak >= e * (1 + self._per_element(trail_after)))
-                & (self.close <= self.peak * (1 - float(lim.trail_gap)))
+                & (self.close <= self._barrier("peak", lim.trail_gap, -1))
                 & v
             )
         elif lim.trail_after_gain is not None:
             fire |= (
                 self.has_peak
-                & (self.peak >= e * (1 + float(lim.trail_after_gain)))
-                & (self.close <= self.peak * (1 - float(lim.trail_gap)))
+                & (self.peak >= self._barrier("entry", lim.trail_after_gain, +1))
+                & (self.close <= self._barrier("peak", lim.trail_gap, -1))
                 & v
             )
         if lim.vwap_exit_gap is not None:
             fire |= (
-                (self.close / e - 1 >= float(lim.vwap_exit_min_gain))
+                (self.close >= self._barrier("entry", lim.vwap_exit_min_gain, +1))
                 & (self.close / self.vwap - 1 < -float(lim.vwap_exit_gap))
                 & v
             )

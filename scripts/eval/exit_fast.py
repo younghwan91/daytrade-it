@@ -37,6 +37,37 @@ RULE_ORDER = (
 )
 
 
+def barrier(values: np.ndarray | float, pct, sign: int) -> np.ndarray:
+    """`values * (1 + sign*pct)`, computed the way the LIVE rule computes it.
+
+    NOT a gratuitous conversion in a hot loop -- this is what makes the twin a
+    twin, and removing it silently changes exit minutes.
+
+    `exit_rule_hit` holds the entry price, the running peak and every threshold
+    as `Decimal`, so `entry * (1 + take_profit_pct)` is EXACT. An entry of
+    345,000 KRW with a +10% target gives exactly 379,500, and a bar closing at
+    exactly 379,500 is a HIT. The same product in float64 is 379,500.00000000006,
+    the tie is MISSED, and the position leaves one minute later at a different
+    price. The tie is not exotic: KRW prices are whole numbers on a tick grid, so
+    a round entry meeting a round target lands on it exactly.
+
+    It bites only where the decimal factor is inexact in binary -- 1.08 and 1.10
+    are, 1.01/1.02/1.03/1.05 and every `1 - pct` in the grid happen to round to
+    the permissive side. Measured: 136 bar-level disagreements over 28 of 29,800
+    paths (0.09%) on the 2025-08..2026-03 book, 49 over 6 of 4,416 (0.14%) on
+    2026-04..08, all at the +8%/+10% target and +8% trail arms.
+
+    Cost is kept down by converting only the DISTINCT values: a book has tens of
+    thousands of distinct prices, not millions of bars. Callers that re-use the
+    same array across a configuration grid should memoise on `(pct, sign)`.
+    """
+    factor = Decimal(1) + (1 if sign > 0 else -1) * Decimal(str(pct))
+    arr = np.asarray(values, dtype=float)
+    uniq, inv = np.unique(arr, return_inverse=True)
+    out = np.array([float(Decimal(str(v)) * factor) for v in uniq])
+    return out[inv].reshape(arr.shape)
+
+
 @dataclass(frozen=True)
 class Reduced:
     """One path reduced to per-decision-minute arrays.
@@ -145,7 +176,7 @@ def _fires(r: Reduced, lim: TradingLimits, orb_widths: tuple[int, ...]) -> dict[
     z = np.zeros_like(r.close, dtype=bool)
 
     out["stop_loss"] = (
-        (r.close <= e * (1 - float(lim.stop_loss_pct))) & valid
+        (r.close <= barrier(e, lim.stop_loss_pct, -1)) & valid
         if lim.stop_loss_pct is not None
         else z
     )
@@ -156,7 +187,7 @@ def _fires(r: Reduced, lim: TradingLimits, orb_widths: tuple[int, ...]) -> dict[
     )
     out["stop_time"] = (
         (r.elapsed >= lim.stop_time.total_seconds() / 60)
-        & (r.close < e * (1 + float(lim.stop_time_min_gain)))
+        & (r.close < barrier(e, lim.stop_time_min_gain, +1))
         & valid
         if lim.stop_time is not None
         else z
@@ -170,20 +201,31 @@ def _fires(r: Reduced, lim: TradingLimits, orb_widths: tuple[int, ...]) -> dict[
     else:
         out["stop_orb"] = z
     out["take_profit"] = (
-        (r.close >= e * (1 + float(lim.take_profit_pct))) & valid
+        (r.close >= barrier(e, lim.take_profit_pct, +1)) & valid
         if lim.take_profit_pct is not None
         else z
     )
+    # The peak is a bar high -- a whole-KRW `Decimal` in the live rule -- so
+    # `peak * (1 - trail_gap)` is exposed to the same exact tie as the entry
+    # barriers and goes through `barrier` too.
     out["trailing"] = (
         r.has_peak
-        & (r.peak >= e * (1 + float(lim.trail_after_gain)))
-        & (r.close <= r.peak * (1 - float(lim.trail_gap)))
+        & (r.peak >= barrier(e, lim.trail_after_gain, +1))
+        & (r.close <= barrier(r.peak, lim.trail_gap, -1))
         & valid
         if lim.trail_after_gain is not None
         else z
     )
+    # Live writes this as `close / entry - 1 >= min_gain` in Decimal. Decimal
+    # division rounds at 28 significant digits, which for prices of <= 10 digits
+    # is exactly the rational comparison `close >= entry * (1 + min_gain)`, so
+    # the barrier form below is equivalent AND exact, where the float division
+    # form is neither. The VWAP side is left in float: `vwap` is itself a
+    # float reduction of the running sums and cannot be made exact without
+    # reimplementing the live accumulation in Decimal -- an approximation this
+    # twin has always carried, and one `verify` has never caught firing.
     out["vwap_break"] = (
-        (r.close / e - 1 >= float(lim.vwap_exit_min_gain))
+        (r.close >= barrier(e, lim.vwap_exit_min_gain, +1))
         & (r.close / r.vwap - 1 < -float(lim.vwap_exit_gap))
         & valid
         if lim.vwap_exit_gap is not None
