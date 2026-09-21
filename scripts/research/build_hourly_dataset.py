@@ -36,9 +36,18 @@ DEFECTS = {
     "missing_close_session": (
         "Yahoo 는 09:00~14:00 여섯 봉만 준다. 15:00 봉(source=daily_recovered, "
         "synthetic=True)은 daily_bars_adjusted 에서 복원한 것이다. "
-        "close 는 정확(일봉 종가), open 은 14:00 봉 종가, "
-        "**high·low 는 NaN** — 근사값을 넣으면 손절 백테스트가 조용히 틀린다. "
-        "volume 은 15:00 이후 잔여 거래량의 상한 추정치다(시간외·장외분 포함)."
+        "open 은 14:00 봉 종가, close 는 **그날의 환산비로 Yahoo 기준에 맞춘** "
+        "일봉 종가, **high·low 는 NaN** — 근사값을 넣으면 손절 백테스트가 조용히 "
+        "틀린다. volume 은 15:00 이후 잔여 거래량의 상한 추정치다(시간외·장외분 포함). "
+        "환산해도 일봉 고저 범위를 벗어나거나 14:00 대비 15% 넘게 튀면 "
+        "``recovery_ok=False`` 로 두고 close·volume 을 비운다."
+    ),
+    "recovery_ok": (
+        "``recovery_ok=False`` 인 15:00 봉은 close·volume 이 NaN 이다. 복원이 "
+        "말이 안 되는 날이라 그럴듯한 숫자를 넣는 대신 비웠다. Yahoo 원본 봉은 "
+        "언제나 True 다(복원한 게 아니니까). **하루의 마지막 유효 종가를 쓰려면 "
+        "NaN 을 확인하고 14:00 봉으로 물러나라** — dropna 없이 평균을 내면 "
+        "그 날이 조용히 빠진다."
     ),
     "survivorship_bias": (
         "상장폐지 종목이 전혀 없다. Yahoo 는 폐지된 KRX 티커를 404 로 지운다"
@@ -146,14 +155,34 @@ def session_profile(bars: pd.DataFrame) -> pd.DataFrame:
     return prof.reset_index()
 
 
+# 복원 게이트 — 하나라도 어기면 그 봉의 종가/거래량을 비운다(NaN)
+MAX_CLOSE_MOVE = 0.15  # 15:00~15:30 에 이만큼 넘게 움직였다면 가격 기준이 어긋난 것이다
+VOL_SHARE_RANGE = (0.3, 1.0)  # Yahoo 시간봉 합 / 일봉 거래량 이 이 밖이면 기준이 다르다
+
+
 def recover_close_session(bars: pd.DataFrame, daily: pd.DataFrame) -> pd.DataFrame:
-    """Yahoo 가 안 주는 15:00 이후를 일봉에서 되살린다 (고저가는 비운다)."""
+    """Yahoo 가 안 주는 15:00 이후를 일봉에서 되살린다.
+
+    **일봉 종가를 그대로 쓰면 안 된다.** Yahoo 는 배당까지 소급 반영하고
+    ``daily_bars_adjusted`` 는 안 해서 둘이 다른 가격 기준 위에 있다. 그대로
+    붙이면 14:00 봉과 15:00 봉 사이에 기준 차이만큼 계단이 생긴다 — 실측으로
+    평균 |점프| 1,453bp, 심한 종목은 +573% 였다. 한 시간 만에 5배 오른 게
+    아니라 자가 만든 흉터다.
+
+    그래서 **그날의 환산비**(Yahoo 시가 / 일봉 시가)로 일봉 종가를 Yahoo 기준
+    위로 옮긴 뒤에 붙인다. 비는 날마다 다시 재므로 배당락·분할이 언제 있었든
+    저절로 따라간다.
+
+    환산해도 말이 안 되는 날은 종가·거래량을 **비운다(NaN)**. 고저가와 같은
+    이유다 — 그럴듯한 틀린 숫자는 조용히 틀리고, 빈 값은 쓰는 쪽에서 걸린다.
+    """
     b = bars.copy()
     b["date"] = b["ts"].dt.normalize()
     sess = (
         b.groupby(["code", "date"])
         .agg(
             hourly_vol=("volume", "sum"),
+            first_open=("open", "first"),
             last_close=("close", "last"),
             last_hour=("ts", "max"),
         )
@@ -162,25 +191,79 @@ def recover_close_session(bars: pd.DataFrame, daily: pd.DataFrame) -> pd.DataFra
 
     d = daily.copy()
     d["date"] = pd.to_datetime(d["date"])
-    for col in ("close", "volume"):
+    for col in ("open", "high", "low", "close", "volume"):
         d[col] = pd.to_numeric(d[col], errors="coerce")
-    m = sess.merge(d, on=["code", "date"], how="inner")
+    m = sess.merge(d, on=["code", "date"], how="inner", suffixes=("", "_d"))
     m = m[m["last_hour"].dt.hour < AUCTION_HOUR]  # 이미 15:00 봉이 있는 날은 건드리지 않는다
-    m = m.dropna(subset=["close", "volume"])
+    m = m.dropna(subset=["open", "close", "volume"])
+    m = m[(m["open"] > 0) & (m["close"] > 0)]
+
+    # 그날의 가격 기준 환산비. 시가끼리 비교한다 — 양쪽 다 같은 시가 단일가다.
+    scale = (m["first_open"] / m["open"]).to_numpy()
+    close = m["close"].to_numpy() * scale
+    c14 = m["last_close"].to_numpy()
+    hi = m["high"].to_numpy() * scale
+    lo = m["low"].to_numpy() * scale
+
+    ok = (
+        np.isfinite(scale)
+        & (scale > 0)
+        & (close >= lo * (1 - 1e-9))
+        & (close <= hi * (1 + 1e-9))
+        & (np.abs(close / c14 - 1.0) <= MAX_CLOSE_MOVE)
+    )
+
+    vol_share = m["hourly_vol"].to_numpy() / m["volume"].to_numpy()
+    vol_ok = ok & (vol_share >= VOL_SHARE_RANGE[0]) & (vol_share <= VOL_SHARE_RANGE[1])
+    volume = np.where(
+        vol_ok, np.clip(m["volume"].to_numpy() - m["hourly_vol"].to_numpy(), 0, None), np.nan
+    )
 
     return pd.DataFrame(
         {
             "code": m["code"].to_numpy(),
             "ts": (m["date"] + pd.Timedelta(hours=AUCTION_HOUR)).to_numpy(),
-            "open": m["last_close"].astype(float).to_numpy(),
+            "open": c14,
             "high": np.nan,
             "low": np.nan,
-            "close": m["close"].astype(float).to_numpy(),
-            "volume": (m["volume"] - m["hourly_vol"]).clip(lower=0).astype("int64").to_numpy(),
+            "close": np.where(ok, close, np.nan),
+            "volume": pd.array(volume, dtype="Float64").astype("Int64"),
             "source": "daily_recovered",
             "synthetic": True,
+            "recovery_ok": ok,
         }
     )
+
+
+def seam_check(full: pd.DataFrame) -> dict:
+    """14:00 봉과 15:00 복원봉 사이에 계단이 있는지 **산출물 자체로** 확인한다.
+
+    앞선 판(2026-09-22 01차)은 일봉 종가를 환산 없이 붙여서 평균 |점프| 1,453bp,
+    최악 +573% 짜리 흉터를 남겼다. 그걸 겹치는 구간 표본 검증은 못 잡았다 —
+    최근 13개월은 두 기준이 대체로 같아서 통과해 버렸기 때문이다. 이 점검은
+    표본이 아니라 **전 구간·전 종목**을 보고, 다음에 같은 실수를 하면 즉시 튄다.
+    """
+    d = full.copy()
+    d["date"] = d["ts"].dt.normalize()
+    c14 = d[(~d["synthetic"]) & (d["ts"].dt.hour == 14)][["code", "date", "close"]]
+    c15 = d[d["synthetic"]][["code", "date", "close", "recovery_ok"]]
+    j = c14.merge(c15, on=["code", "date"], suffixes=("_14", "_15")).dropna(
+        subset=["close_14", "close_15"]
+    )
+    if j.empty:
+        return {"pairs": 0}
+    jump = (j["close_15"] / j["close_14"] - 1.0).abs()
+    bad = jump > 0.02
+    per_code = bad.groupby(j["code"]).mean()
+    return {
+        "pairs": int(len(j)),
+        "mean_abs_jump_bp": round(float(jump.mean()) * 1e4, 1),
+        "p99_abs_jump_bp": round(float(jump.quantile(0.99)) * 1e4, 1),
+        "max_abs_jump_bp": round(float(jump.max()) * 1e4, 1),
+        "pairs_over_2pct": int(bad.sum()),
+        "codes_bad_over_half_of_days": int((per_code >= 0.5).sum()),
+        "codes_bad_every_day": int((per_code >= 0.99).sum()),
+    }
 
 
 def validate_recovery(dsn: str, recovered: pd.DataFrame, sample: int) -> dict:
@@ -427,7 +510,7 @@ def main(argv: list[str] | None = None) -> int:
     print("일봉으로 마감 구간 복원 중…", file=sys.stderr)
     daily = read_sql(
         args.dsn,
-        "select code, date, open, close, volume from daily_bars_adjusted "
+        "select code, date, open, high, low, close, volume from daily_bars_adjusted "
         "where date between %s and %s and code = any(%s)",
         (lo, hi, codes),
     )
@@ -450,7 +533,10 @@ def main(argv: list[str] | None = None) -> int:
         verdicts = pd.Series([s["verdict"] for s in suspects]).value_counts().to_dict()
         print(f"  의심 {len(suspects)}종목 분류: {verdicts}", file=sys.stderr)
 
-    full = pd.concat([bars.drop(columns=["date"], errors="ignore"), recovered], ignore_index=True)
+    real = bars.drop(columns=["date"], errors="ignore").copy()
+    real["recovery_ok"] = True  # Yahoo 원본은 복원한 게 아니라 받은 그대로다
+    real["volume"] = real["volume"].astype("Int64")
+    full = pd.concat([real, recovered], ignore_index=True)
     full = full.sort_values(["code", "ts"]).reset_index(drop=True)
     full["year"] = full["ts"].dt.year
     full["irregular_session"] = (
@@ -470,8 +556,17 @@ def main(argv: list[str] | None = None) -> int:
         | {s["code"] for s in suspects if s["verdict"] != "scale_mismatch"} - step_codes
     )
     full["identity_verified"] = ~full["code"].isin(unverified)
-    # 수정주가 계단이 있는 종목 — 그 구간을 가로지르는 수익률은 못 쓴다
+    # 수정주가 계단이 있는 종목 — kr_quant 일봉과 섞을 때만 문제가 된다
     full["adjustment_step"] = full["code"].isin(step_codes)
+
+    seam = seam_check(full)
+    print(f"  이음매 점검: {json.dumps(seam, ensure_ascii=False)}", file=sys.stderr)
+    n_bad = int((full["synthetic"] & ~full["recovery_ok"]).sum())
+    print(
+        f"  복원 실패(종가 비움) {n_bad:,}봉 · "
+        f"거래량 비움 {int(full['synthetic'].sum() - full.loc[full['synthetic'], 'volume'].notna().sum()):,}봉",
+        file=sys.stderr,
+    )
 
     manifest = {
         "dataset": "yahoo_hourly",
@@ -498,6 +593,8 @@ def main(argv: list[str] | None = None) -> int:
             "last_hour": NORMAL_SESSION[1],
             "bars": NORMAL_SESSION[2],
         },
+        "seam_check": seam,
+        "recovery_failed_bars": n_bad,
         "adjustment_break_summary": bcount,
         "adjustment_breaks": breaks[
             breaks["verdict"].isin(["adjustment_step", "unresolved"])
@@ -549,7 +646,22 @@ def write_readme(out: str, m: dict) -> None:
         "`source='daily_recovered'` 는 일봉에서 복원한 15:00 봉(`synthetic=True`)이다.",
         "`irregular_session=True` 는 개장시간이 평소와 달랐던 날이다 — 보통 걸러라.",
         "`identity_verified=False` 는 일봉 대조로 같은 종목임을 확인하지 못한 코드다.",
-        "`adjustment_step=True` 는 수정주가 불연속이 있는 종목이다 — 아래를 읽어라.",
+        "`adjustment_step=True` 는 우리 일봉과 수정 기준이 다른 종목이다 — 아래를 읽어라.",
+        "`recovery_ok=False` 인 15:00 봉은 close·volume 이 NaN 이다.",
+        "",
+        "```python",
+        "# 권장 기본 필터",
+        "ok = df.identity_verified & ~df.irregular_session & df.recovery_ok",
+        "```",
+        "",
+        "## 이음매 점검 (14:00 → 15:00)",
+        "",
+        "복원봉이 앞 봉과 같은 가격 기준 위에 있는지 **전 종목·전 구간**으로 잰다.",
+        "표본 검증은 이걸 못 잡았다 — 최근 13개월은 두 기준이 대체로 같아서다.",
+        "",
+        "```json",
+        json.dumps(m["seam_check"], ensure_ascii=False, indent=1),
+        "```",
         "",
         "## 결함 — 인용하기 전에 읽어라",
         "",
