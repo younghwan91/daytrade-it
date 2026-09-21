@@ -20,7 +20,7 @@ Counted directly on every axis.
 
 **Track A — minute, intraday.** 278 bar-days, of which 125 judged. Every judged day has bars, so for the current entry policy — which ranks on eight LLM-derived features — **the 125 judged days are the entire sample, and the 14-month bar window adds zero.** Kiwoom's 13-month depth is server-side retention, confirmed by probing `ka10080` at 30- and 60-minute scope and finding both exhaust at the same 2025-09-01 floor. **That makes the limit structural, not a shortage to wait out.**
 
-**Track B — hourly.** 722 clean days (`identity_verified & ~irregular_session`, 9,313,689 rows, 2,050 codes). 124 judged; **598 with news and prices but no judgment.**
+**Track B — hourly.** 722 clean days. The clean filter is `identity_verified & ~irregular_session & recovery_ok` (9,313,489 rows); the `recovery_ok` term was added when the dataset was rebuilt on 2026-09-22 — see §7. 124 judged; **598 with news and prices but no judgment.**
 
 **Track B — daily.** 2,459 days, 854 of them with news.
 
@@ -146,9 +146,20 @@ The only LLM field that has ever ordered anything. Per-day paired differences; s
 
 ### 2.6 What is robust, and none of it is about the news
 
-Daily, top-300, 2016-09..2026-09: **overnight +25.7 bp/day, intraday -28.6, sign stable 11 of 11 years on both legs.** Hourly over 713 days agrees: **+30.6 / -22.5**, and +27.2 on the adjustment-clean subset. **Cross-resolution agreement on an 11-year fact is the strongest evidence in this document.**
+Daily, top-300, 2016-09..2026-09: **overnight +25.7 bp/day, intraday -28.6, sign stable 11 of 11 years on both legs.** Hourly over 713 days agrees: **+28.3 / -29.1**, and +27.2 on the adjustment-clean subset. **Cross-resolution agreement on an 11-year fact is the strongest evidence in this document.**
 
-Movers vs calm, split on decision-time-clean prior-day absolute move: mover overnight **+33.9** vs calm +17.2; mover intraday **-35.6** vs calm -21.2. Signs stable 11/11 years, and the ordering reproduces at hourly resolution. **These are properties of the top-300 universe, not of the news.** Pool alpha by mover bucket is noise.
+Movers vs calm, split on decision-time-clean prior-day absolute move:
+
+| | daily | hourly |
+|---|---|---|
+| overnight, mover | **+33.9** | **+35.7** |
+| overnight, calm | +17.2 | +21.0 |
+| intraday, mover | **-35.6** | **-37.6** |
+| intraday, calm | -21.2 | -20.8 |
+
+Signs stable 11/11 years at daily resolution and 4/4 at hourly, and the ordering reproduces at both. **These are properties of the top-300 universe, not of the news.** Pool alpha by mover bucket is noise.
+
+> All hourly figures in this section are post-rebuild. The pre-rebuild values were +30.6 / -22.5 for the legs and +48.8 / +13.3 / -43.1 / -2.7 for movers-calm, and they are superseded — see §7.
 
 ### 2.7 Regime, inferred causally
 
@@ -216,7 +227,7 @@ Not a change in the arithmetic. Selection alpha is a factor of twenty below the 
 
 2. **Float-vs-Decimal in the exit twin.** The live predicate holds prices and thresholds as `Decimal`, so 345,000 x 1.10 is exactly 379,500 and a bar closing there is a hit; float64 gives 379,500.00000000006, misses the tie, and exits a minute late. KRW prices are integers on a tick grid, so the tie is common. Affects 1.08 and 1.10 only: **28 of 29,800 holdout paths (0.09%), 6 of 4,416 in sample (0.14%)**, all on the far-target arms. **The published run passed its verification gate only by sampling luck** — seed 0's 400-path draw contained none of the 6. Fixed in both float implementations (`exit_fast._fires` and `Stack.rewards`) plus `peak x (1 - trail_gap)`; both books now verify at 0 mismatches. **Re-running 2026-04..08 reproduces the published verdict digit for digit**, so the defect was real and immaterial to the conclusion.
 
-3. **The reconstructed 15:00 hourly bar is on a different price scale** from the Yahoo bars around it — its close comes from the non-dividend-adjusted daily table. Mean `close(15)/close(14) - 1` is **+968 bp**; 104 codes are wrong every day. A first pass that used it reported the top-300 earning +208 bp/day, entirely artifact. The exit is now the 14:00 bar's close, one price scale end to end. **This is a defect in the new hourly dataset and belongs back with whoever built it.**
+3. **The reconstructed 15:00 hourly bar is on a different price scale** from the Yahoo bars around it — its close comes from the non-dividend-adjusted daily table. Mean `close(15)/close(14) - 1` is **+968 bp**; 104 codes are wrong every day. A first pass that used it reported the top-300 earning +208 bp/day, entirely artifact. The exit is now the 14:00 bar's close, one price scale end to end. **Reported, reproduced and fixed by the dataset's owner on 2026-09-22 (commit `95631fa`): mean |seam jump| 1450 bp -> 53 bp. See §7 for the impact on the numbers here.**
 
 4. **`replay_baseline`'s 23.0 bp cost literal** — sell tax plus one side of commission, spread and slippage zero — underprices every exit-lab result by ~15 bp against the measured 38.3.
 
@@ -233,3 +244,50 @@ What would change it is not more effort on this pool:
 - **$256 of judging** makes 2023-2025 testable and gives `persistence` a verdict (§4).
 - **A collector change** — subscribe to the full candidate list at 09:00 rather than reactively — makes order flow searchable in about six months.
 - **Accruing forward is the only way to extend minute resolution at all**, since Kiwoom's 13 months is a hard floor and Yahoo's 730-day window recedes daily. That is an argument for continuing to collect regardless of whether anything is trading.
+
+---
+
+## 7. Data correction: the hourly rebuild (2026-09-22)
+
+The 15:00-bar defect in §5.3 was reproduced and fixed by the dataset's owner (commit `95631fa`): mean |seam jump| **1450 bp -> 53 bp**, codes wrong on over half their days **133 -> 1**. Two things changed for consumers: the clean filter gained a **`recovery_ok`** term, and the reconstructed 15:00 bar now carries **NaN close and volume** where recovery fails its gate.
+
+**The old filter was not clean.** `identity_verified & ~irregular_session` passed the affected codes, because they had verified identity. Anything filtered that way read bad bars.
+
+### What moved, and what could not have
+
+Every `recovery_ok == False` row, every NaN close and every synthetic row sits at **hour 15**, verified directly on the rebuilt data:
+
+```
+recovery_ok == False, by hour:            {15: 213}
+NaN close, by hour:                       {15: 213}
+kept by OLD filter, dropped by NEW:       {15: 200}
+trading days, old filter / new filter:    722 / 722   (none lost)
+```
+
+So an analysis that never reads hour 15 is unchanged by construction, and the frozen confirm window — a **day list** — is still valid.
+
+| result | read hour 15? | status |
+|---|---|---|
+| minute holdout D2 (-0.3 +/- 2.0), entry bandit, exit RL, three-penalty diagnosis | no Yahoo data at all (Kiwoom `minute_bars`) | **unaffected** |
+| daily horizons, `persistence`, survivorship, HMM | no Yahoo bars (`daily_bars_adjusted`; the manifest only supplies method B's break dates) | **unaffected — re-run gives identical tables** (A +22.5, B +24.0, C +39.1, survivorship +23.2 at h=40) |
+| hourly matched null: D2 -2.0, the by-year table, the confirm window | no — `NSLOT = 6`, slots 09:00-14:00, 15:00 rows dropped unread | **unaffected — exactness gate passed** |
+| **hourly overnight/intraday legs and hourly movers/calm** | **yes — `maxhour == 15` required, `last_close` taken from that bar, on both legs** | **superseded; re-run below** |
+
+**Exactness gate on the matched null.** Entry and `ret_close` were recomputed from the rebuilt bars for 10,611 pairs across 20 days spread over the span: **0 entry mismatches, 0 `ret_close` mismatches, 0 unmatched.** The hourly selection-alpha numbers are bit-identical.
+
+### The superseded leg numbers, and what replaces them
+
+| leg | 2023 | 2024 | 2025 | 2026 | pooled |
+|---|---|---|---|---|---|
+| overnight, **pre-rebuild** | **-20.1** | 30.4 | 33.5 | 45.6 | +30.6 |
+| overnight, **rebuilt** | **+17.9** | 15.6 | 31.3 | 46.0 | **+28.3** |
+| intraday, **pre-rebuild** | **+22.3** | -28.9 | -12.3 | -44.4 | -22.5 |
+| intraday, **rebuilt** | **-31.6** | -26.4 | -18.8 | -46.5 | **-29.1** |
+
+**The correction removes the one anomaly this document had flagged and could not explain.** Pre-rebuild, 2023 was the single year where both hourly legs flipped sign against a daily series that did not; that was attributed to the 70-day stub. **That attribution was wrong — it was the contaminated bar.** Rebuilt, hourly signs are correct in **4 of 4 years on both legs**.
+
+Cross-resolution agreement is now materially tighter: daily **+25.7 / -28.6** against hourly **+28.3 / -29.1** (was **+30.6 / -22.5**), and every movers/calm cell moves toward its daily counterpart. An internal check: the `no-adj-step` subset, which already excluded the adjustment-step codes, reads **+27.2 pooled before and after** — the one hourly figure that should not have moved did not.
+
+### The lesson worth keeping
+
+A defect in a supporting dataset moved a number by **50 bp on one year's leg and flipped its sign**, while leaving every headline conclusion untouched — because the analyses that mattered had already refused to read the bar for an independent reason. That refusal was not foresight about this defect; it was the same discipline that found it. **The reason to drop a value you cannot put on one price scale is that you cannot put it on one price scale, and the payoff arrives later and somewhere else.**

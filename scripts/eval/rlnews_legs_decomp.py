@@ -171,9 +171,16 @@ def main() -> None:
             "irregular_session",
             "identity_verified",
             "adjustment_step",
+            "recovery_ok",
         ],
     )
-    df = df[(~df.irregular_session) & (df.identity_verified)]
+    # `recovery_ok` is required, not optional. This decomposition reads the
+    # reconstructed 15:00 bar on BOTH legs (overnight = 09:00 open / previous
+    # 15:00 close, intraday = 15:00 close / 09:00 open), and that bar's close was
+    # rebuilt on 2026-09-22 after it was found to sit on a different price basis
+    # from the Yahoo bars around it. Filtering on identity and session alone let
+    # the bad bars through, because the affected codes had verified identity.
+    df = df[(~df.irregular_session) & (df.identity_verified) & (df.recovery_ok)]
     df["day"] = df.ts.dt.floor("D")
     df["hour"] = df.ts.dt.hour
     df = df.sort_values(["code", "ts"])
