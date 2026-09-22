@@ -120,7 +120,7 @@
     "name": "prior",
     "file": "/home/young/git/daytrade-it-exitseq/data/eval/exitseq/paths_prior.jsonl",
     "identical_copy": "/home/young/git/daytrade-it/data/eval/rlnews/paths_prior.jsonl",
-    "md5": "eb0ba9b64c286e31b5f5187df8784168",
+    "md5": "md5:eb0ba9b64c286e31b5f5187df8784168",
     "rows": 29800,
     "days": 149,
     "range": [
@@ -131,7 +131,7 @@
    {
     "name": "fresh",
     "file": "/home/young/git/daytrade-it-exitseq/data/eval/exitseq/paths_fresh.jsonl",
-    "md5": "033049e372d9f1caa5e593c945d9f562",
+    "md5": "md5:033049e372d9f1caa5e593c945d9f562",
     "rows": 25000,
     "days": 125,
     "range": [
