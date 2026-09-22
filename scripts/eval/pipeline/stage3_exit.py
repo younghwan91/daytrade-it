@@ -252,6 +252,7 @@ def main() -> None:
     ap.add_argument("--models", default="linear,mlp16")
     ap.add_argument("--noise", type=int, default=10)
     ap.add_argument("--gate-only", action="store_true")
+    ap.add_argument("--tag", default="", help="suffix for report files (parallel runs)")
     args = ap.parse_args()
 
     rows = [json.loads(line) for line in Path(args.inp).read_text().splitlines() if line]
@@ -268,7 +269,7 @@ def main() -> None:
     tc.log(f"book: {book.n_paths} positions, {book.n_steps} steps")
     out_dir = Path(args.out).parent
     g = gate(bars, rows, idx_of, book, live_step, cut_step, keep)
-    (out_dir / "stage3_gate.json").write_text(json.dumps(g, indent=1))
+    (out_dir / f"stage3_gate{args.tag}.json").write_text(json.dumps(g, indent=1))
     if g["mismatches"]:
         sys.exit("stage 3 gate FAILED: simulated live exit differs from exit_fast; refusing to fit")
     if args.gate_only:
@@ -329,7 +330,7 @@ def main() -> None:
 
     keep_cols = {"neg", "pos", *CLOCK} | {n for n in book.names if n.startswith(("pnl_", "s1_"))}
     scr_cols = [c for c, n in enumerate(book.names) if n not in keep_cols]
-    rep_path = out_dir / "stage3_report.json"
+    rep_path = out_dir / f"stage3_report{args.tag}.json"
     choices = {}
     for name in args.models.split(","):
         real, ch = tc.evaluate(
