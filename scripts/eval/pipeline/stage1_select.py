@@ -653,12 +653,16 @@ def main():
 
     s1 = cfg["stage1"]
     t0d, t1d = s1["train_range"]
-    held = config.holdout_days()
     rows = load_pairs(Path(args.pairs))
     # guard: every row carrying an outcome must be outside the frozen holdout
     config.assert_no_holdout_labels({r["day"] for r in rows if r.get("label") is not None}, stage=1)
+    # labelled train_range rows are fitted and scored out of fold; unlabelled
+    # rows after the train range (post_train, then holdout) are scored only
     rows = [
-        r for r in rows if (t0d <= r["day"] <= t1d and r["label"] is not None) or r["day"] in held
+        r
+        for r in rows
+        if (t0d <= r["day"] <= t1d and r["label"] is not None)
+        or (r["label"] is None and r["day"] > t1d)
     ]
     rows.sort(key=lambda r: (r["day"], r["decide_at"], r["key"]))
     months = sorted({r["month"] for r in rows if r["label"] is not None})
@@ -774,7 +778,7 @@ def main():
                 "month": r["month"],
             }
             if not lab_mask[i]:
-                split, tt = "holdout", last_train_day
+                split, tt = config.unlabelled_split(r["day"]), last_train_day
                 sc = S_hold[hpos[i]]
             elif r["month"] in burn:
                 split, tt, sc = "burnin", None, None

@@ -226,20 +226,25 @@ def main() -> None:
     args = ap.parse_args()
     cfg = config.load()
     t0, t1 = cfg["stage1"]["train_range"]
-    held = config.holdout_days()
     OUTDIR.mkdir(parents=True, exist_ok=True)
-    stats: dict = {"train_range": [t0, t1], "holdout_days": len(held)}
+    stats: dict = {"train_range": [t0, t1], "holdout_start": config.holdout_start()}
 
-    master = [r for r in jl(MASTER) if t0 <= r["day"] <= t1 or r["day"] in held]
+    # train_range rows are labelled; every later row (the consumed post-train
+    # window, then the forward holdout) is carried unlabelled, to be scored.
+    master = [r for r in jl(MASTER) if r["day"] >= t0]
+    in_train = [r for r in master if r["day"] <= t1]
     stats["master_rows"] = len(master)
-    stats["master_rows_train"] = sum(1 for r in master if r["day"] not in held)
-    stats["master_rows_holdout"] = sum(1 for r in master if r["day"] in held)
+    stats["master_rows_train"] = len(in_train)
+    stats["master_rows_post_train"] = sum(
+        1 for r in master if r["day"] > t1 and not config.is_holdout(r["day"])
+    )
+    stats["master_rows_holdout"] = sum(1 for r in master if config.is_holdout(r["day"]))
 
     # ---- labels (train_range only) --------------------------------------
-    train_days = {r["day"] for r in master if r["day"] not in held}
+    train_days = {r["day"] for r in in_train}
     prior = load_labels(LABELS_PRIOR, train_days)
     prior_last = max(v for v in {r["day"] for r in master if r["key"] in prior})
-    live_rows = [r for r in master if r["day"] not in held and r["day"] > prior_last]
+    live_rows = [r for r in in_train if r["day"] > prior_last]
     config.assert_no_holdout_labels({r["day"] for r in live_rows}, stage=1)  # never label holdout
     live_path = OUTDIR / "labels_live_range.jsonl"
     if not args.skip_label:
@@ -274,9 +279,10 @@ def main() -> None:
     with pairs_path.open("w", encoding="utf-8") as f:
         for r in master:
             key, code = r["key"], r["code"]
-            is_hold = r["day"] in held
+            # after the train range every row is scored-only: never labelled here
+            scored_only = r["day"] > t1
             lab = labels.get(key)
-            if not is_hold and lab is None:
+            if not scored_only and lab is None:
                 n["drop_unlabelled"] += 1
                 continue
             ft = feats.get(key)
@@ -307,20 +313,20 @@ def main() -> None:
                         "month": r["day"][:7],
                         "published_at": r["published_at"],
                         "decide_at": r["decide_at"],
-                        "holdout": is_hold,
+                        "holdout": config.is_holdout(r["day"]),
                         "text_hash": h,
                         "masked_hash": hm,
                         "name_in_text": hm != h,
                         "features": {k: v for k, v in ft.items() if k != "entry"},
                         "label": None
-                        if is_hold
+                        if scored_only
                         else {k: lab[k] for k in ("ret_close", "mfe", "mae")},
                     },
                     ensure_ascii=False,
                 )
                 + "\n"
             )
-            n["hold" if is_hold else "train"] += 1
+            n["scored_only" if scored_only else "train"] += 1
     with (OUTDIR / "texts.jsonl").open("w", encoding="utf-8") as f:
         for h, t in uniq.items():
             f.write(json.dumps({"hash": h, "text": t}, ensure_ascii=False) + "\n")
