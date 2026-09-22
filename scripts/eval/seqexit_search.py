@@ -275,6 +275,12 @@ def main() -> None:  # noqa: PLR0915
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--limit", type=int, default=0, help="first N rows only (smoke runs)")
     ap.add_argument(
+        "--track",
+        default="track_a_prior",
+        help="which frozen split in --windows to read. track_a_prior is SPENT (scored "
+        "twice); the neural study and its table comparison read track_d_fresh.",
+    )
+    ap.add_argument(
         "--confirm",
         action="store_true",
         help="score the frozen confirm slice. Left off until the search is finished.",
@@ -303,7 +309,7 @@ def main() -> None:  # noqa: PLR0915
     )
 
     # -- the split, read rather than chosen ---------------------------------
-    win = json.loads(args.windows.read_text())["track_a_prior"]
+    win = json.loads(args.windows.read_text())[args.track]
     confirm_days = set(win["confirm"])
     lo, hi = win["search"]
     all_days = sorted(set(book.day.tolist()))

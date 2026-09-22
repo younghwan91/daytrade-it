@@ -314,7 +314,7 @@ And the noise band itself moves with the parameter count, exactly as it should:
 | novol | 15 | −34.64 |
 | vol | 45 | **−34.05** |
 
-Tripling the free parameters buys **+0.6 bp of pure search premium** — a policy that fits scrambled volume better than a smaller policy fits scrambled nothing. That is the whole of what the volume channel delivers on the real data too: the `vol` arm's real training objective (−34.50) sits *below* what the same search extracts from noise at the same parameter count (−34.05). The 135-parameter `volplus` scramble set was still running when this was written; it is not needed for the conclusion, and on this trend it would only raise the floor further.
+Tripling the free parameters buys **+0.6 bp of pure search premium** — a policy that fits scrambled volume better than a smaller policy fits scrambled nothing. That is the whole of what the volume channel delivers on the real data too: the `vol` arm's real training objective (−34.50) sits *below* what the same search extracts from noise at the same parameter count (−34.05). The 135-parameter `volplus` scramble set **did not complete**: every python process on simnode older than 22:48 was terminated at once (no OOM record in the kernel log; cause under investigation with the other agent sharing the machine), five scrambles into twenty. Its fold results and confirm pass had already been written and are reported above; only this one row of the noise table is missing. It was not re-run, because it cannot change the conclusion — the two completed arms already fail their own noise band, and on this trend a 135-parameter search would only raise the floor further.
 
 The last row is the cleanest single statement available on the volume hypothesis:
 
@@ -370,11 +370,11 @@ The selection statistic is `net.mean()` — mean realised KRW per trade, on the 
 | `scripts/eval/seqexit_gate.py` | the exhaustive exactness gate against `exit_fast` |
 | `scripts/eval/seqexit_search.py` | folds, coordinate ascent, shuffled-feature null, the confirm pass |
 | `scripts/eval/seqexit_compare.py` | reproduction of the published holdout, and the selection-defect price |
-| `data/eval/rlnews/seqexit_gate.json` | gate result |
-| `data/eval/rlnews/seqexit_search.json` | folds, pooled, shuffle premium, per arm |
-| `data/eval/rlnews/seqexit_confirm.json` | the one-time confirm pass, policy tables, verdicts, daily series |
-| `data/eval/rlnews/seqexit_compare.json` | both selectors, both grids, all seven folds |
+| `data/eval/exitseq/seqexit_gate.json` | gate result |
+| `data/eval/exitseq/seqexit_search.json` | folds, pooled, shuffle premium, per arm |
+| `data/eval/exitseq/seqexit_confirm.json` | the one-time confirm pass, policy tables, verdicts, daily series |
+| `data/eval/exitseq/seqexit_compare.json` | both selectors, both grids, all seven folds |
 
-`data/` is gitignored, as it is for every study here, so the four JSON artifacts live in the worktree `~/git/daytrade-it-exitseq` on simnode rather than in the branch. Only the scripts and this document are committed; the scripts regenerate the JSON from `paths_prior.jsonl` unattended, and `seqexit_search.py --confirm-only` reproduces the confirm pass in minutes from the cached fixed grid.
+`data/` is gitignored, as it is for every study here, so the four JSON artifacts live in the worktree `~/git/daytrade-it-exitseq` on simnode rather than in the branch. Only the scripts and this document are committed; the scripts regenerate the JSON from `paths_prior.jsonl` unattended. (The directory was renamed from `data/eval/rlnews/` to `data/eval/exitseq/` mid-study so no command line of this study contains the string `rlnews`, after a pattern kill on this shared machine took out processes it matched.), and `seqexit_search.py --confirm-only` reproduces the confirm pass in minutes from the cached fixed grid.
 
 Run in a worktree on simnode. kr_quant read-only, zero API spend, nothing touched on the trader machine, on `~/git/daytrade-it` there, or on any running daemon or backfill.

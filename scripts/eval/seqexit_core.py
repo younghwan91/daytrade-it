@@ -51,6 +51,15 @@ ENTRY_END_MINUTE = 14 * 60 + 30
 ADD_PRICE_BAND = 0.03
 #: `add_on_hit` refuses before 20 completed bars.
 ADD_MIN_BARS = 20
+#: The owner's set, read at MINUTE resolution. `seqexit_ma.py` builds the same
+#: set at DAILY resolution; they are different hypotheses (3.3 hours against ten
+#: months) and both are carried so the report can say which one the policy uses.
+MA_PERIODS_INTRA = (5, 10, 20, 50, 100, 150, 200)
+#: Pre-entry window and floor for the per-stock volatility that normalises every
+#: return-like feature. Same values as `rl_exits.entry_sigma`, deliberately: the
+#: two studies must scale their states the same way to be comparable.
+SIGMA_BARS = 30
+SIGMA_FLOOR = 0.0015
 #: Per-leg notional. One share is one leg; an add-on is a second leg of the
 #: same size, which is what `_add_on` buys (quantity 1, once per ticker).
 NOTIONAL = 100_000.0
@@ -101,6 +110,15 @@ class Book:
     pnl: np.ndarray
     vsurge: np.ndarray
     elapsed: np.ndarray
+    # continuous channels for the function-approximation policy; every one is a
+    # dimensionless ratio (see `reduce_row`), none is a KRW level
+    slope: np.ndarray
+    vtrend: np.ndarray
+    dd: np.ndarray
+    ma_frac_intra: np.ndarray
+    ma_avail_intra: np.ndarray
+    ma_dist_intra: np.ndarray
+    sigma: np.ndarray  # per path
 
     @property
     def n_paths(self) -> int:
@@ -134,7 +152,7 @@ def reduce_row(row: dict) -> dict | None:
     bars = bars[order]
     minutes = bars[:, 0].astype(int)
     opens, highs, lows, closes, vols = bars[:, 1], bars[:, 2], bars[:, 3], bars[:, 4], bars[:, 5]
-    del highs, lows
+    del lows
     buy_minute = int(row["buy_minute"])
 
     cum_vol = np.cumsum(vols)
@@ -191,6 +209,55 @@ def reduce_row(row: dict) -> dict | None:
     j3 = np.maximum(j - 3, 0)
     slope = np.where(j >= 3, close_j / closes[j3] - 1.0, 0.0)
 
+    # --- drawdown from the position's own post-entry peak ---------------------
+    # A RATIO, never KRW: `peak` is the running max high from the minute after
+    # entry (the same peak `exit_rule_hit`'s trailing rule uses), so `dd` is
+    # "how much of its own best has this position given back", comparable across
+    # stocks at any price level and any position size.
+    after_entry = minutes >= buy_minute + 1
+    run_peak = np.maximum.accumulate(np.where(after_entry, highs, -np.inf))[j]
+    has_peak = np.maximum.accumulate(after_entry.astype(int)).astype(bool)[j]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        dd = np.where(has_peak & (run_peak > 0), close_j / run_peak - 1.0, 0.0)
+    dd = np.nan_to_num(dd, nan=0.0, posinf=0.0, neginf=0.0)
+
+    # --- this stock's own pre-entry minute volatility -------------------------
+    # One number per path, fixed at the fill from bars that ended BEFORE it, and
+    # the denominator for every normalised feature. Per-stock and per-day, so it
+    # cannot carry "which stock is volatile" into a state the way a pool-wide
+    # standardisation would. Floored for the same reason `entry_sigma` is.
+    pre = closes[minutes < buy_minute]
+    pre = pre[pre > 0][-(SIGMA_BARS + 1) :]
+    if pre.size >= 3:
+        r = pre[1:] / pre[:-1] - 1.0
+        sigma = max(float(r.std()), SIGMA_FLOOR)
+    else:
+        sigma = SIGMA_FLOOR
+
+    # --- intraday moving-average position -------------------------------------
+    # The 5/10/20/50/100/150/200 set read at MINUTE resolution, entirely inside
+    # the raw minute series so no price scale is ever mixed. MA_k needs k
+    # completed bars, so early in the session the long periods do not exist:
+    # they are counted as UNAVAILABLE rather than imputed, and the fraction is
+    # taken over what exists with the denominator carried alongside it. An
+    # ordinal count would make "3 of 3" and "3 of 7" the same state; a fraction
+    # plus its denominator does not.
+    cum_close = np.concatenate([[0.0], np.cumsum(closes)])
+    n_above = np.zeros(j.size)
+    n_avail = np.zeros(j.size)
+    dist_sum = np.zeros(j.size)
+    for k in MA_PERIODS_INTRA:
+        avail = j + 1 >= k
+        ma = (cum_close[j + 1] - cum_close[np.maximum(j + 1 - k, 0)]) / k
+        good = avail & (ma > 0)
+        n_avail += good
+        n_above += good & (close_j > ma)
+        dist_sum += np.where(
+            good, (close_j - np.where(good, ma, 1.0)) / np.where(good, ma, 1.0), 0.0
+        )
+    ma_frac_intra = np.where(n_avail > 0, n_above / np.maximum(n_avail, 1), 0.5)
+    ma_dist_intra = np.where(n_avail > 0, dist_sum / np.maximum(n_avail, 1), 0.0)
+
     ma5 = _trailing_mean(closes, j, 5)
     ma20 = _trailing_mean(closes, j, 20)
     # `add_on_hit` verbatim (>= 20 completed bars, close above VWAP, MA5 > MA20)
@@ -218,6 +285,11 @@ def reduce_row(row: dict) -> dict | None:
         "slope": slope,
         "vsurge": vsurge,
         "vtrend": vtrend,
+        "dd": dd,
+        "ma_frac_intra": ma_frac_intra,
+        "ma_avail_intra": n_avail,
+        "ma_dist_intra": ma_dist_intra,
+        "sigma": sigma,
         "add_ok": add_ok,
         "valid": np.isfinite(vwap),
         "entry": entry,
@@ -288,6 +360,13 @@ def build(rows: list[dict]) -> tuple[Book, np.ndarray]:
         pnl=pnl,
         vsurge=vsurge,
         elapsed=minute - buy,
+        slope=slope,
+        vtrend=vtrend,
+        dd=cat("dd"),
+        ma_frac_intra=cat("ma_frac_intra"),
+        ma_avail_intra=cat("ma_avail_intra"),
+        ma_dist_intra=cat("ma_dist_intra"),
+        sigma=np.asarray([p["sigma"] for p in parts], dtype=float),
     )
     return book, np.asarray(keep_idx, dtype=np.int64)
 
@@ -440,7 +519,17 @@ class Sim:
 
     def run(self, act: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """(net KRW per path, exit step index, add step index or -1)."""
-        fires = act[self.state].astype(bool)
+        return self.run_steps(act[self.state].astype(bool))
+
+    def run_steps(self, fires: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """`run`, with the action given per STEP rather than per lattice state.
+
+        This is how a function-approximation policy enters: it emits a decision
+        for every step directly, and the roll-out below is the identical
+        first-hitting-time walk the table policy uses and `seqexit_gate`
+        verified. The legality masks are applied here, not by the caller, so no
+        policy of any kind can cut above entry or add below it.
+        """
         first_cut = np.minimum.reduceat(np.where(fires, self._cut_idx, self.BIG), self.book.starts)
         exit_at = np.minimum(first_cut, self.book.last_idx)
         first_add = np.minimum.reduceat(np.where(fires, self._add_idx, self.BIG), self.book.starts)
