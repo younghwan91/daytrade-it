@@ -28,9 +28,17 @@ alignment with their own path is destroyed by a fixed within-day donor
 permutation (clock channels kept), `--noise` seeds fixed in advance.
 Best-of-N on noise is the bar a candidate has to clear.
 
-**Stage-1 link.** When `--in` exists, only pairs with an out-of-fold stage-1
-score are kept and the score becomes a state input; when it does not, the
-population is every path ("selection = all") and the run says so.
+**Stage-1 link.** When `--in` exists, the population is stage 1's `selection`
+split (out-of-fold scores, never in-sample) and all six target scores are state
+inputs; `--no-s1` keeps the population and withholds the scores (ablation).
+When it does not exist, the population is every path and the run says so.
+
+**Evidence window.** Days in the forward holdout, in a consumed window, or in
+stage 1's confirm range never enter (`timing_core.excluded`).
+
+**Baselines.** Immediate (the recorded open print at the news minute) and
+next-minute (the next bar's open), so a gain that is only "skip the noisy open
+print" is not claimed as timing; results are also split 09:00 vs later news.
 """
 
 from __future__ import annotations
@@ -71,6 +79,12 @@ FEATURES = (
     "tod",  # (minute - 09:00) / 390                    (clock)
 )
 CLOCK = ("elapsed", "tod")
+#: Every stage-1 target's out-of-fold score is a state input. Which one matters
+#: is left to the fit rather than picked by reading stage 1's selection/confirm
+#: results (lead instruction). Scores sit on a common ~+-0.1 scale, so one
+#: FIXED factor (not estimated) brings them to the other inputs' range.
+S1_TARGETS = ("mfe", "ret_close", "mfe_n", "ret_n", "rr", "lrr")
+S1_SCALE = 10.0
 MODELS = {
     # Fixed before the first fit; not searched.
     "linear": {"hidden": 0, "iters": 300, "lr": 0.05, "batch": 3000, "l2": 1e-3},
@@ -92,7 +106,7 @@ def build(bars: tc.Bars, ax: dict, keep: np.ndarray, s1: dict | None):
     starts, stops, kept = [], [], []
     market, dvol_p = [], []
     off = 0
-    names = FEATURES + (("s1",) if s1 is not None else ())
+    names = FEATURES + (tuple(f"s1_{t}" for t in S1_TARGETS) if s1 is not None else ())
     for i in keep:
         mi, o, h, lo, c, v = bars.path(i)
         bm, bp = int(bars.buy_minute[i]), float(bars.buy_price[i])
@@ -173,7 +187,9 @@ def build(bars: tc.Bars, ax: dict, keep: np.ndarray, s1: dict | None):
         f["elapsed"] = (cm - bm) / 60.0
         f["tod"] = (cm - tc.OPEN_MINUTE) / 390.0
         if s1 is not None:
-            f["s1"] = np.full(cm.size, s1[str(bars.key[i])])
+            sc = s1[str(bars.key[i])]
+            for t, val in zip(S1_TARGETS, sc, strict=True):
+                f[f"s1_{t}"] = np.full(cm.size, np.clip(S1_SCALE * val, -4, 4))
         Xs.append(np.stack([f[n] for n in names], 1).astype(np.float32))
         lg = np.ones(cm.size, bool)
         legal.append(lg)
@@ -296,6 +312,12 @@ def main() -> None:
     ap.add_argument("--gate-procs", type=int, default=6)
     ap.add_argument("--gate-only", action="store_true")
     ap.add_argument("--limit-days", type=int, default=0, help="smoke runs: first N days only")
+    ap.add_argument(
+        "--no-s1",
+        action="store_true",
+        help="ablation: same population, stage-1 scores NOT given to the policy",
+    )
+    ap.add_argument("--tag", default="", help="suffix for report files (parallel ablation runs)")
     args = ap.parse_args()
 
     bars = tc.load_bars(args.paths, STAGE)
@@ -304,16 +326,21 @@ def main() -> None:
     s1 = None
     inp = Path(args.inp)
     if inp.exists():
+        # Only stage 1's `selection` split: burn-in has no score, `confirm` was
+        # read once by stage 1, `post_train` lies in a consumed window. Scores
+        # are features (decision-time), so no label is read here.
         scores = {}
         with inp.open() as f:
             for line in f:
                 r = json.loads(line)
-                if r.get("score") is not None and r.get("split") in ("selection", "confirm"):
-                    scores[r["key"]] = float(r["score"])
+                if r.get("split") == "selection" and r.get("score") is not None:
+                    assert r["trained_through"] < r["day"], r["key"]
+                    scores[r["key"]] = [float(r[f"score_{t}"]) for t in S1_TARGETS]
         keep = np.flatnonzero(np.isin(bars.key, list(scores)))
-        s1 = scores
+        s1 = None if args.no_s1 else scores
         selection = (
-            f"stage-1 OOF scores from {inp} ({len(scores)} scored pairs, {keep.size} with paths)"
+            f"stage-1 selection-split pairs from {inp} ({len(scores)} scored, {keep.size} with paths); "
+            f"scores {'NOT ' if args.no_s1 else ''}used as inputs"
         )
     else:
         selection = "all (stage-1 scores not present yet)"
@@ -374,8 +401,16 @@ def main() -> None:
     def summ(step_idx, label):
         return tc.day_cluster(days[oof], R[step_idx][oof]) | {"label": label}
 
+    # The recorded fill at the news minute is that minute's OPEN print -- for
+    # 09:00 news the opening auction, which a live limit order placed at
+    # 09:00:30 does not get. `next_minute` (the next bar's open) is the same
+    # "buy now" decision without that print, so a timing gain that is really
+    # just "avoid the open print" shows up against it and is not claimed.
+    second = np.minimum(book.starts + 1, book.stops - 1)
+    bases = {"immediate": first, "next_minute": second}
     report["baselines"] = {
-        "immediate": summ(first, "buy at news minute"),
+        "immediate": summ(first, "buy at news minute (recorded open print)"),
+        "next_minute": summ(second, "buy at the next bar's open after the news minute"),
         "last_candidate": summ(
             book.stops - 1, "buy at the last candidate before entry_end (min exposure)"
         ),
@@ -385,15 +420,20 @@ def main() -> None:
         tc.log(f"baseline {k}: {v['bp']:+.1f}bp +- {v['se_bp']:.1f}")
 
     clock_cols = [book.names.index(c) for c in CLOCK]
-    scr_cols = [k for k in range(len(book.names)) if k not in clock_cols and book.names[k] != "s1"]
-    rep_path = out_dir / "stage2_report.json"
+    scr_cols = [
+        k
+        for k in range(len(book.names))
+        if k not in clock_cols and not book.names[k].startswith("s1_")
+    ]
+    rep_path = out_dir / f"stage2_report{args.tag}.json"
+    at_open = np.array([int(bars.buy_minute[i]) == tc.OPEN_MINUTE for i in kept])
     choices = {}
     for name in args.models.split(","):
         real, ch = tc.evaluate(
             name,
             book,
             R,
-            first,
+            bases,
             days,
             months,
             fold_months,
@@ -402,23 +442,30 @@ def main() -> None:
             scr_cols,
             args.noise,
         )
+        # The two artefacts named by stage 1, separated: news acting at the 09:00
+        # open against news acting later in the session.
+        for grp, mask in (("news_at_0900", at_open), ("news_after_0900", ~at_open)):
+            sel = oof & mask
+            real[f"split_{grp}"] = {
+                "n": int(sel.sum()),
+                **{
+                    f"det_vs_{b}": tc.day_cluster(days[sel], (R[ch] - R[st])[sel])
+                    for b, st in bases.items()
+                },
+            }
         report["models"][name] = real
         choices[name] = ch
         rep_path.write_text(json.dumps(report, indent=1, ensure_ascii=False))
 
-    # Pre-registered hand-off: the first model (in --models order) that beats its
-    # own noise best-of-N AND is > 2 SE above immediate; otherwise immediate.
-    chosen = "immediate"
-    for name in args.models.split(","):
-        r = report["models"][name]
-        d = r["diff_vs_base"]
-        if r["beats_noise_best_of_n"] and d["bp"] > 2 * d["se_bp"]:
-            chosen = name
-            break
+    # Pre-registered hand-off: the first model (in --models order) that passes
+    # `tc.passes` (noise best-of-N and > 2 SE above EVERY baseline); else immediate.
+    chosen = next(
+        (n for n in args.models.split(",") if tc.passes(report["models"][n])), "immediate"
+    )
     report["chosen"] = chosen
     if chosen != "immediate":
         all_w = weights(np.ones(book.n_paths, bool))
-        (out_dir / "stage2_model.json").write_text(
+        (out_dir / f"stage2_model{args.tag}.json").write_text(
             json.dumps(tc.fit_final(book, R, all_w, MODELS[chosen]))
         )
     rep_path.write_text(json.dumps(report, indent=1, ensure_ascii=False))
@@ -445,6 +492,8 @@ def main() -> None:
                     tc.cost_of(str(bars.day[i]), str(extra["market"][p]), int(book.minute[ch]))
                 ),
             }
+            if s1 is not None:
+                rec |= {f"s1_{t}": v for t, v in zip(S1_TARGETS, s1[str(bars.key[i])], strict=True)}
             for name, chs in choices.items():
                 c2 = chs[p] if chs[p] >= 0 else first[p]
                 rec[f"entry_minute_{name}"] = int(book.minute[c2])

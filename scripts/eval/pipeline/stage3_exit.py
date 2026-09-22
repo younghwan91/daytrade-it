@@ -24,9 +24,14 @@ P&L, which decides the head and is mechanically tied to the reward
 policies can learn "cut when below entry" too, and a candidate has to beat
 that, not just a blind one.
 
-**Gate.** Driven by the live rule, this walk must return `exit_fast.first_exit`'s
-exit minute and price on EVERY row, and the forced last step must be the
-flatten; otherwise nothing is fitted.
+**Baselines**, side by side and each a paired, day-clustered difference: the
+live rule, hold to the flatten, and the zero-parameter cut (sell at the first
+minute the last close is below entry) -- the rule the earlier learned exit
+tables collapsed to, which won in some months and lost to holding in others.
+
+**Gate.** Driven by the live rule, and by the zero-parameter cut, this walk
+must return `exit_fast.first_exit`'s exit minute and price on EVERY row, and
+the forced last step must be the flatten; otherwise nothing is fitted.
 """
 
 from __future__ import annotations
@@ -69,7 +74,7 @@ MODELS = {
 BURN_IN_MONTHS = 2
 
 
-def build(bars: tc.Bars, ax: dict, rows: list[dict], idx_of: dict, s1: dict | None):
+def build(bars: tc.Bars, ax: dict, rows: list[dict], idx_of: dict, s1_names: list[str]):
     from exit_fast import barrier  # noqa: PLC0415
 
     gap = float(tc.LIVE.vwap_exit_gap)
@@ -77,12 +82,12 @@ def build(bars: tc.Bars, ax: dict, rows: list[dict], idx_of: dict, s1: dict | No
     # Two heads by position sign: each channel appears once per head, zero on
     # the other side, plus a per-head bias. `pos`/`neg` are never scrambled.
     names = (
-        tuple(f"{n}_{s}" for s in ("neg", "pos") for n in BASE + (("s1",) if s1 else ()))
+        tuple(f"{n}_{s}" for s in ("neg", "pos") for n in BASE + tuple(s1_names))
         + ("neg", "pos")
         + CLOCK
     )
     X, R, legal, minute, fill, pidx = ([] for _ in range(6))
-    live_step, starts, stops, keep, market = [], [], [], [], []
+    live_step, cut_step, starts, stops, keep, market = [], [], [], [], [], []
     off = 0
     for r_i, r in enumerate(rows):
         i = idx_of.get(r["key"])
@@ -127,12 +132,12 @@ def build(bars: tc.Bars, ax: dict, rows: list[dict], idx_of: dict, s1: dict | No
         ch = {n: tc._squash(x) for n, x in feat.items()} | {
             n: np.clip(np.nan_to_num(x), -4, 4) for n, x in vol.items()
         }
-        if s1:
-            ch["s1"] = np.full(j.size, s1.get(r["key"], 0.0))
+        for n in s1_names:  # stage-1 OOF scores carried on the stage-2 row; fixed scale
+            ch[n] = np.full(j.size, np.clip(10.0 * float(r[n]), -4, 4))
         neg = (cj < e_px).astype(float)  # strictly below the entry: a stop here is a cut
         pos = 1.0 - neg
-        cols = [ch[n] * neg for n in BASE + (("s1",) if s1 else ())]
-        cols += [ch[n] * pos for n in BASE + (("s1",) if s1 else ())]
+        cols = [ch[n] * neg for n in BASE + tuple(s1_names)]
+        cols += [ch[n] * pos for n in BASE + tuple(s1_names)]
         cols += [neg, pos, (mi[k] - e_min) / 60.0, (mi[k] - tc.OPEN_MINUTE) / 390.0]
         X.append(np.stack(cols, 1).astype(np.float32))
         R.append(f / e_px - 1.0 - cost)
@@ -145,6 +150,9 @@ def build(bars: tc.Bars, ax: dict, rows: list[dict], idx_of: dict, s1: dict | No
         with np.errstate(divide="ignore", invalid="ignore"):
             fire = (cj >= barrier(e_px, min_gain, +1)) & (cj / vw[j] - 1 < -gap) & valid[j]
         live_step.append(off + (int(np.argmax(fire)) if fire.any() else k.size - 1))
+        # zero-parameter cut: the first minute the last close is strictly below entry
+        below = (cj < e_px) & valid[j]
+        cut_step.append(off + (int(np.argmax(below)) if below.any() else k.size - 1))
         starts.append(off)
         off += k.size
         stops.append(off)
@@ -162,14 +170,35 @@ def build(bars: tc.Bars, ax: dict, rows: list[dict], idx_of: dict, s1: dict | No
         cat(pidx),
         names,
     )
-    return book, np.asarray(live_step), np.asarray(keep)
+    return book, np.asarray(live_step), np.asarray(cut_step), np.asarray(keep)
 
 
-def gate(bars, rows, idx_of, book, live_step, keep) -> dict:
+#: The zero-parameter cut as a live `TradingLimits`: every rule off except a
+#: stop-loss at 1e-12. `exit_fast.barrier` evaluates `entry * (1 - 1e-12)` in
+#: Decimal, so on whole-KRW prices `close <= barrier` is exactly `close < entry`.
+CUT_PCT = Decimal("1e-12")
+
+
+def gate(bars, rows, idx_of, book, live_step, cut_step, keep) -> dict:
+    """Both rule baselines against `exit_fast.first_exit`, on EVERY row: the live
+    rule under `TradingLimits()` and the zero-parameter cut under a bare
+    stop-loss; plus the forced last step must be the flatten minute."""
+    import dataclasses  # noqa: PLC0415
+
     from exit_fast import first_exit, reduce_path  # noqa: PLC0415
     from exit_lab import Path as LabPath  # noqa: PLC0415
     from rl_exits import ORB_WIDTHS  # noqa: PLC0415
 
+    bare = dataclasses.replace(
+        tc.LIVE,
+        stop_loss_pct=CUT_PCT,
+        stop_vwap_gap=None,
+        stop_time=None,
+        stop_orb=None,
+        take_profit_pct=None,
+        trail_after_gain=None,
+        vwap_exit_gap=None,
+    )
     bad = 0
     ex = []
     for p, r_i in enumerate(keep):
@@ -183,17 +212,34 @@ def gate(bars, rows, idx_of, book, live_step, keep) -> dict:
             ORB_WIDTHS,
         )
         px, _reason, em = first_exit(red, tc.LIVE, ORB_WIDTHS)
-        t = live_step[p]
+        cpx, _r2, cem = first_exit(red, bare, ORB_WIDTHS)
+        t, tc_ = live_step[p], cut_step[p]
         flat_ok = red.flatten_minute == int(book.minute[book.stops[p] - 1])
-        if em != int(book.minute[t]) or px != float(book.fill[t]) or not flat_ok:
+        if (
+            em != int(book.minute[t])
+            or px != float(book.fill[t])
+            or not flat_ok
+            or cem != int(book.minute[tc_])
+            or cpx != float(book.fill[tc_])
+        ):
             bad += 1
             if len(ex) < 10:
                 ex.append(
                     f"{r['day']} {r['ticker']}: exit_fast {em}/{px} vs {int(book.minute[t])}/{float(book.fill[t])}"
                 )
     fired = float((live_step < book.stops - 1).mean())
-    tc.log(f"gate: {bad} mismatches over {len(keep)} rows; live rule exits early on {fired:.1%}")
-    return {"rows": len(keep), "mismatches": bad, "examples": ex, "frac_live_rule_fires": fired}
+    cut = float((cut_step < book.stops - 1).mean())
+    tc.log(
+        f"gate: {bad} mismatches over {len(keep)} rows (live rule + zero-parameter cut); "
+        f"live rule exits early on {fired:.1%}, cut on {cut:.1%}"
+    )
+    return {
+        "rows": len(keep),
+        "mismatches": bad,
+        "examples": ex,
+        "frac_live_rule_fires": fired,
+        "frac_cut_fires": cut,
+    }
 
 
 def main() -> None:
@@ -203,9 +249,6 @@ def main() -> None:
     ap.add_argument("--in", dest="inp", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--paths", nargs="*", default=[str(p) for p in tc.DEFAULT_PATHS])
-    ap.add_argument(
-        "--stage1", default=None, help="stage-1 OOF file, for the score input (optional)"
-    )
     ap.add_argument("--models", default="linear,mlp16")
     ap.add_argument("--noise", type=int, default=10)
     ap.add_argument("--gate-only", action="store_true")
@@ -216,20 +259,15 @@ def main() -> None:
     bars = tc.load_bars(args.paths, STAGE)
     ax = tc.aux(bars)
     idx_of = {str(k): i for i, k in enumerate(bars.key.tolist())}
-    s1 = None
-    if args.stage1 and Path(args.stage1).exists():
-        s1 = {}
-        for line in Path(args.stage1).read_text().splitlines():
-            r = json.loads(line)
-            if r.get("score") is not None:
-                s1[r["key"]] = float(r["score"])
+    s1_names = sorted(k for k in rows[0] if k.startswith("s1_")) if rows else []
+    assert not any(tc.excluded(r["day"]) for r in rows)
     entry_rule = sorted({r["entry_rule"] for r in rows})
     tc.log(f"{len(rows)} stage-2 rows, entry rule {entry_rule}")
 
-    book, live_step, keep = build(bars, ax, rows, idx_of, s1)
+    book, live_step, cut_step, keep = build(bars, ax, rows, idx_of, s1_names)
     tc.log(f"book: {book.n_paths} positions, {book.n_steps} steps")
     out_dir = Path(args.out).parent
-    g = gate(bars, rows, idx_of, book, live_step, keep)
+    g = gate(bars, rows, idx_of, book, live_step, cut_step, keep)
     (out_dir / "stage3_gate.json").write_text(json.dumps(g, indent=1))
     if g["mismatches"]:
         sys.exit("stage 3 gate FAILED: simulated live exit differs from exit_fast; refusing to fit")
@@ -274,17 +312,22 @@ def main() -> None:
         "baselines": {
             "hold": summ(hold, "hold to the live flatten"),
             "live_rule": summ(live_step, "live exit: VWAP break + flatten"),
+            "first_below": summ(
+                cut_step, "zero-parameter cut: first minute the close is below entry"
+            ),
             "hindsight_best": summ(best, "hindsight-best exit (upper bound, not a policy)"),
         },
         "models": {},
     }
-    report["baselines"]["live_rule"]["diff_vs_hold"] = tc.day_cluster(
-        days[oof], (R[live_step] - R[hold])[oof]
-    )
+    bases = {"live_rule": live_step, "hold": hold, "first_below": cut_step}
+    for b in ("live_rule", "first_below"):
+        report["baselines"][b]["diff_vs_hold"] = tc.day_cluster(
+            days[oof], (R[bases[b]] - R[hold])[oof]
+        )
     for k, v in report["baselines"].items():
         tc.log(f"baseline {k}: {v['bp']:+.1f}bp +- {v['se_bp']:.1f}")
 
-    keep_cols = {"neg", "pos", *CLOCK} | {n for n in book.names if n.startswith("pnl_")}
+    keep_cols = {"neg", "pos", *CLOCK} | {n for n in book.names if n.startswith(("pnl_", "s1_"))}
     scr_cols = [c for c, n in enumerate(book.names) if n not in keep_cols]
     rep_path = out_dir / "stage3_report.json"
     choices = {}
@@ -293,7 +336,7 @@ def main() -> None:
             name,
             book,
             R,
-            live_step,
+            bases,
             days,
             months,
             fold_months,
@@ -302,7 +345,6 @@ def main() -> None:
             scr_cols,
             args.noise,
         )
-        real["diff_vs_hold"] = tc.day_cluster(days[oof], (R[ch] - R[hold])[oof])
         real["frac_cut"] = float(
             ((book.X[ch, book.names.index("neg")] > 0) & (ch < hold))[oof].mean()
         )
@@ -313,13 +355,10 @@ def main() -> None:
         choices[name] = ch
         rep_path.write_text(json.dumps(report, indent=1, ensure_ascii=False))
 
-    chosen = "live_rule"
-    for name in args.models.split(","):
-        r = report["models"][name]
-        d = r["diff_vs_base"]
-        if r["beats_noise_best_of_n"] and d["bp"] > 2 * d["se_bp"]:
-            chosen = name
-            break
+    # Pre-registered: noise best-of-N AND > 2 SE above live rule, hold AND the cut.
+    chosen = next(
+        (n for n in args.models.split(",") if tc.passes(report["models"][n])), "live_rule"
+    )
     report["chosen"] = chosen
     rep_path.write_text(json.dumps(report, indent=1, ensure_ascii=False))
     pick = choices.get(chosen, live_step)
@@ -349,6 +388,7 @@ def main() -> None:
                 "net": float(R[t]),
                 "net_live_rule": float(R[live_step[p]]),
                 "net_hold": float(R[hold[p]]),
+                "net_first_below": float(R[cut_step[p]]),
             }
             f.write(json.dumps(rec) + "\n")
     tc.log(f"chosen exit rule: {chosen}; wrote {len(keep)} rows -> {args.out}")

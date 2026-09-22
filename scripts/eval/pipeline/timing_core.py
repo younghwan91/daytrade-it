@@ -31,9 +31,10 @@ so training is weighted least-squares-style: each path's weight is the inverse
 of the reward variance of its daily-volatility quintile, estimated on the
 TRAINING fold only. Reported numbers are unweighted means.
 
-**Holdout.** `config.assert_no_holdout_labels` runs on the day set of every
-path file right after the lines are read; holdout lines are dropped by their
-`day` field before their bars are ever parsed.
+**Holdout and spent windows.** Lines for a forward-holdout day, a consumed
+window or stage 1's confirm range (`excluded`) are dropped by their `day`
+field before their bars are ever parsed, and `config.assert_no_holdout_labels`
+runs on the day set that remains.
 """
 
 from __future__ import annotations
@@ -80,6 +81,18 @@ DEFAULT_PATHS = (
     Path.home() / "git/daytrade-it-exitseq/data/eval/exitseq/paths_fresh.jsonl",
 )
 CACHE = REPO / "data/eval/pipeline/timing_cache"
+
+
+def unusable_ranges() -> list[tuple[str, str]]:
+    """Windows stages 2-3 do not touch at all: every consumed window (spent as
+    evidence; lead instruction: not even for fitting) and stage 1's confirm
+    range (read once by stage 1, so no longer independent evidence)."""
+    return [*config.consumed_ranges(), tuple(config.load()["stage1"]["confirm_range"])]
+
+
+def excluded(day: str) -> bool:
+    return config.is_holdout(day) or any(a <= day <= b for a, b in unusable_ranges())
+
 
 _DAY = re.compile(r'"day":\s*"(\d{4}-\d{2}-\d{2})"')
 
@@ -139,7 +152,9 @@ def _fingerprint(files) -> str:
     for f in files:
         st = Path(f).stat()
         h.update(f"{f}|{st.st_size}|{st.st_mtime_ns}".encode())
-    h.update(",".join(sorted(config.holdout_days())).encode())
+    h.update(
+        json.dumps([config.holdout_start(), config.consumed_ranges(), unusable_ranges()]).encode()
+    )
     return h.hexdigest()[:12]
 
 
@@ -156,10 +171,10 @@ def load_bars(files, stage: int) -> Bars:
         z = np.load(cache, allow_pickle=False)
         b = Bars(**{k: z[k] for k in z.files})
         config.assert_no_holdout_labels(set(b.day.tolist()), stage)
+        assert not any(excluded(d) for d in set(b.day.tolist()))
         log(f"bars cache {cache.name}: {b.n} paths")
         return b
 
-    held = config.holdout_days()
     cols = defaultdict(list)
     bars_parts = [[] for _ in range(6)]
     n_skip = 0
@@ -170,7 +185,7 @@ def load_bars(files, stage: int) -> Bars:
                 m = _DAY.search(line[:200])
                 if m is None:
                     continue
-                if m.group(1) in held:
+                if excluded(m.group(1)):
                     n_skip += 1
                     continue
                 r = json.loads(line)
@@ -188,8 +203,9 @@ def load_bars(files, stage: int) -> Bars:
                 cols["bstop"].append(off)
                 for k in range(6):
                     bars_parts[k].append(b[:, k])
-        log(f"read {f.name}: {len(cols['day'])} kept so far, {n_skip} holdout lines skipped")
+        log(f"read {f.name}: {len(cols['day'])} kept so far, {n_skip} excluded-day lines skipped")
     config.assert_no_holdout_labels(set(cols["day"]), stage)
+    assert not any(excluded(d) for d in set(cols["day"]))
     cat = [np.concatenate(p) for p in bars_parts]
     b = Bars(
         day=np.asarray(cols["day"]),
@@ -736,7 +752,7 @@ def evaluate(
     name: str,
     book: Book,
     R: np.ndarray,
-    base: np.ndarray,
+    bases: dict[str, np.ndarray],
     days: np.ndarray,
     months: np.ndarray,
     fold_months: list[str],
@@ -744,30 +760,39 @@ def evaluate(
     weights,
     scr_cols: list[int],
     n_noise: int,
-    on_noise=None,
 ) -> tuple[dict, np.ndarray]:
     """One candidate beside its shuffle-noise best-of-N, all out-of-fold.
 
-    `base` is the baseline's stop step per path (same population, same cost);
-    every number is also reported as a paired, day-clustered difference to it.
+    `bases` maps each baseline to its stop step per path (same population, same
+    cost); the candidate is reported as a paired, day-clustered difference to
+    every one. Noise is kept as absolute bp, so "beats noise" does not depend
+    on which baseline it is read against. Both the deterministic policy (stop
+    at the first step with logit > 0) and the stochastic one it was trained as
+    (exact expected net) are scored, each against its own noise.
     """
     oof = np.isin(months, fold_months)
+    d = days[oof]
     t0 = time.time()
     ch, ex = run_folds(book, book.X, R, weights, months, fold_months, spec, seed=0)
-    diff = R[ch][oof] - R[base][oof]
-    real = day_cluster(days[oof], R[ch][oof]) | {
-        "diff_vs_base": day_cluster(days[oof], diff),
-        "stochastic": day_cluster(days[oof], ex[oof]),
-        "stochastic_diff_vs_base": day_cluster(days[oof], ex[oof] - R[base][oof]),
-        "mean_minutes_vs_base": float((book.minute[ch] - book.minute[base])[oof].mean()),
-        "frac_same_as_base": float((ch == base)[oof].mean()),
+    real = {
+        "det": day_cluster(d, R[ch][oof]),
+        "stoch": day_cluster(d, ex[oof]),
+        "det_vs": {b: day_cluster(d, (R[ch] - R[st])[oof]) for b, st in bases.items()},
+        "stoch_vs": {b: day_cluster(d, ex[oof] - R[st][oof]) for b, st in bases.items()},
+        "minutes_vs": {
+            b: float((book.minute[ch] - book.minute[st])[oof].mean()) for b, st in bases.items()
+        },
+        "same_as": {b: float((ch == st)[oof].mean()) for b, st in bases.items()},
         "seconds": round(time.time() - t0),
     }
     log(
-        f"{name}: det {real['bp']:+.1f}bp  diff {real['diff_vs_base']['bp']:+.1f} "
-        f"+- {real['diff_vs_base']['se_bp']:.1f}  dmin {real['mean_minutes_vs_base']:+.0f}  "
-        f"same {real['frac_same_as_base']:.2f} | stoch diff {real['stochastic_diff_vs_base']['bp']:+.1f} "
-        f"+- {real['stochastic_diff_vs_base']['se_bp']:.1f}  {real['seconds']}s"
+        f"{name}: det {real['det']['bp']:+.1f}bp stoch {real['stoch']['bp']:+.1f}bp | "
+        + "  ".join(
+            f"vs {b} {real['det_vs'][b]['bp']:+.1f}+-{real['det_vs'][b]['se_bp']:.1f}"
+            f" (same {real['same_as'][b]:.2f}, dmin {real['minutes_vs'][b]:+.0f})"
+            for b in bases
+        )
+        + f"  {real['seconds']}s"
     )
     noise, noise_st = [], []
     for s in range(1, n_noise + 1):
@@ -775,31 +800,28 @@ def evaluate(
         Xn = scramble_X(book, donor, scr_cols)
         chn, exn = run_folds(book, Xn, R, weights, months, fold_months, spec, seed=s)
         del Xn
-        noise.append(1e4 * float((R[chn][oof] - R[base][oof]).mean()))
-        noise_st.append(1e4 * float((exn[oof] - R[base][oof]).mean()))
-        log(
-            f"  {name} noise {s}/{n_noise}: det diff {noise[-1]:+.1f}bp  stoch diff {noise_st[-1]:+.1f}bp"
-        )
-        if on_noise:
-            on_noise(noise)
-    nz = np.asarray(noise) if noise else np.full(1, np.nan)
-    real["noise_diff_bp"] = {
-        "n": len(noise),
-        "mean": float(np.mean(nz)),
-        "p90": float(np.quantile(nz, 0.9)),
-        "max": float(np.max(nz)),
-        "all": noise,
-    }
-    real["beats_noise_best_of_n"] = bool(noise) and real["diff_vs_base"]["bp"] > float(np.max(nz))
-    ns = np.asarray(noise_st) if noise_st else np.full(1, np.nan)
-    real["stochastic_noise_diff_bp"] = {
-        "n": len(noise_st),
-        "mean": float(np.mean(ns)),
-        "p90": float(np.quantile(ns, 0.9)),
-        "max": float(np.max(ns)),
-        "all": noise_st,
-    }
-    real["stochastic_beats_noise_best_of_n"] = bool(noise_st) and real["stochastic_diff_vs_base"][
-        "bp"
-    ] > float(np.max(ns))
+        noise.append(1e4 * float(R[chn][oof].mean()))
+        noise_st.append(1e4 * float(exn[oof].mean()))
+        log(f"  {name} noise {s}/{n_noise}: det {noise[-1]:+.1f}bp  stoch {noise_st[-1]:+.1f}bp")
+    for key, arr in (("noise_det_bp", noise), ("noise_stoch_bp", noise_st)):
+        a = np.asarray(arr) if arr else np.full(1, np.nan)
+        real[key] = {
+            "n": len(arr),
+            "mean": float(np.mean(a)),
+            "p90": float(np.quantile(a, 0.9)),
+            "max": float(np.max(a)),
+            "all": arr,
+        }
+    real["det_beats_noise"] = bool(noise) and real["det"]["bp"] > real["noise_det_bp"]["max"]
+    real["stoch_beats_noise"] = (
+        bool(noise_st) and real["stoch"]["bp"] > real["noise_stoch_bp"]["max"]
+    )
     return real, ch
+
+
+def passes(real: dict) -> bool:
+    """Pre-registered: the deterministic policy beats its noise best-of-N AND is
+    more than 2 SE above EVERY baseline."""
+    return real["det_beats_noise"] and all(
+        v["bp"] > 2 * v["se_bp"] for v in real["det_vs"].values()
+    )
