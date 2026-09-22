@@ -375,4 +375,6 @@ The selection statistic is `net.mean()` — mean realised KRW per trade, on the 
 | `data/eval/rlnews/seqexit_confirm.json` | the one-time confirm pass, policy tables, verdicts, daily series |
 | `data/eval/rlnews/seqexit_compare.json` | both selectors, both grids, all seven folds |
 
-Run in a worktree on simnode. kr_quant read-only, zero API spend, nothing touched on the trader machine.
+`data/` is gitignored, as it is for every study here, so the four JSON artifacts live in the worktree `~/git/daytrade-it-exitseq` on simnode rather than in the branch. Only the scripts and this document are committed; the scripts regenerate the JSON from `paths_prior.jsonl` unattended, and `seqexit_search.py --confirm-only` reproduces the confirm pass in minutes from the cached fixed grid.
+
+Run in a worktree on simnode. kr_quant read-only, zero API spend, nothing touched on the trader machine, on `~/git/daytrade-it` there, or on any running daemon or backfill.
