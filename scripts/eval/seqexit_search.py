@@ -279,6 +279,14 @@ def main() -> None:  # noqa: PLR0915
         action="store_true",
         help="score the frozen confirm slice. Left off until the search is finished.",
     )
+    ap.add_argument(
+        "--confirm-only",
+        action="store_true",
+        help="skip the folds and the scrambles and score only the frozen slice, reusing "
+        "the search already published. The confirm policy is fit on the whole search "
+        "window and does not depend on either, so re-running them would burn an hour "
+        "to reproduce numbers that are already recorded.",
+    )
     args = ap.parse_args()
 
     rows = [json.loads(line) for line in args.paths.read_text().splitlines() if line]
@@ -357,7 +365,7 @@ def main() -> None:  # noqa: PLR0915
 
         # ---- monthly time-ordered folds inside the search window ----------
         fold_rows, cand_net, cand_days_arr, fixed_net_oos = [], [], [], []
-        for m in fold_months:
+        for m in [] if args.confirm_only else fold_months:
             tr = is_search & np.array([d[:7] < m for d in book.day.tolist()])
             ev = is_search & np.array([d[:7] == m for d in book.day.tolist()])
             act, tr_val, n_ev = ascend(
@@ -393,35 +401,33 @@ def main() -> None:  # noqa: PLR0915
                 flush=True,
             )
 
-        oos = is_search & np.array([d[:7] in fold_months for d in book.day.tolist()])
-        seq_oos = np.concatenate(cand_net)
-        seq_oos_days = np.concatenate(cand_days_arr)
-        fixed_oos = np.concatenate(fixed_net_oos)
-
-        search_block = {
-            "folds": fold_rows,
-            "pooled": {
-                "seq": summarise(seq_oos, seq_oos_days),
-                "fixed": summarise(fixed_oos, book.day[oos]),
+        search_block = {"folds": fold_rows}
+        if fold_rows:
+            oos = is_search & np.array([d[:7] in fold_months for d in book.day.tolist()])
+            search_block["pooled"] = {
+                "seq": summarise(np.concatenate(cand_net), np.concatenate(cand_days_arr)),
+                "fixed": summarise(np.concatenate(fixed_net_oos), book.day[oos]),
                 "live": summarise(live_net[oos], book.day[oos]),
                 "hold": summarise(hold_net[oos], book.day[oos]),
-            },
-        }
-        print(
-            f"  pooled search-OOS ({int(oos.sum())} trades):"
-            f" seq {search_block['pooled']['seq']['mean_bp']:+.1f} bp,"
-            f" fixed {search_block['pooled']['fixed']['mean_bp']:+.1f},"
-            f" live {search_block['pooled']['live']['mean_bp']:+.1f},"
-            f" hold {search_block['pooled']['hold']['mean_bp']:+.1f}"
-        )
+            }
+            print(
+                f"  pooled search-OOS ({int(oos.sum())} trades):"
+                f" seq {search_block['pooled']['seq']['mean_bp']:+.1f} bp,"
+                f" fixed {search_block['pooled']['fixed']['mean_bp']:+.1f},"
+                f" live {search_block['pooled']['live']['mean_bp']:+.1f},"
+                f" hold {search_block['pooled']['hold']['mean_bp']:+.1f}"
+            )
 
         # ---- shuffled-feature null, on the inner holdout ------------------
         inner_tr = is_search & np.array([d[:7] < inner_test_month for d in book.day.tolist()])
         inner_ev = is_search & np.array([d[:7] == inner_test_month for d in book.day.tolist()])
-        act_real, real_train, _ = ascend(
-            sim_full, inner_tr, np.random.default_rng(args.seed), args.restarts
-        )
-        real_inner = evaluate(sim_full, act_real, inner_ev)["mean_bp"]
+        shuffle_block: dict = {}
+        act_real, real_train, real_inner = None, float("nan"), float("nan")
+        if not args.confirm_only:
+            act_real, real_train, _ = ascend(
+                sim_full, inner_tr, np.random.default_rng(args.seed), args.restarts
+            )
+            real_inner = evaluate(sim_full, act_real, inner_ev)["mean_bp"]
         print(
             f"  inner holdout {inner_test_month}: real train {real_train / NOTIONAL * 1e4:+.1f} bp,"
             f" test {real_inner:+.1f} bp;  {args.shuffles} scrambles ...",
@@ -429,7 +435,7 @@ def main() -> None:  # noqa: PLR0915
         )
 
         sh_train, sh_test = [], []
-        for rep in range(args.shuffles):
+        for rep in range(0 if args.confirm_only else args.shuffles):
             # ONE scramble of the whole book per repeat, so the policy is fit
             # and tested against the same scrambled world -- the coherent null.
             # Scrambling train and test separately would test a policy on
@@ -444,33 +450,38 @@ def main() -> None:  # noqa: PLR0915
                 print(
                     f"    scramble {rep + 1}/{args.shuffles}  {time.time() - t0:.0f}s", flush=True
                 )
-        shuffle_block = {
-            "n": args.shuffles,
-            "real_train_bp": float(real_train / NOTIONAL * 1e4),
-            "real_test_bp": real_inner,
-            "shuffled_train": {
-                "mean": float(np.mean(sh_train)),
-                "p90": float(np.quantile(sh_train, 0.9)),
-                "max": float(np.max(sh_train)),
-            },
-            "shuffled_test": {
-                "mean": float(np.mean(sh_test)),
-                "p90": float(np.quantile(sh_test, 0.9)),
-                "max": float(np.max(sh_test)),
-            },
-            "real_beats_shuffled_max_train": bool(real_train / NOTIONAL * 1e4 > np.max(sh_train)),
-            "real_beats_shuffled_p90_test": bool(real_inner > np.quantile(sh_test, 0.9)),
-        }
-        print(
-            f"  shuffle premium: real train {shuffle_block['real_train_bp']:+.1f} vs"
-            f" noise mean/p90/max {shuffle_block['shuffled_train']['mean']:+.1f}/"
-            f"{shuffle_block['shuffled_train']['p90']:+.1f}/"
-            f"{shuffle_block['shuffled_train']['max']:+.1f};"
-            f"  real test {real_inner:+.1f} vs"
-            f" {shuffle_block['shuffled_test']['mean']:+.1f}/"
-            f"{shuffle_block['shuffled_test']['p90']:+.1f}/"
-            f"{shuffle_block['shuffled_test']['max']:+.1f}"
-        )
+        if not sh_train:
+            shuffle_block = {"n": 0, "skipped": "confirm_only"}
+        else:
+            shuffle_block = {
+                "n": args.shuffles,
+                "real_train_bp": float(real_train / NOTIONAL * 1e4),
+                "real_test_bp": real_inner,
+                "shuffled_train": {
+                    "mean": float(np.mean(sh_train)),
+                    "p90": float(np.quantile(sh_train, 0.9)),
+                    "max": float(np.max(sh_train)),
+                },
+                "shuffled_test": {
+                    "mean": float(np.mean(sh_test)),
+                    "p90": float(np.quantile(sh_test, 0.9)),
+                    "max": float(np.max(sh_test)),
+                },
+                "real_beats_shuffled_max_train": bool(
+                    real_train / NOTIONAL * 1e4 > np.max(sh_train)
+                ),
+                "real_beats_shuffled_p90_test": bool(real_inner > np.quantile(sh_test, 0.9)),
+            }
+            print(
+                f"  shuffle premium: real train {shuffle_block['real_train_bp']:+.1f} vs"
+                f" noise mean/p90/max {shuffle_block['shuffled_train']['mean']:+.1f}/"
+                f"{shuffle_block['shuffled_train']['p90']:+.1f}/"
+                f"{shuffle_block['shuffled_train']['max']:+.1f};"
+                f"  real test {real_inner:+.1f} vs"
+                f" {shuffle_block['shuffled_test']['mean']:+.1f}/"
+                f"{shuffle_block['shuffled_test']['p90']:+.1f}/"
+                f"{shuffle_block['shuffled_test']['max']:+.1f}"
+            )
 
         arm_block = {
             "n_states": lat.n_states,
@@ -482,7 +493,7 @@ def main() -> None:  # noqa: PLR0915
         }
 
         # ---- the frozen confirm slice, fit once on the whole search window --
-        if args.confirm:
+        if args.confirm or args.confirm_only:
             act_final, final_train, _ = ascend(
                 sim_full, is_search, np.random.default_rng(args.seed), args.restarts
             )

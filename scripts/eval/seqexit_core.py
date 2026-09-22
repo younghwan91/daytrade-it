@@ -424,15 +424,19 @@ class Sim:
         self.actionable = np.union1d(self.cut_states, self.add_states)
 
     def visits(self) -> tuple[np.ndarray, np.ndarray]:
-        """(steps, distinct paths) per state, over legal positions only."""
+        """(steps, distinct paths) per state, over legal positions only.
+
+        Distinct PATHS is the number that matters, not steps: a position sits in
+        one state for many consecutive minutes, so a state with 50,000 step
+        visits may be 200 trades seen 250 times each. Reporting steps alone
+        would make every cell look well-sampled.
+        """
         n = self.lat.n_states
         legal = self.cut_legal | self.add_legal
         steps = np.bincount(self.state[legal], minlength=n)
         path_of = np.repeat(np.arange(self.book.n_paths), self.book.stop - self.book.starts)
-        seen = {s: set() for s in range(n)}
-        for s, p in zip(self.state[legal], path_of[legal], strict=True):
-            seen[s].add(int(p))
-        return steps, np.array([len(seen[s]) for s in range(n)])
+        pairs = np.unique(self.state[legal].astype(np.int64) * self.book.n_paths + path_of[legal])
+        return steps, np.bincount((pairs // self.book.n_paths).astype(np.int64), minlength=n)
 
     def run(self, act: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """(net KRW per path, exit step index, add step index or -1)."""
