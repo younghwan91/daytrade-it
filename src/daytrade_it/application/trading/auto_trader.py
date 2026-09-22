@@ -124,7 +124,9 @@ class TradingLimits:
     #: None 이면 끔.
     stall_exit_min_gain: Decimal | None = None
     stall_exit_minutes: int = 5
-    add_on_min_gain: Decimal | None = Decimal("0.01")
+    #: 불타기 끔(2026-09-23 사용자 지시). 두 책에서 모두 보유보다 나빴다:
+    #: -63.0 vs -35.1 bp, -81.9 vs -50.6 bp (feat/rl-exit-seq).
+    add_on_min_gain: Decimal | None = None
     add_on_price_band: Decimal = Decimal("0.03")
     #: 1,000,000 KRW, user-approved 2026-09-15 for pyramiding. Caps add-ons
     #: (limit value of entries + add-ons not yet exited) and sets the
