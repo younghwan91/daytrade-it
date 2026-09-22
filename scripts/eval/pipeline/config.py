@@ -59,6 +59,16 @@ def consumed_ranges() -> list[tuple[str, str]]:
     return [tuple(w["range"]) for w in load().get("consumed_windows", [])]
 
 
+def price_path_files() -> list[Path]:
+    """The stage 2-3 price-path books, in date order. Raises if one is missing."""
+    books = sorted(load()["price_paths"]["books"], key=lambda b: b["range"][0])
+    files = [Path(b["file"]) for b in books]
+    missing = [str(f) for f in files if not f.exists()]
+    if missing:
+        raise FileNotFoundError(f"price-path book(s) missing: {missing} (see pipeline_config.json)")
+    return files
+
+
 def assert_no_holdout_labels(days: Iterable[str], stage: int) -> None:
     """Raise if a stage before 4 is about to read outcomes for a holdout day.
 

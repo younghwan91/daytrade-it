@@ -74,3 +74,12 @@ def test_stage4_waits_for_30_eligible_forward_days() -> None:
     }
     many = stage4_status([f"2026-10-{d:02d}" for d in range(1, 31)])
     assert many["ready"] and many["eligible"] == 30
+
+
+def test_price_path_books_are_contiguous_and_stop_before_the_holdout() -> None:
+    books = sorted(load()["price_paths"]["books"], key=lambda b: b["range"][0])
+    assert [b["name"] for b in books] == ["prior", "fresh"]
+    assert books[0]["range"][0] <= load()["stage1"]["train_range"][0]
+    for a, b in zip(books, books[1:], strict=False):
+        assert a["range"][1] < b["range"][0]
+    assert all(b["range"][1] < holdout_start() for b in books)
