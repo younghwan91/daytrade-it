@@ -31,10 +31,12 @@ so training is weighted least-squares-style: each path's weight is the inverse
 of the reward variance of its daily-volatility quintile, estimated on the
 TRAINING fold only. Reported numbers are unweighted means.
 
-**Holdout and spent windows.** Lines for a forward-holdout day, a consumed
-window or stage 1's confirm range (`excluded`) are dropped by their `day`
-field before their bars are ever parsed, and `config.assert_no_holdout_labels`
-runs on the day set that remains.
+**Holdout and spent windows.** Lines for a forward-holdout day are dropped by
+their `day` field before their bars are ever parsed, and
+`config.assert_no_holdout_labels` runs on the day set that remains. Consumed
+windows and stage 1's confirm range are fitted on but never cited:
+`evidence_day` marks what a reported number may rest on, and every stage
+reports its evidence set and its all-months set separately.
 """
 
 from __future__ import annotations
@@ -76,22 +78,28 @@ SIGMA_FLOOR = 0.0015
 DVOL_WINDOW = 60
 DVOL_FLOOR = 0.005
 
-DEFAULT_PATHS = (
-    Path.home() / "git/daytrade-it-exitseq/data/eval/exitseq/paths_prior.jsonl",
-    Path.home() / "git/daytrade-it-exitseq/data/eval/exitseq/paths_fresh.jsonl",
-)
 CACHE = REPO / "data/eval/pipeline/timing_cache"
 
 
-def unusable_ranges() -> list[tuple[str, str]]:
-    """Windows stages 2-3 do not touch at all: every consumed window (spent as
-    evidence; lead instruction: not even for fitting) and stage 1's confirm
-    range (read once by stage 1, so no longer independent evidence)."""
+def price_paths() -> list[Path]:
+    """The stage 2-3 price-path books, from the shared config."""
+    return config.price_path_files()
+
+
+def spent_ranges() -> list[tuple[str, str]]:
+    """Windows that may be FITTED on but never cited: every consumed window and
+    stage 1's confirm range (read once by stage 1)."""
     return [*config.consumed_ranges(), tuple(config.load()["stage1"]["confirm_range"])]
 
 
 def excluded(day: str) -> bool:
-    return config.is_holdout(day) or any(a <= day <= b for a, b in unusable_ranges())
+    """Never loaded at all: the forward holdout."""
+    return config.is_holdout(day)
+
+
+def evidence_day(day: str) -> bool:
+    """A day whose out-of-fold result may be cited as evidence."""
+    return not excluded(day) and not any(a <= day <= b for a, b in spent_ranges())
 
 
 _DAY = re.compile(r'"day":\s*"(\d{4}-\d{2}-\d{2})"')
@@ -152,9 +160,7 @@ def _fingerprint(files) -> str:
     for f in files:
         st = Path(f).stat()
         h.update(f"{f}|{st.st_size}|{st.st_mtime_ns}".encode())
-    h.update(
-        json.dumps([config.holdout_start(), config.consumed_ranges(), unusable_ranges()]).encode()
-    )
+    h.update(json.dumps([config.holdout_start(), "v2"]).encode())
     return h.hexdigest()[:12]
 
 
@@ -760,68 +766,166 @@ def evaluate(
     weights,
     scr_cols: list[int],
     n_noise: int,
+    masks: dict[str, np.ndarray],
 ) -> tuple[dict, np.ndarray]:
     """One candidate beside its shuffle-noise best-of-N, all out-of-fold.
 
     `bases` maps each baseline to its stop step per path (same population, same
     cost); the candidate is reported as a paired, day-clustered difference to
-    every one. Noise is kept as absolute bp, so "beats noise" does not depend
-    on which baseline it is read against. Both the deterministic policy (stop
-    at the first step with logit > 0) and the stochastic one it was trained as
-    (exact expected net) are scored, each against its own noise.
+    every one. `masks` are the reporting sets (e.g. evidence months only, and
+    every out-of-fold month including spent windows); each gets its own
+    numbers and its own noise. Noise is absolute bp, so "beats noise" does not
+    depend on the baseline. Deterministic (first step with logit > 0) and
+    stochastic (exact expected net) policies are both scored.
     """
-    oof = np.isin(months, fold_months)
-    d = days[oof]
     t0 = time.time()
     ch, ex = run_folds(book, book.X, R, weights, months, fold_months, spec, seed=0)
-    real = {
-        "det": day_cluster(d, R[ch][oof]),
-        "stoch": day_cluster(d, ex[oof]),
-        "det_vs": {b: day_cluster(d, (R[ch] - R[st])[oof]) for b, st in bases.items()},
-        "stoch_vs": {b: day_cluster(d, ex[oof] - R[st][oof]) for b, st in bases.items()},
-        "minutes_vs": {
-            b: float((book.minute[ch] - book.minute[st])[oof].mean()) for b, st in bases.items()
-        },
-        "same_as": {b: float((ch == st)[oof].mean()) for b, st in bases.items()},
-        "seconds": round(time.time() - t0),
-    }
-    log(
-        f"{name}: det {real['det']['bp']:+.1f}bp stoch {real['stoch']['bp']:+.1f}bp | "
-        + "  ".join(
-            f"vs {b} {real['det_vs'][b]['bp']:+.1f}+-{real['det_vs'][b]['se_bp']:.1f}"
-            f" (same {real['same_as'][b]:.2f}, dmin {real['minutes_vs'][b]:+.0f})"
-            for b in bases
+    out: dict = {"seconds": round(time.time() - t0)}
+    for mname, m in masks.items():
+        d = days[m]
+        if not m.any():
+            out[mname] = {"n": 0}
+            continue
+        out[mname] = {
+            "det": day_cluster(d, R[ch][m]),
+            "stoch": day_cluster(d, ex[m]),
+            "det_vs": {b: day_cluster(d, (R[ch] - R[st])[m]) for b, st in bases.items()},
+            "stoch_vs": {b: day_cluster(d, ex[m] - R[st][m]) for b, st in bases.items()},
+            "minutes_vs": {
+                b: float((book.minute[ch] - book.minute[st])[m].mean()) for b, st in bases.items()
+            },
+            "same_as": {b: float((ch == st)[m].mean()) for b, st in bases.items()},
+        }
+        r = out[mname]
+        log(
+            f"{name} [{mname}]: det {r['det']['bp']:+.1f}bp stoch {r['stoch']['bp']:+.1f}bp | "
+            + "  ".join(
+                f"vs {b} {r['det_vs'][b]['bp']:+.1f}+-{r['det_vs'][b]['se_bp']:.1f}"
+                f" (same {r['same_as'][b]:.2f}, dmin {r['minutes_vs'][b]:+.0f})"
+                for b in bases
+            )
         )
-        + f"  {real['seconds']}s"
-    )
-    noise, noise_st = [], []
+    noise = {k: [] for k in masks}
+    noise_st = {k: [] for k in masks}
     for s in range(1, n_noise + 1):
         donor = within_day_donors(days, seed=1000 + s)
         Xn = scramble_X(book, donor, scr_cols)
         chn, exn = run_folds(book, Xn, R, weights, months, fold_months, spec, seed=s)
         del Xn
-        noise.append(1e4 * float(R[chn][oof].mean()))
-        noise_st.append(1e4 * float(exn[oof].mean()))
-        log(f"  {name} noise {s}/{n_noise}: det {noise[-1]:+.1f}bp  stoch {noise_st[-1]:+.1f}bp")
-    for key, arr in (("noise_det_bp", noise), ("noise_stoch_bp", noise_st)):
-        a = np.asarray(arr) if arr else np.full(1, np.nan)
-        real[key] = {
-            "n": len(arr),
-            "mean": float(np.mean(a)),
-            "p90": float(np.quantile(a, 0.9)),
-            "max": float(np.max(a)),
-            "all": arr,
+        for mname, m in masks.items():
+            if m.any():
+                noise[mname].append(1e4 * float(R[chn][m].mean()))
+                noise_st[mname].append(1e4 * float(exn[m].mean()))
+        log(
+            f"  {name} noise {s}/{n_noise}: "
+            + "  ".join(
+                f"[{k}] det {noise[k][-1]:+.1f} stoch {noise_st[k][-1]:+.1f}"
+                for k in masks
+                if noise[k]
+            )
+        )
+    for mname in masks:
+        r = out[mname]
+        if not r.get("det"):
+            continue
+        for key, arr in (("noise_det_bp", noise[mname]), ("noise_stoch_bp", noise_st[mname])):
+            a = np.asarray(arr) if arr else np.full(1, np.nan)
+            r[key] = {
+                "n": len(arr),
+                "mean": float(np.mean(a)),
+                "p90": float(np.quantile(a, 0.9)),
+                "max": float(np.max(a)),
+                "all": arr,
+            }
+        r["det_beats_noise"] = bool(noise[mname]) and r["det"]["bp"] > r["noise_det_bp"]["max"]
+        r["stoch_beats_noise"] = (
+            bool(noise_st[mname]) and r["stoch"]["bp"] > r["noise_stoch_bp"]["max"]
+        )
+    return out, ch
+
+
+def passes(real: dict, mask: str = "evidence") -> bool:
+    """Pre-registered: on the EVIDENCE set, the deterministic policy beats its
+    noise best-of-N AND is more than 2 SE above EVERY baseline."""
+    r = real.get(mask, {})
+    return bool(r.get("det_beats_noise")) and all(
+        v["bp"] > 2 * v["se_bp"] for v in r["det_vs"].values()
+    )
+
+
+# ------------------------------------------------------------------ win probability
+
+
+def fit_logistic(X: np.ndarray, y: np.ndarray, l2: float = 1.0, iters: int = 30) -> np.ndarray:
+    """L2 logistic regression by Newton steps; returns [w..., b]. Its fitted
+    probabilities are its calibration -- nothing is re-scaled afterwards."""
+    Xb = np.hstack([X.astype(np.float64), np.ones((X.shape[0], 1))])
+    w = np.zeros(Xb.shape[1])
+    reg = np.full(Xb.shape[1], l2)
+    reg[-1] = 0.0
+    for _ in range(iters):
+        p = 1.0 / (1.0 + np.exp(-np.clip(Xb @ w, -30, 30)))
+        g = Xb.T @ (p - y) + reg * w
+        H = (Xb * (p * (1 - p))[:, None]).T @ Xb + np.diag(reg)
+        step = np.linalg.solve(H, g)
+        w -= step
+        if np.abs(step).max() < 1e-8:
+            break
+    return w
+
+
+def predict_logistic(w: np.ndarray, X: np.ndarray) -> np.ndarray:
+    return 1.0 / (1.0 + np.exp(-np.clip(X.astype(np.float64) @ w[:-1] + w[-1], -30, 30)))
+
+
+def oof_prob(
+    X: np.ndarray, y: np.ndarray, months: np.ndarray, fold_months: list[str]
+) -> np.ndarray:
+    """Expanding-window out-of-fold P(win): month m from a fit on months < m."""
+    p = np.full(y.size, np.nan)
+    for m in fold_months:
+        tr, te = months < m, months == m
+        if tr.sum() < 50 or not te.any():
+            continue
+        p[te] = predict_logistic(fit_logistic(X[tr], y[tr]), X[te])
+    return p
+
+
+RELIABILITY_EDGES = np.linspace(0, 1, 11)
+
+
+def reliability(p: np.ndarray, y: np.ndarray, edges: np.ndarray = RELIABILITY_EDGES) -> list[dict]:
+    out = []
+    for lo, hi in zip(edges[:-1], edges[1:], strict=True):
+        m = (p >= lo) & (p < hi) if hi < 1 else (p >= lo)
+        if m.any():
+            out.append(
+                {
+                    "bin": [round(float(lo), 2), round(float(hi), 2)],
+                    "n": int(m.sum()),
+                    "mean_pred": float(p[m].mean()),
+                    "hit_rate": float(y[m].mean()),
+                }
+            )
+    return out
+
+
+def trade_curve(p: np.ndarray, net: np.ndarray, days: np.ndarray, grid) -> list[dict]:
+    """For each threshold: trade rate, net per trade (bp, day-clustered SE), hit
+    rate, and net per CANDIDATE (abstain = 0), which is what a threshold is chosen on."""
+    out = []
+    for t in grid:
+        m = p >= t
+        row = {
+            "threshold": round(float(t), 3),
+            "trade_rate": float(m.mean()),
+            "n": int(m.sum()),
+            "net_per_candidate_bp": 1e4 * float(np.where(m, net, 0.0).mean()),
         }
-    real["det_beats_noise"] = bool(noise) and real["det"]["bp"] > real["noise_det_bp"]["max"]
-    real["stoch_beats_noise"] = (
-        bool(noise_st) and real["stoch"]["bp"] > real["noise_stoch_bp"]["max"]
-    )
-    return real, ch
-
-
-def passes(real: dict) -> bool:
-    """Pre-registered: the deterministic policy beats its noise best-of-N AND is
-    more than 2 SE above EVERY baseline."""
-    return real["det_beats_noise"] and all(
-        v["bp"] > 2 * v["se_bp"] for v in real["det_vs"].values()
-    )
+        if m.sum() >= 2:
+            row |= {
+                "net_per_trade": day_cluster(days[m], net[m]),
+                "hit_rate": float((net[m] > 0).mean()),
+            }
+        out.append(row)
+    return out

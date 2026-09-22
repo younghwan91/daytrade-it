@@ -1,0 +1,29 @@
+{
+ "_what": "Stages 2-3 pre-registration, frozen BEFORE any stage-2/3 run on the full stage-1-scored population (the earlier 2026-01..05-only runs used immediate entry for selection and never chose a score or a threshold).",
+ "frozen_at": "2026-09-23",
+ "population": "every price-path row whose key has a stage-1 out-of-fold score (splits selection, confirm, post_train); news before live entry_end",
+ "folds": "expanding window by calendar month; the first 2 scored months (2025-11, 2025-12) are burn-in",
+ "search_months": ["2026-01", "2026-02"],
+ "evidence_months": ["2026-03", "2026-04", "2026-05"],
+ "fit_only_months": "2026-06..2026-09-15: stage 1 confirm range and the consumed window. Fitted on (they are later than every evidence month, so under forward chaining they only train the final model) and reported as 'all months' beside the evidence numbers, never cited.",
+ "win_probability": {
+  "target": "net of costs.round_trip > 0 for the trade entered at the news minute and exited by the live rule",
+  "model": "L2 logistic regression (lambda 1), fitted on training months only; its probabilities are the calibration. Reliability curve reported out-of-fold.",
+  "candidates": {
+   "all": "the six stage-1 target scores + the entry state at the news minute",
+   "ret_n": "score_ret_n only",
+   "rr": "score_rr only",
+   "mfe_n": "score_mfe_n only (the stage-1 pre-registered score)"
+  },
+  "threshold_grid": "0.30, 0.31, ..., 0.80",
+  "choice": "the (candidate, threshold) with the highest out-of-fold net per CANDIDATE (abstain = 0) over search_months; ties -> higher threshold; if that maximum is <= 0 the rule is 'abstain always'",
+  "noise": "10 runs with the win-model inputs permuted within day (labels fixed), each re-making the same choice on search_months; real evidence net per candidate must exceed the best of the 10"
+ },
+ "timing_and_exit": {
+  "stage2": "learned stopping policies (linear, mlp16; fixed specs in stage2_entry.MODELS), forced entry by entry_end; baselines immediate, next_minute, last_candidate",
+  "stage3": "learned stopping policies (linear, mlp16); baselines live_rule, hold, first_below (zero-parameter cut)",
+  "noise": "10 within-day shuffle-noise runs each",
+  "pass_rule": "on evidence_months: deterministic policy beats its noise best-of-10 AND > 2 SE above every baseline",
+  "reported_sets": "evidence (all candidates), evidence_selected (win-probability rule), all_oof, all_oof_selected"
+ }
+}

@@ -248,7 +248,6 @@ def main() -> None:
     )
     ap.add_argument("--in", dest="inp", required=True)
     ap.add_argument("--out", required=True)
-    ap.add_argument("--paths", nargs="*", default=[str(p) for p in tc.DEFAULT_PATHS])
     ap.add_argument("--models", default="linear,mlp16")
     ap.add_argument("--noise", type=int, default=10)
     ap.add_argument("--gate-only", action="store_true")
@@ -257,7 +256,7 @@ def main() -> None:
 
     rows = [json.loads(line) for line in Path(args.inp).read_text().splitlines() if line]
     tc.config.assert_no_holdout_labels({r["day"] for r in rows}, STAGE)
-    bars = tc.load_bars(args.paths, STAGE)
+    bars = tc.load_bars(tc.price_paths(), STAGE)
     ax = tc.aux(bars)
     idx_of = {str(k): i for i, k in enumerate(bars.key.tolist())}
     s1_names = sorted(k for k in rows[0] if k.startswith("s1_")) if rows else []
@@ -283,6 +282,16 @@ def main() -> None:
     months = np.array([d[:7] for d in days])
     fold_months = sorted(set(months.tolist()))[BURN_IN_MONTHS:]
     oof = np.isin(months, fold_months)
+    # Stage 2 already marked which rows may be cited and which the win-probability
+    # rule would trade; stage 3 reports on the same four sets.
+    evidence = np.array([bool(rows[r]["evidence"]) for r in keep])
+    sel = np.array([bool(rows[r].get("selected")) for r in keep])
+    masks = {
+        "evidence": evidence,
+        "evidence_selected": evidence & sel,
+        "all_oof": oof,
+        "all_oof_selected": oof & sel,
+    }
     R = book.R
     hold = book.stops - 1
     best = np.array(
@@ -297,36 +306,44 @@ def main() -> None:
     def weights(train):
         return tc.wls_weights(dvol, R[hold], train)
 
-    def summ(step, label):
-        return tc.day_cluster(days[oof], R[step][oof]) | {"label": label}
+    def summ(step, label, m):
+        return tc.day_cluster(days[m], R[step][m]) | {"label": label}
 
     report = {
         "entry_rule": entry_rule,
         "positions": int(book.n_paths),
         "steps": int(book.n_steps),
         "oof_positions": int(oof.sum()),
+        "evidence_positions": int(evidence.sum()),
+        "selected_positions": int((evidence & sel).sum()),
         "oof_days": int(np.unique(days[oof]).size),
         "fold_months": fold_months,
         "gate": g,
         "features": list(book.names),
         "noise_seeds": args.noise,
-        "baselines": {
-            "hold": summ(hold, "hold to the live flatten"),
-            "live_rule": summ(live_step, "live exit: VWAP break + flatten"),
-            "first_below": summ(
-                cut_step, "zero-parameter cut: first minute the close is below entry"
-            ),
-            "hindsight_best": summ(best, "hindsight-best exit (upper bound, not a policy)"),
-        },
+        "baselines": {},
         "models": {},
     }
+    for mname, m in masks.items():
+        if m.sum() < 2:
+            continue
+        report["baselines"][mname] = {
+            "hold": summ(hold, "hold to the live flatten", m),
+            "live_rule": summ(live_step, "live exit: VWAP break + flatten", m),
+            "first_below": summ(
+                cut_step, "zero-parameter cut: first minute the close is below entry", m
+            ),
+            "hindsight_best": summ(best, "hindsight-best exit (upper bound, not a policy)", m),
+        }
     bases = {"live_rule": live_step, "hold": hold, "first_below": cut_step}
-    for b in ("live_rule", "first_below"):
-        report["baselines"][b]["diff_vs_hold"] = tc.day_cluster(
-            days[oof], (R[bases[b]] - R[hold])[oof]
+    for mname, bl in report["baselines"].items():
+        m = masks[mname]
+        for b in ("live_rule", "first_below"):
+            bl[b]["diff_vs_hold"] = tc.day_cluster(days[m], (R[bases[b]] - R[hold])[m])
+        tc.log(
+            f"baselines [{mname}] n={int(m.sum())} "
+            + "  ".join(f"{k} {v['bp']:+.1f}+-{v['se_bp']:.1f}" for k, v in bl.items())
         )
-    for k, v in report["baselines"].items():
-        tc.log(f"baseline {k}: {v['bp']:+.1f}bp +- {v['se_bp']:.1f}")
 
     keep_cols = {"neg", "pos", *CLOCK} | {n for n in book.names if n.startswith(("pnl_", "s1_"))}
     scr_cols = [c for c, n in enumerate(book.names) if n not in keep_cols]
@@ -345,13 +362,16 @@ def main() -> None:
             weights,
             scr_cols,
             args.noise,
+            masks,
         )
-        real["frac_cut"] = float(
-            ((book.X[ch, book.names.index("neg")] > 0) & (ch < hold))[oof].mean()
-        )
-        real["frac_take"] = float(
-            ((book.X[ch, book.names.index("pos")] > 0) & (ch < hold))[oof].mean()
-        )
+        for mname, m in masks.items():
+            if m.sum() >= 2:
+                real[mname]["frac_cut"] = float(
+                    ((book.X[ch, book.names.index("neg")] > 0) & (ch < hold))[m].mean()
+                )
+                real[mname]["frac_take"] = float(
+                    ((book.X[ch, book.names.index("pos")] > 0) & (ch < hold))[m].mean()
+                )
         report["models"][name] = real
         choices[name] = ch
         rep_path.write_text(json.dumps(report, indent=1, ensure_ascii=False))
@@ -367,6 +387,11 @@ def main() -> None:
         for p, r_i in enumerate(keep):
             r = rows[r_i]
             t = pick[p] if (oof[p] and pick[p] >= 0) else live_step[p]
+            extra_fields = {
+                k: rows[r_i][k]
+                for k in ("evidence", "search", "p_win", "selected", "win_model")
+                if k in rows[r_i]
+            }
             rec = {
                 k: r[k]
                 for k in (
@@ -381,6 +406,7 @@ def main() -> None:
                     "entry_cost",
                 )
             }
+            rec |= extra_fields
             rec |= {
                 "split": "oof" if oof[p] else "burnin",
                 "exit_rule": chosen if oof[p] else "live_rule",

@@ -33,8 +33,15 @@ split (out-of-fold scores, never in-sample) and all six target scores are state
 inputs; `--no-s1` keeps the population and withholds the scores (ablation).
 When it does not exist, the population is every path and the run says so.
 
-**Evidence window.** Days in the forward holdout, in a consumed window, or in
-stage 1's confirm range never enter (`timing_core.excluded`).
+**Evidence window.** Forward-holdout days never enter. Spent windows (consumed,
+stage 1's confirm range) are fitted on and reported under "all months", never
+as evidence. Search and evidence months, the win-probability candidates and the
+threshold rule are frozen in `PREREG` before any run.
+
+**Win probability.** Per candidate, a calibrated out-of-fold P(net > 0) of the
+immediate trade; a candidate is traded only when it clears the pre-registered
+threshold (abstain is the default), and the timing/exit numbers are reported
+on that selected set as well as on everyone.
 
 **Baselines.** Immediate (the recorded open print at the news minute) and
 next-minute (the next bar's open), so a gain that is only "skip the noisy open
@@ -96,7 +103,7 @@ BURN_IN_MONTHS = 2
 # ------------------------------------------------------------------ book
 
 
-def build(bars: tc.Bars, ax: dict, keep: np.ndarray, s1: dict | None):
+def build(bars: tc.Bars, ax: dict, keep: np.ndarray, s1: dict):
     """Entry stopping book over the paths `keep`, plus per-step live/hold rewards."""
     from exit_fast import barrier  # noqa: PLC0415
 
@@ -299,57 +306,78 @@ def gate(bars, book, extra, procs: int, cache: Path) -> dict:
     return out
 
 
+PREREG = tc.REPO / "docs/research/frozen/2026-09-23-stage23-prereg.json"
+WIN_GRID = np.round(np.arange(0.30, 0.8001, 0.01), 2)
+
+
+def win_inputs(book: tc.Book, which: str) -> np.ndarray:
+    X0 = book.X[book.starts]
+    if which == "all":
+        return X0
+    return X0[:, [book.names.index(f"s1_{which}")]]
+
+
+def choose_win_rule(Xs: dict, y, net, months, fold_months, search, evidence) -> dict:
+    """The pre-registered selection: OOF P(win) per candidate input set, then the
+    (candidate, threshold) with the best net per candidate on `search` months."""
+    probs = {k: tc.oof_prob(X, y, months, fold_months) for k, X in Xs.items()}
+    best = ("abstain", 1.01, 0.0)
+    for k, p in probs.items():
+        for t in WIN_GRID:
+            v = float(np.where(search & (p >= t), net, 0.0)[search].mean())
+            if v > best[2] or (v == best[2] and k == best[0] and t > best[1]):
+                best = (k, float(t), v)
+    k, t, v = best
+    p = probs.get(k, np.zeros(y.size))
+    sel = (p >= t) if k != "abstain" else np.zeros(y.size, bool)
+    return {
+        "probs": probs,
+        "model": k,
+        "threshold": t,
+        "search_net_per_candidate_bp": 1e4 * v,
+        "selected": sel,
+        "evidence_net_per_candidate_bp": 1e4 * float(np.where(sel, net, 0.0)[evidence].mean()),
+    }
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     ap.add_argument("--in", dest="inp", required=True)
     ap.add_argument("--out", required=True)
-    ap.add_argument("--paths", nargs="*", default=[str(p) for p in tc.DEFAULT_PATHS])
     ap.add_argument("--exit", choices=("live", "hold"), default="live")
     ap.add_argument("--models", default="linear,mlp16")
     ap.add_argument("--noise", type=int, default=10, help="shuffle-noise seeds, fixed in advance")
     ap.add_argument("--gate-procs", type=int, default=6)
     ap.add_argument("--gate-only", action="store_true")
+    ap.add_argument("--select-only", action="store_true", help="win-probability selection only")
     ap.add_argument("--limit-days", type=int, default=0, help="smoke runs: first N days only")
-    ap.add_argument(
-        "--no-s1",
-        action="store_true",
-        help="ablation: same population, stage-1 scores NOT given to the policy",
-    )
-    ap.add_argument("--tag", default="", help="suffix for report files (parallel ablation runs)")
+    ap.add_argument("--tag", default="", help="suffix for report files (parallel runs)")
     args = ap.parse_args()
+    prereg = json.loads(PREREG.read_text())
 
-    bars = tc.load_bars(args.paths, STAGE)
+    bars = tc.load_bars(tc.price_paths(), STAGE)
     ax = tc.aux(bars)
-    keep = np.arange(bars.n)
-    s1 = None
-    inp = Path(args.inp)
-    if inp.exists():
-        # Only stage 1's `selection` split: burn-in has no score, `confirm` was
-        # read once by stage 1, `post_train` lies in a consumed window. Scores
-        # are features (decision-time), so no label is read here.
-        scores = {}
-        with inp.open() as f:
-            for line in f:
-                r = json.loads(line)
-                if r.get("split") == "selection" and r.get("score") is not None:
-                    assert r["trained_through"] < r["day"], r["key"]
-                    scores[r["key"]] = [float(r[f"score_{t}"]) for t in S1_TARGETS]
-        keep = np.flatnonzero(np.isin(bars.key, list(scores)))
-        s1 = None if args.no_s1 else scores
-        selection = (
-            f"stage-1 selection-split pairs from {inp} ({len(scores)} scored, {keep.size} with paths); "
-            f"scores {'NOT ' if args.no_s1 else ''}used as inputs"
-        )
-    else:
-        selection = "all (stage-1 scores not present yet)"
+    # Stage-1 scores are decision-time features: no label is read from --in.
+    scores = {}
+    with Path(args.inp).open() as f:
+        for line in f:
+            r = json.loads(line)
+            if r.get("score") is None or tc.excluded(r["day"]):
+                continue
+            assert r["split"] in ("selection", "confirm", "post_train"), r["split"]
+            assert r["trained_through"] < r["day"], r["key"]
+            scores[r["key"]] = [float(r[f"score_{t}"]) for t in S1_TARGETS]
+    keep = np.flatnonzero(np.isin(bars.key, list(scores)))
     if args.limit_days:
-        days = sorted(set(bars.day[keep].tolist()))[: args.limit_days]
-        keep = keep[np.isin(bars.day[keep], days)]
-    tc.log(f"selection: {selection}; paths {keep.size}")
+        dd = sorted(set(bars.day[keep].tolist()))[: args.limit_days]
+        keep = keep[np.isin(bars.day[keep], dd)]
+    tc.log(
+        f"population: {keep.size} path rows with a stage-1 OOF score ({len(scores)} scored pairs)"
+    )
 
-    book, extra = build(bars, ax, keep, s1)
+    book, extra = build(bars, ax, keep, scores)
     tc.log(
         f"book: {book.n_paths} paths, {book.n_steps} steps, median {int(np.median(book.lens()))} per path"
     )
@@ -360,64 +388,133 @@ def main() -> None:
         sys.exit("stage 2 gate FAILED: simulated live exit differs from exit_fast; refusing to fit")
     if args.gate_only:
         return
-    ge = tc.grad_check()
-    tc.log(f"trainer grad check: max rel err {ge:.2e}")
-    if ge > 1e-5:
-        sys.exit("analytic stopping gradient disagrees with finite differences; refusing to fit")
 
     kept = extra["kept"]
     days = bars.day[kept]
     months = np.array([d[:7] for d in days])
-    um = sorted(set(months.tolist()))
-    fold_months = um[BURN_IN_MONTHS:]
-    R = extra["R_live"] if args.exit == "live" else extra["R_hold"]
-    dvol = np.nan_to_num(extra["dvol"], nan=np.nanmedian(extra["dvol"]))
-
-    def weights(train):
-        return tc.wls_weights(dvol, R[book.starts], train)
-
+    fold_months = sorted(set(months.tolist()))[BURN_IN_MONTHS:]
     oof = np.isin(months, fold_months)
+    ev_day = np.array([tc.evidence_day(d) for d in days])
+    search = np.isin(months, prereg["search_months"])
+    evidence = np.isin(months, prereg["evidence_months"]) & ev_day
+    assert not (search & evidence).any()
+    R = extra["R_live"] if args.exit == "live" else extra["R_hold"]
     first = book.starts
+    net0 = extra["R_live"][first]  # the win target is always immediate entry + live exit
+    y = (net0 > 0).astype(float)
+
+    # ---- win probability and the pre-registered selection -------------------
+    Xs = {k: win_inputs(book, k) for k in prereg["win_probability"]["candidates"]}
+    rule = choose_win_rule(Xs, y, net0, months, fold_months, search, evidence)
+    sel = rule["selected"]
+    p_ch = rule["probs"].get(rule["model"], np.full(y.size, np.nan))
+    win = {
+        "model": rule["model"],
+        "threshold": rule["threshold"],
+        "search_net_per_candidate_bp": rule["search_net_per_candidate_bp"],
+        "evidence_net_per_candidate_bp": rule["evidence_net_per_candidate_bp"],
+        "candidates": {},
+    }
+    for k, p in rule["probs"].items():
+        ok = ~np.isnan(p)
+        win["candidates"][k] = {
+            s_name: {
+                "reliability": tc.reliability(p[m], y[m]),
+                "trade_curve": tc.trade_curve(p[m], net0[m], days[m], WIN_GRID[::5]),
+            }
+            for s_name, m in (
+                ("search", search & ok),
+                ("evidence", evidence & ok),
+                ("all_oof", oof & ok),
+            )
+        }
+    tc.log(
+        f"win rule: {rule['model']} p>={rule['threshold']}  search {win['search_net_per_candidate_bp']:+.1f}bp/cand  "
+        f"evidence {win['evidence_net_per_candidate_bp']:+.1f}bp/cand, trade rate {sel[evidence].mean():.3f}"
+    )
+    noise = []
+    for s in range(1, args.noise + 1):
+        donor = tc.within_day_donors(days, seed=2000 + s)
+        rn = choose_win_rule(
+            {k: X[donor] for k, X in Xs.items()},
+            y,
+            net0,
+            months,
+            fold_months,
+            search,
+            evidence,
+        )
+        noise.append(rn["evidence_net_per_candidate_bp"])
+        tc.log(
+            f"  win noise {s}: {rn['model']} p>={rn['threshold']} evidence {noise[-1]:+.1f}bp/cand"
+        )
+    win["noise_evidence_net_per_candidate_bp"] = noise
+    win["beats_noise"] = bool(noise) and win["evidence_net_per_candidate_bp"] > max(noise)
+    for s_name, m in (("evidence", evidence), ("all_oof", oof)):
+        win[f"{s_name}_selected"] = {"trade_rate": float(sel[m].mean()), "n": int((sel & m).sum())}
+        if (sel & m).sum() >= 2:
+            win[f"{s_name}_selected"] |= {
+                "net_per_trade": tc.day_cluster(days[sel & m], net0[sel & m]),
+                "hit_rate": float(y[sel & m].mean()),
+            }
+    report = {
+        "population": int(book.n_paths),
+        "steps": int(book.n_steps),
+        "exit": args.exit,
+        "prereg": str(PREREG.relative_to(tc.REPO)),
+        "fold_months": fold_months,
+        "gate": g,
+        "features": list(book.names),
+        "win": win,
+        "noise_seeds": args.noise,
+        "models": {},
+    }
+    rep_path = out_dir / f"stage2_report{args.tag}.json"
+    rep_path.write_text(json.dumps(report, indent=1, ensure_ascii=False))
+
+    masks = {
+        "evidence": evidence,
+        "evidence_selected": evidence & sel,
+        "all_oof": oof,
+        "all_oof_selected": oof & sel,
+    }
+    second = np.minimum(book.starts + 1, book.stops - 1)
+    bases = {"immediate": first, "next_minute": second}
     best = np.array(
         [
             book.starts[p] + int(np.argmax(R[book.starts[p] : book.stops[p]]))
             for p in range(book.n_paths)
         ]
     )
-    report = {
-        "selection": selection,
-        "exit": args.exit,
-        "paths": int(book.n_paths),
-        "steps": int(book.n_steps),
-        "oof_paths": int(oof.sum()),
-        "oof_days": int(np.unique(days[oof]).size),
-        "fold_months": fold_months,
-        "gate": g,
-        "features": list(book.names),
-        "models": {},
-        "noise_seeds": args.noise,
-    }
+    report["baselines"] = {}
+    for mname, m in masks.items():
+        if m.sum() < 2:
+            continue
+        report["baselines"][mname] = {
+            "immediate": tc.day_cluster(days[m], R[first][m]),
+            "next_minute": tc.day_cluster(days[m], R[second][m]),
+            "last_candidate": tc.day_cluster(days[m], R[book.stops - 1][m]),
+            "hindsight_best": tc.day_cluster(days[m], R[best][m]),
+        }
+        tc.log(
+            f"baselines [{mname}] "
+            + "  ".join(
+                f"{k} {v['bp']:+.1f}+-{v['se_bp']:.1f}"
+                for k, v in report["baselines"][mname].items()
+            )
+        )
+    rep_path.write_text(json.dumps(report, indent=1, ensure_ascii=False))
+    if args.select_only:
+        return
 
-    def summ(step_idx, label):
-        return tc.day_cluster(days[oof], R[step_idx][oof]) | {"label": label}
+    ge = tc.grad_check()
+    tc.log(f"trainer grad check: max rel err {ge:.2e}")
+    if ge > 1e-5:
+        sys.exit("analytic stopping gradient disagrees with finite differences; refusing to fit")
+    dvol = np.nan_to_num(extra["dvol"], nan=np.nanmedian(extra["dvol"]))
 
-    # The recorded fill at the news minute is that minute's OPEN print -- for
-    # 09:00 news the opening auction, which a live limit order placed at
-    # 09:00:30 does not get. `next_minute` (the next bar's open) is the same
-    # "buy now" decision without that print, so a timing gain that is really
-    # just "avoid the open print" shows up against it and is not claimed.
-    second = np.minimum(book.starts + 1, book.stops - 1)
-    bases = {"immediate": first, "next_minute": second}
-    report["baselines"] = {
-        "immediate": summ(first, "buy at news minute (recorded open print)"),
-        "next_minute": summ(second, "buy at the next bar's open after the news minute"),
-        "last_candidate": summ(
-            book.stops - 1, "buy at the last candidate before entry_end (min exposure)"
-        ),
-        "hindsight_best": summ(best, "hindsight-best candidate (upper bound, not a policy)"),
-    }
-    for k, v in report["baselines"].items():
-        tc.log(f"baseline {k}: {v['bp']:+.1f}bp +- {v['se_bp']:.1f}")
+    def weights(train):
+        return tc.wls_weights(dvol, R[book.starts], train)
 
     clock_cols = [book.names.index(c) for c in CLOCK]
     scr_cols = [
@@ -425,7 +522,6 @@ def main() -> None:
         for k in range(len(book.names))
         if k not in clock_cols and not book.names[k].startswith("s1_")
     ]
-    rep_path = out_dir / f"stage2_report{args.tag}.json"
     at_open = np.array([int(bars.buy_minute[i]) == tc.OPEN_MINUTE for i in kept])
     choices = {}
     for name in args.models.split(","):
@@ -441,15 +537,14 @@ def main() -> None:
             weights,
             scr_cols,
             args.noise,
+            masks,
         )
-        # The two artefacts named by stage 1, separated: news acting at the 09:00
-        # open against news acting later in the session.
-        for grp, mask in (("news_at_0900", at_open), ("news_after_0900", ~at_open)):
-            sel = oof & mask
-            real[f"split_{grp}"] = {
-                "n": int(sel.sum()),
+        for grp, gm in (("news_at_0900", at_open), ("news_after_0900", ~at_open)):
+            m = evidence & gm
+            real[f"evidence_{grp}"] = {
+                "n": int(m.sum()),
                 **{
-                    f"det_vs_{b}": tc.day_cluster(days[sel], (R[ch] - R[st])[sel])
+                    f"det_vs_{b}": tc.day_cluster(days[m], (R[ch] - R[st])[m])
                     for b, st in bases.items()
                 },
             }
@@ -457,8 +552,6 @@ def main() -> None:
         choices[name] = ch
         rep_path.write_text(json.dumps(report, indent=1, ensure_ascii=False))
 
-    # Pre-registered hand-off: the first model (in --models order) that passes
-    # `tc.passes` (noise best-of-N and > 2 SE above EVERY baseline); else immediate.
     chosen = next(
         (n for n in args.models.split(",") if tc.passes(report["models"][n])), "immediate"
     )
@@ -473,9 +566,11 @@ def main() -> None:
     with Path(args.out).open("w") as f:
         for p in range(book.n_paths):
             i = int(kept[p])
-            ch = choices.get(chosen, first)[p] if chosen != "immediate" else first[p]
-            if ch < 0:
-                ch = first[p]
+            ch = (
+                choices[chosen][p]
+                if chosen != "immediate" and choices[chosen][p] >= 0
+                else first[p]
+            )
             rec = {
                 "key": str(bars.key[i]),
                 "day": str(bars.day[i]),
@@ -483,6 +578,11 @@ def main() -> None:
                 "market": str(extra["market"][p]),
                 "month": months[p],
                 "split": "oof" if oof[p] else "burnin",
+                "evidence": bool(evidence[p]),
+                "search": bool(search[p]),
+                "p_win": None if np.isnan(p_ch[p]) else float(p_ch[p]),
+                "win_model": rule["model"],
+                "selected": bool(sel[p]),
                 "news_minute": int(bars.buy_minute[i]),
                 "news_price": float(bars.buy_price[i]),
                 "entry_rule": chosen,
@@ -492,11 +592,9 @@ def main() -> None:
                     tc.cost_of(str(bars.day[i]), str(extra["market"][p]), int(book.minute[ch]))
                 ),
             }
-            if s1 is not None:
-                rec |= {f"s1_{t}": v for t, v in zip(S1_TARGETS, s1[str(bars.key[i])], strict=True)}
+            rec |= {f"s1_{t}": v for t, v in zip(S1_TARGETS, scores[str(bars.key[i])], strict=True)}
             for name, chs in choices.items():
-                c2 = chs[p] if chs[p] >= 0 else first[p]
-                rec[f"entry_minute_{name}"] = int(book.minute[c2])
+                rec[f"entry_minute_{name}"] = int(book.minute[chs[p] if chs[p] >= 0 else first[p]])
             f.write(json.dumps(rec) + "\n")
     tc.log(f"chosen entry rule: {chosen}; wrote {book.n_paths} rows -> {args.out}")
 
