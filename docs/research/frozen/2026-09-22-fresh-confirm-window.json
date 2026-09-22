@@ -1,0 +1,46 @@
+{
+ "frozen_at": "2026-09-22T22:37:34",
+ "note": "A NEW holdout for the neural-network exit policy. track_a_prior is spent: its confirm slice (2026-01-28..2026-03-16) was scored once by the tabular sequential study and once by the confirm-only re-run, so it can no longer adjudicate anything. This window is fixed BEFORE any feature is built or any policy is fitted on this book. Population: paths_fresh.jsonl, judgment-free matched-null pairs built by the SAME construction as paths_prior (news_master_prior -> prompt_labels -> build_prior_paths), over 2026-03-17..2026-09-15. CAVEAT: these dates overlap the 2026-04..08 book that rl_exits.py and rl_stop.py used, but that book is a different population (actual live policy entries, not judgment-free pairs) and no exit policy has ever been fitted on this construction over these days.",
+ "track_d_fresh": {
+  "all_days": 125,
+  "search": [
+   "2026-03-17",
+   "2026-07-31"
+  ],
+  "n_search": 94,
+  "confirm": [
+   "2026-08-03",
+   "2026-08-04",
+   "2026-08-05",
+   "2026-08-06",
+   "2026-08-07",
+   "2026-08-10",
+   "2026-08-11",
+   "2026-08-12",
+   "2026-08-13",
+   "2026-08-14",
+   "2026-08-18",
+   "2026-08-19",
+   "2026-08-20",
+   "2026-08-21",
+   "2026-08-24",
+   "2026-08-25",
+   "2026-08-26",
+   "2026-08-27",
+   "2026-08-28",
+   "2026-08-31",
+   "2026-09-01",
+   "2026-09-02",
+   "2026-09-03",
+   "2026-09-04",
+   "2026-09-07",
+   "2026-09-08",
+   "2026-09-09",
+   "2026-09-10",
+   "2026-09-11",
+   "2026-09-14",
+   "2026-09-15"
+  ],
+  "n_confirm": 31
+ }
+}
