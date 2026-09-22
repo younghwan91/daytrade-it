@@ -12,7 +12,7 @@ This is the third exit negative. It is a companion to `2026-09-22-rl-news-overla
 
 ## 1. The answer, in one table
 
-Pooled per-trade net, out of sample, at the broker's own round trip. Left block is this study's search window (5 time-ordered monthly folds, 19,645 trades); right block is the frozen confirm slice, touched once (30 days, 5,954 trades).
+Pooled per-trade net, out of sample, at the broker's own round trip. `search-OOS` pools 5 time-ordered monthly folds inside the search window (19,645 trades); `confirm` is the frozen slice, fitted on the whole search window and scored once (30 days, 5,954 trades). **The two columns cover different months and are not comparable to each other** — only down a column. Confirm is the harsher period for everything, live included.
 
 | arm | search-OOS | confirm | `bayes_judge` vs live |
 |---|---|---|---|
@@ -306,6 +306,15 @@ Measured on the inner holdout, so the real confirm slice stays clean:
 | vol | test | **−33.68** | **−33.62** | −32.52 | −30.51 | **no — below the noise MEAN** |
 
 **Neither arm's training objective clears the maximum of its own noise band.** The search earns as much on scrambled features as on real ones.
+
+And the noise band itself moves with the parameter count, exactly as it should:
+
+| arm | free parameters | best-of-search on pure noise (train) |
+|---|---|---|
+| novol | 15 | −34.64 |
+| vol | 45 | **−34.05** |
+
+Tripling the free parameters buys **+0.6 bp of pure search premium** — a policy that fits scrambled volume better than a smaller policy fits scrambled nothing. That is the whole of what the volume channel delivers on the real data too: the `vol` arm's real training objective (−34.50) sits *below* what the same search extracts from noise at the same parameter count (−34.05). The 135-parameter `volplus` scramble set was still running when this was written; it is not needed for the conclusion, and on this trend it would only raise the floor further.
 
 The last row is the cleanest single statement available on the volume hypothesis:
 
