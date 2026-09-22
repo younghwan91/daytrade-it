@@ -47,7 +47,16 @@
   "text": "title + summary exactly as the live judge receives them (build_prompt in infrastructure/external/anthropic_client.py); never the article body",
   "oof": "expanding-window forward chaining by calendar month: each month is scored by a model fitted only on earlier months; the first months are burn-in and carry no score",
   "primary_metric": "mean within-day Spearman IC between score and realised target, day-clustered SE; pre-registered before any model is fitted",
-  "noise_control": "identical search re-run on targets permuted within day; report best-of-N on noise beside every candidate"
+  "noise_control": "identical search re-run on targets permuted within day; report best-of-N on noise beside every candidate",
+  "selection_range": [
+   "2025-08-01",
+   "2026-05-29"
+  ],
+  "confirm_range": [
+   "2026-06-01",
+   "2026-07-31"
+  ],
+  "confirm_rule": "Arm, feature set and hyperparameters are chosen ONLY on out-of-fold performance in selection_range. The chosen configuration's forward out-of-fold scores on confirm_range (each month scored by a model fitted only on earlier months) are then read ONCE. Frozen before any stage-1 code existed. track_a_prior (2026-01-28..2026-03-16) is spent as a confirm window and is ordinary training data here."
  },
  "costs": "scripts/eval/costs.py::round_trip -- never the legacy 0.00215",
  "outputs": {
