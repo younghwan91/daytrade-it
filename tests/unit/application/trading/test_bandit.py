@@ -264,3 +264,58 @@ def test_load_model_cache_key_includes_size(tmp_path, monkeypatch) -> None:  # n
     path.write_text(fit(X, y, lam=100.0).to_json() + " " * 7)
     os.utime(path, ns=(mtime, mtime))  # same mtime, different size
     assert bandit.load_model(str(path)) is not a
+
+
+def test_weights_none_reproduces_the_unweighted_fit_exactly() -> None:
+    """The default path must be untouched -- the live model is fitted through it."""
+    X, y = _synthetic(400, 11)
+    a = fit(X, y, lam=1.0)
+    b = fit(X, y, lam=1.0, weights=np.ones(len(y)))
+    assert np.allclose(a.w, b.w, atol=0, rtol=0) or np.allclose(a.w, b.w, atol=1e-12)
+    assert np.isclose(a.b, b.b, rtol=1e-12)
+
+
+def test_weights_recover_coefficients_under_heteroscedastic_noise() -> None:
+    """Reward dispersion scales with the name's own volatility; unweighted, the
+    posterior treats a jumpy name and a quiet one as equally informative."""
+    rng = np.random.default_rng(3)
+    n, k = 6000, 5
+    X = rng.normal(size=(n, k))
+    truth = np.array([0.5, -0.3, 0.0, 0.2, 0.4])
+    scale = np.exp(rng.normal(scale=0.8, size=n))  # per-row noise sd
+    y = X @ truth + rng.normal(size=n) * scale
+    names = tuple(f"f{i}" for i in range(k))
+
+    plain = fit(X, y, lam=1e-6, feature_names=names)
+    weighted = fit(X, y, lam=1e-6, feature_names=names, weights=1.0 / scale**2)
+    err_plain = np.abs(plain.w[1:] - truth).sum()
+    err_weighted = np.abs(weighted.w[1:] - truth).sum()
+    assert err_weighted < err_plain
+
+
+def test_weights_must_be_positive_and_one_per_row() -> None:
+    X, y = _synthetic(50, 7)
+    with pytest.raises(ValueError, match="weights"):
+        fit(X, y, lam=1.0, weights=np.ones(len(y) - 1))
+    with pytest.raises(ValueError, match="weights"):
+        fit(X, y, lam=1.0, weights=np.zeros(len(y)))
+
+
+def test_standardization_is_decision_invariant_under_a_global_affine_map() -> None:
+    """Pooled standardization rescales units; it cannot stand in for, nor undo,
+    normalizing a feature against the stock's own history."""
+    rng = np.random.default_rng(0)
+    n, k = 2000, 5
+    X = rng.normal(size=(n, k))
+    y = X @ np.array([0.3, -0.2, 0.0, 0.1, 0.5]) + rng.normal(scale=0.5, size=n)
+    names = tuple(f"f{i}" for i in range(k))
+    scale = np.array([10.0, 0.1, 3.0, 1.0, 100.0])
+    shift = np.array([5.0, -2.0, 0.0, 7.0, 1e4])
+
+    plain = fit(X, y, lam=1.0, feature_names=names)
+    mapped = fit(X * scale + shift, y, lam=1.0, feature_names=names)
+    for row in X[:200]:
+        d1 = decide(plain, dict(zip(names, row, strict=True)))
+        d2 = decide(mapped, dict(zip(names, row * scale + shift, strict=True)))
+        assert d1[0] == d2[0]
+        assert np.isclose(d1[1], d2[1], atol=1e-10)

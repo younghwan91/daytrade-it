@@ -263,12 +263,29 @@ def fit(
     trained_days: tuple[str, ...] = (),
     means: np.ndarray | None = None,
     stds: np.ndarray | None = None,
+    weights: np.ndarray | None = None,
 ) -> BanditModel:
     """Conjugate NIG posterior from rows `X` (columns = `feature_names`) and rewards `y`.
 
     Columns are standardized with the train mean/std unless `means`/`stds`
     are given (e.g. to reproduce a sequential `update`). A column with train
-    std < 1e-6 is masked (std = +inf → always 0).
+    std < 1e-6 is masked (std = +inf → always 0). Standardization is a global
+    affine map, so it is exactly decision-invariant: it rescales units so the
+    ridge prior shrinks comparably across columns, and it neither adds nor
+    removes information. Normalizing a feature against the stock's OWN history
+    is a different operation and belongs upstream of this function, which never
+    sees which row is which stock.
+
+    `weights` (optional, one per row) makes this weighted least squares. The
+    model's likelihood assumes one noise variance for every observation, and a
+    reward measured in return terms does not satisfy that: dispersion scales
+    with the name's own volatility -- measured at 2.94x across volatility
+    quintiles on the 2025-08..2026-03 news pool, with sd ∝ sigma^0.76. Passing
+    `weights ∝ 1/variance` restores the assumption instead of leaving the
+    posterior to treat a jumpy small-cap and a quiet large-cap as equally
+    informative, which is what miscalibrates `min_prob`. Weights must be
+    estimated on training rows only. `None` reproduces the unweighted fit
+    exactly.
     """
     X = np.asarray(X, dtype=float)
     y = np.asarray(y, dtype=float)
@@ -281,6 +298,15 @@ def fit(
     else:
         stds = np.asarray(stds, dtype=float)
     Z = _design(X, means, stds)
+    if weights is not None:
+        weights = np.asarray(weights, dtype=float)
+        if weights.shape != y.shape or not np.all(weights > 0):
+            raise ValueError("fit: weights must be positive, one per row")
+        # sqrt-weighting the design and the target is exact WLS: it makes
+        # Z'Z and Z'y the weighted moments, and the residual the weighted one.
+        root = np.sqrt(weights)
+        Z = Z * root[:, None]
+        y = y * root
     k = Z.shape[1]
     prec0 = np.diag([lam * _INTERCEPT_PRIOR] + [lam] * (k - 1))
     prec = prec0 + Z.T @ Z
