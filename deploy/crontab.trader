@@ -10,3 +10,6 @@
 45 8 * * 1-5 /home/young/git/daytrade-it/scripts/preopen_check.sh >> /home/young/git/daytrade-it/data/preopen_check.log 2>&1
 55 8 * * 1-5 mkdir -p /home/young/git/daytrade-it/data && /home/young/git/daytrade-it/scripts/news_signal_daemon.sh >> /home/young/git/daytrade-it/data/news_signal_daemon.log 2>&1
 40 15 * * 1-5 pkill -f 'news_signal_poller.py'
+# 전진 승격 게이트 (2026-10-05 추가) -- 종이·실매매 장부에 7개 통계 조건을 매일 돌려
+# data/eval/forward_gate/latest.md 에 적는다. promote=true 가 아니면 실매매 재개 논의 금지.
+50 15 * * 1-5 cd /home/young/git/daytrade-it && /home/young/.local/bin/uv run python scripts/eval/forward_gate.py >> /home/young/git/daytrade-it/data/eval/forward_gate/cron.log 2>&1
