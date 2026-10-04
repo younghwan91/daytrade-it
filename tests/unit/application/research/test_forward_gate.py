@@ -124,3 +124,12 @@ def test_gate_report_refuses_thin_samples():
     )
     assert rep["gates"]["G7_sample"]["ok"] is False
     assert rep["promote"] is False
+
+
+def test_drop_days_without_market_removes_holiday_paper_fills():
+    from daytrade_it.application.research.forward_gate import drop_days_without_market
+
+    trades = _trades({D1: [10.0, 20.0], D2: [5.0]})
+    kept, dropped = drop_days_without_market(trades, lambda _code, day: day == D1)
+    assert dropped == [D2]
+    assert {t.day for t in kept} == {D1}

@@ -78,6 +78,19 @@ def ledger_trades(
     return out
 
 
+def drop_days_without_market(
+    trades: list[Trade], has_bars: Callable[[str, dt.date], bool]
+) -> tuple[list[Trade], list[dt.date]]:
+    """시장이 열리지 않은 날의 거래를 뺀다. 종이 브로커는 휴장일(추석 2026-09-24·25)에도
+    지정가에 체결시키므로 장부에 가짜 거래가 남는다. 그날 거래 종목 전부에 분봉이 없으면
+    휴장으로 본다. 반환: (남은 거래, 뺀 날짜)."""
+    by_day: dict[dt.date, list[Trade]] = {}
+    for t in trades:
+        by_day.setdefault(t.day, []).append(t)
+    dropped = [d for d, ts in by_day.items() if not any(has_bars(t.ticker, d) for t in ts)]
+    return [t for t in trades if t.day not in dropped], sorted(dropped)
+
+
 def _by_day(trades: Iterable[Trade]) -> dict[dt.date, list[float]]:
     d: dict[dt.date, list[float]] = {}
     for t in trades:

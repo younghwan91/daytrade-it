@@ -28,6 +28,7 @@ import psycopg2
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 from daytrade_it.application.research.forward_gate import (  # noqa: E402
     ROUND_TRIP_TOLL_BP,
+    drop_days_without_market,
     gate_report,
     ledger_trades,
 )
@@ -137,6 +138,7 @@ def main() -> int:
             trades += ledger_trades(
                 events, exit_price=bars.close_at_or_after, toll_bp=ROUND_TRIP_TOLL_BP
             )
+    trades, holidays = drop_days_without_market(trades, lambda code, day: bool(bars.day(code, day)))
     days = {t.day for t in trades}
     rng = random.Random(args.seed)
     control = random_control(bars, days, rng)
@@ -144,6 +146,7 @@ def main() -> int:
     rep["control_by_day_bp"] = {d.isoformat(): round(v, 1) for d, v in sorted(control.items())}
     rep["generated_at"] = dt.datetime.now().isoformat(timespec="seconds")
     rep["toll_bp"] = ROUND_TRIP_TOLL_BP
+    rep["dropped_no_market_days"] = [d.isoformat() for d in holidays]
 
     OUT.mkdir(parents=True, exist_ok=True)
     (OUT / "latest.json").write_text(json.dumps(rep, indent=1, ensure_ascii=False, default=str))
