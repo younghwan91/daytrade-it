@@ -47,6 +47,7 @@ class FakeBroker:
         self.positions: dict[str, int] = {}
         self.orders: list = []
         self.unfilled: dict[str, OrderStatus] = {}
+        self.filled: dict[str, OrderStatus] = {}
         self.cancelled: list[str] = []
         self.place_error: Exception | None = None
         self._seq = 0
@@ -100,11 +101,29 @@ class FakeBroker:
             status=OrderStatusEnum.SUBMITTED,
         )
 
-    def fill(self, order_id: str, ticker: str) -> None:
-        self.unfilled.pop(order_id)
-        self.positions[ticker] = self.positions.get(ticker, 0) + 1
+    def fill(self, order_id: str, ticker: str, price: str | None = None) -> None:
+        """Fill one share. With `price`, the status stays readable like the paper
+        broker's (FILLED + filled_avg_price); without it the order vanishes like
+        Kiwoom's unfilled list."""
+        status = self.unfilled.pop(order_id)
+        delta = 1
+        for o in reversed(self.orders):  # the latest order on the ticker decides the side
+            if o.ticker == ticker:
+                delta = -int(status.remaining_quantity) if o.side == OrderSide.SELL else 1
+                break
+        self.positions[ticker] = self.positions.get(ticker, 0) + delta
+        if price is not None:
+            self.filled[order_id] = OrderStatus(
+                order_id=order_id,
+                status=OrderStatusEnum.FILLED,
+                filled_quantity=status.remaining_quantity,
+                remaining_quantity=Decimal(0),
+                filled_avg_price=Decimal(price),
+            )
 
     def get_order_status(self, order_id: str) -> OrderStatus:
+        if order_id in self.filled:
+            return self.filled[order_id]
         if order_id not in self.unfilled:
             raise BrokerError(f"Order not found: {order_id}", broker_name="fake")
         return self.unfilled[order_id]
@@ -149,9 +168,13 @@ def _trader(
     return AutoTrader(broker, tmp_path / "ledger", live=live, clock=clock, limits=limits)
 
 
-def _events(tmp_path: Path) -> list[str]:
+def _rows(tmp_path: Path) -> list[dict]:
     path = tmp_path / "ledger" / "2026-09-14.jsonl"
-    return [json.loads(line)["event"] for line in path.open()] if path.exists() else []
+    return [json.loads(line) for line in path.open()] if path.exists() else []
+
+
+def _events(tmp_path: Path) -> list[str]:
+    return [r["event"] for r in _rows(tmp_path)]
 
 
 async def test_live_entry_is_one_share_limit_at_ask(tmp_path: Path) -> None:
@@ -498,6 +521,109 @@ async def test_unfilled_early_exit_is_repriced_after_retry_interval(tmp_path: Pa
     sells = [o for o in broker.orders if o.side == OrderSide.SELL]
     assert [o.limit_price for o in sells] == [Decimal("70000"), Decimal("69650")]
     assert broker.cancelled[-1] == "0000002"
+
+
+# -- fill ledger -------------------------------------------------------------------
+
+
+def _fills(tmp_path: Path) -> list[tuple]:
+    return [
+        (r["role"], r["ticker"], r["order_id"], r["side"], r["quantity"], r["avg_price"])
+        for r in _rows(tmp_path)
+        if r["event"] == "fill"
+    ]
+
+
+async def test_entry_fill_is_recorded_with_broker_avg_price(tmp_path: Path) -> None:
+    broker, clock = FakeBroker(), Clock("10:00")
+    trader = _trader(tmp_path, broker, clock)
+    await trader.enter(_signal())
+    trader.manage()
+    assert _fills(tmp_path) == []
+    broker.fill("0000001", "005930", price="70050")
+    clock.advance(minutes=1)
+    trader.manage()
+    assert _fills(tmp_path) == [("entry", "005930", "0000001", "BUY", 1, "70050")]
+    assert _events(tmp_path)[-1] == "entry_resolved"
+    clock.advance(minutes=5)
+    trader.manage()  # resolved: no TTL cancel, no second fill row
+    assert broker.cancelled == []
+    assert len(_fills(tmp_path)) == 1
+
+
+async def test_exit_fill_is_recorded_and_polling_stops(tmp_path: Path) -> None:
+    broker, clock = FakeBroker(), Clock("10:00")
+    trader = _trader(tmp_path, broker, clock)
+    await trader.enter(_signal())
+    broker.fill("0000001", "005930")  # vanished like Kiwoom: no price, no fill row
+    clock.now = clock.now.replace(hour=15, minute=0)
+    trader.manage()  # exit 0000002 submitted
+    broker.fill("0000002", "005930", price="69990")
+    clock.advance(minutes=1)
+    trader.manage()
+    assert _fills(tmp_path) == [("exit", "005930", "0000002", "SELL", 1, "69990")]
+    assert [r for r in _rows(tmp_path) if r["event"] == "exit_resolved"][0]["order_id"] == (
+        "0000002"
+    )
+    clock.advance(minutes=1)
+    trader.manage()
+    assert len(_fills(tmp_path)) == 1
+    assert sum(o.side == OrderSide.SELL for o in broker.orders) == 1
+
+
+async def test_vanished_exit_order_is_resolved_without_a_fill_row(tmp_path: Path) -> None:
+    broker, clock = FakeBroker(), Clock("10:00")
+    trader = _trader(tmp_path, broker, clock)
+    await trader.enter(_signal())
+    broker.fill("0000001", "005930")
+    clock.now = clock.now.replace(hour=15, minute=0)
+    trader.manage()
+    broker.fill("0000002", "005930")  # Kiwoom: gone from the unfilled list
+    clock.advance(minutes=1)
+    trader.manage()
+    assert _fills(tmp_path) == []
+    assert "exit_resolved" in _events(tmp_path)
+
+
+async def test_fill_poll_is_rate_limited_and_never_resolves_entries_on_error(
+    tmp_path: Path,
+) -> None:
+    broker, clock = FakeBroker(), Clock("10:00")
+    trader = _trader(tmp_path, broker, clock)
+    await trader.enter(_signal())
+    calls = 0
+    real = broker.get_order_status
+
+    def counting(order_id: str) -> OrderStatus:
+        nonlocal calls
+        calls += 1
+        return real(order_id)
+
+    broker.get_order_status = counting  # type: ignore[method-assign]
+    trader.manage()
+    clock.advance(seconds=20)
+    trader.manage()
+    assert calls == 1
+    broker.fill("0000001", "005930")  # status now raises
+    clock.advance(minutes=1)
+    trader.manage()
+    assert "entry_resolved" not in _events(tmp_path)  # TTL path still owns that call
+    clock.advance(minutes=5)
+    trader.manage()
+    assert _events(tmp_path)[-1] == "entry_resolved"
+
+
+async def test_add_on_fill_is_recorded(tmp_path: Path) -> None:
+    broker = FakeBroker()
+    trader, clock = await _held_from_0901(tmp_path, broker, _PYRAMID)
+    broker.bars = {"005930": _rising()}
+    clock.now = clock.now.replace(minute=26)
+    trader.manage()
+    broker.fill("0000002", "005930", price="70100")
+    clock.advance(minutes=1)
+    trader.manage()
+    assert _fills(tmp_path) == [("add_on", "005930", "0000002", "BUY", 1, "70100")]
+    assert "add_on_resolved" in _events(tmp_path)
 
 
 def test_rank_batch_orders_by_surprise_then_score() -> None:

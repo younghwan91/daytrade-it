@@ -45,16 +45,24 @@ class Trade:
 def ledger_trades(
     events: Iterable[Mapping], *, exit_price: ExitPrice, toll_bp: float
 ) -> list[Trade]:
-    """장부 이벤트 → 거래. 진입가 = 체결된 지정가(종이 브로커는 지정가에 체결),
-    청산가 = ``exit_price(ticker, exit_ts, exit_limit)`` (보통 그 시각 봉 종가)."""
+    """장부 이벤트 → 거래. ``fill`` 이벤트(2026-10 부터 기록)가 있으면 실제 체결가를
+    쓴다. 없으면 진입가 = 체결된 지정가(종이 브로커는 지정가에 체결), 청산가 =
+    ``exit_price(ticker, exit_ts, exit_limit)`` (보통 그 시각 봉 종가)."""
     events = list(events)
     submitted = {e["order_id"]: e for e in events if e.get("event") == "entry_submitted"}
     filled = {e["order_id"] for e in events if e.get("event") == "entry_resolved"}
+    fills = [e for e in events if e.get("event") == "fill"]
+    entry_fill = {e["order_id"]: float(e["avg_price"]) for e in fills if e.get("role") == "entry"}
+    # 청산은 재시도로 주문이 여러 개일 수 있어 종목으로 맞춘다(하루 한 종목 한 진입).
+    exit_fill: dict[str, float] = {}
+    for e in fills:
+        if e.get("role") == "exit":
+            exit_fill.setdefault(e["ticker"], float(e["avg_price"]))
     open_pos: dict[str, float] = {}
     for oid in filled:
         e = submitted.get(oid)
         if e:
-            open_pos[e["ticker"]] = float(e["limit"])
+            open_pos[e["ticker"]] = entry_fill.get(oid, float(e["limit"]))
     out: list[Trade] = []
     for e in events:
         if e.get("event") != "exit_submitted" or e["ticker"] not in open_pos:
@@ -62,7 +70,10 @@ def ledger_trades(
         entry = open_pos.pop(e["ticker"])
         ts = dt.datetime.fromisoformat(e["ts"]).replace(tzinfo=None)
         fallback = float(e.get("limit") or entry)
-        exit_ = float(exit_price(e["ticker"], ts, fallback))
+        if e["ticker"] in exit_fill:
+            exit_ = exit_fill[e["ticker"]]
+        else:
+            exit_ = float(exit_price(e["ticker"], ts, fallback))
         out.append(Trade(ts.date(), e["ticker"], entry, exit_, (exit_ / entry - 1) * 1e4 - toll_bp))
     return out
 

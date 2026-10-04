@@ -40,6 +40,14 @@ Safety design follows scalp-it's order-safety audit
   is no longer in the unfilled list".
 - Unknown outcome: if `execute_trade` raises unexpectedly (order may or may
   not be live), the ticker is marked entered so it is never retried.
+- Fills (2026-10): open entry / add-on / exit orders are polled once per
+  `exit_check_every`; when the broker reports the order done with an average
+  price, a `fill` row (ticker, order_id, side, quantity, avg_price, role) is
+  written so the forward gate can score actual fills instead of rebuilding
+  them from minute bars. The poll never decides anything: a status error
+  leaves entries to the TTL path above, and only exits are marked resolved
+  when their order has vanished (Kiwoom's unfilled list drops filled and
+  cancelled orders alike, without a price).
 
 State lives in an append-only JSONL ledger per trading day, so a crash-
 restart resumes with the same baseline, entries, and exits.
@@ -63,6 +71,7 @@ from daytrade_it.infrastructure.brokers.base import (
     MinuteBar,
     Order,
     OrderSide,
+    OrderStatus,
     OrderType,
     now_kst,
 )
@@ -147,6 +156,8 @@ class _DayState:
     exit_attempts: dict[str, int] = field(default_factory=dict)
     add_ons: dict[str, dict[str, Any]] = field(default_factory=dict)
     open_add_on_orders: dict[str, dict[str, Any]] = field(default_factory=dict)
+    #: Exit orders still polled for a fill price; popped on `exit_resolved`.
+    open_exit_orders: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 def rank_batch(items: list[tuple[TradingSignal, int, float]]) -> list[TradingSignal]:
@@ -332,6 +343,7 @@ class AutoTrader:
         self._state = _DayState()
         #: In-memory only: after a restart the first check simply runs at once.
         self._last_exit_check: dict[str, dt.datetime] = {}
+        self._last_fill_check: dict[str, dt.datetime] = {}
 
     # -- ledger ----------------------------------------------------------------
 
@@ -362,6 +374,10 @@ class AutoTrader:
             # instead of re-sending a rejected sell on every tick.
             s.exits[row["ticker"]] = row
             s.exit_attempts[row["ticker"]] = s.exit_attempts.get(row["ticker"], 0) + 1
+            if row.get("order_id"):
+                s.open_exit_orders[row["order_id"]] = row
+        elif ev == "exit_resolved":
+            s.open_exit_orders.pop(row["order_id"], None)
         elif ev in ("add_on_submitted", "add_on_failed", "add_on_dry_run"):
             s.add_ons[row["ticker"]] = row
             if row.get("order_id"):
@@ -530,6 +546,7 @@ class AutoTrader:
         """Cancel stale entry orders; flatten from `flatten_at`. Call every tick."""
         self._ensure_day()
         now = self._clock()
+        self._poll_fills(now)
         for order_id, row in list(self._state.open_entry_orders.items()):
             submitted = dt.datetime.fromisoformat(row["ts"])
             if now - submitted >= self._limits.entry_order_ttl:
@@ -541,6 +558,57 @@ class AutoTrader:
             self.flatten()
         else:
             self._early_exits(now)
+
+    # -- fills -----------------------------------------------------------------
+
+    def _poll_fills(self, now: dt.datetime) -> None:
+        """Record `fill` for open orders the broker reports done with a price.
+
+        Observation only -- no order is sent or cancelled here. One status call
+        per open order per `exit_check_every` (the same budget as the chart
+        checks; Kiwoom's status is one ka10075 call).
+        """
+        s = self._state
+        todo = [
+            *((oid, row, "entry") for oid, row in s.open_entry_orders.items()),
+            *((oid, row, "add_on") for oid, row in s.open_add_on_orders.items()),
+            *((oid, row, "exit") for oid, row in s.open_exit_orders.items()),
+        ]
+        for order_id, row, role in todo:
+            last = self._last_fill_check.get(order_id)
+            if last is not None and now - last < self._limits.exit_check_every:
+                continue
+            self._last_fill_check[order_id] = now
+            ticker = row["ticker"]
+            try:
+                status = self._broker.get_order_status(order_id)
+            except Exception:
+                # Entries: the TTL path (`_cancel_entry`) owns "not found" --
+                # a transient API error must not stop a stale order's cancel.
+                if role == "exit":
+                    self._record("exit_resolved", order_id=order_id, ticker=ticker, reason="gone")
+                continue
+            if self._record_fill_if_done(order_id, ticker, role, status):
+                reason = "filled" if status.filled_quantity > 0 else "gone"
+                self._record(f"{role}_resolved", order_id=order_id, ticker=ticker, reason=reason)
+
+    def _record_fill_if_done(
+        self, order_id: str, ticker: str, role: str, status: OrderStatus
+    ) -> bool:
+        """True when nothing is left to fill; writes `fill` if the broker gave a price."""
+        if status.remaining_quantity > 0:
+            return False
+        if status.filled_quantity > 0 and status.filled_avg_price is not None:
+            self._record(
+                "fill",
+                ticker=ticker,
+                order_id=order_id,
+                side="SELL" if role == "exit" else "BUY",
+                quantity=int(status.filled_quantity),
+                avg_price=str(status.filled_avg_price),
+                role=role,
+            )
+        return True
 
     def _early_exits(self, now: dt.datetime) -> None:
         """VWAP-break exits before `flatten_at`; re-price unfilled early sells."""
@@ -697,7 +765,7 @@ class AutoTrader:
         except Exception:
             self._record("add_on_resolved", order_id=order_id, ticker=ticker, reason=reason)
             return
-        if status.remaining_quantity <= 0:
+        if self._record_fill_if_done(order_id, ticker, "add_on", status):
             self._record("add_on_resolved", order_id=order_id, ticker=ticker, reason=reason)
             return
         try:
@@ -725,7 +793,7 @@ class AutoTrader:
             # are the truth for whether shares exist (N-3).
             self._record("entry_resolved", order_id=order_id, ticker=ticker, reason=reason)
             return
-        if status.remaining_quantity <= 0:
+        if self._record_fill_if_done(order_id, ticker, "entry", status):
             self._record("entry_resolved", order_id=order_id, ticker=ticker, reason=reason)
             return
         try:

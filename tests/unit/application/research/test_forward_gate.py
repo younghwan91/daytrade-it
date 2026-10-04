@@ -42,6 +42,58 @@ def test_ledger_trades_falls_back_to_exit_limit_when_no_bar():
     assert trades[0].exit == 990.0
 
 
+def test_ledger_trades_prefers_recorded_fill_prices_over_limits_and_bars():
+    events = [
+        _ev("2026-09-21T09:00:01", "entry_submitted", ticker="A", order_id="1", limit="1000"),
+        _ev(
+            "2026-09-21T09:00:30",
+            "fill",
+            ticker="A",
+            order_id="1",
+            side="BUY",
+            quantity=1,
+            avg_price="995",
+            role="entry",
+        ),
+        _ev("2026-09-21T09:00:30", "entry_resolved", ticker="A", order_id="1", reason="filled"),
+        _ev("2026-09-21T15:00:00", "exit_submitted", ticker="A", order_id="3", limit="990"),
+        _ev("2026-09-21T15:01:00", "exit_submitted", ticker="A", order_id="4", limit="985"),
+        _ev(
+            "2026-09-21T15:01:10",
+            "fill",
+            ticker="A",
+            order_id="4",
+            side="SELL",
+            quantity=1,
+            avg_price="1005",
+            role="exit",
+        ),
+    ]
+    trades = ledger_trades(events, exit_price=lambda _t, _ts, _fb: 1010.0, toll_bp=0)
+    assert [(t.day, t.ticker, t.entry, t.exit) for t in trades] == [(D1, "A", 995.0, 1005.0)]
+    assert round(trades[0].net_bp, 2) == round((1005 / 995 - 1) * 1e4, 2)
+
+
+def test_ledger_trades_uses_fill_for_one_leg_and_falls_back_for_the_other():
+    events = [
+        _ev("2026-09-21T09:00:01", "entry_submitted", ticker="A", order_id="1", limit="1000"),
+        _ev("2026-09-21T09:05:00", "entry_resolved", ticker="A", order_id="1", reason="ttl"),
+        _ev("2026-09-21T15:00:00", "exit_submitted", ticker="A", order_id="3", limit="990"),
+        _ev(
+            "2026-09-21T15:00:05",
+            "fill",
+            ticker="A",
+            order_id="3",
+            side="SELL",
+            quantity=1,
+            avg_price="992",
+            role="exit",
+        ),
+    ]
+    trades = ledger_trades(events, exit_price=lambda _t, _ts, _fb: 1010.0, toll_bp=0)
+    assert (trades[0].entry, trades[0].exit) == (1000.0, 992.0)
+
+
 def _trades(day_values):
     out = []
     for day, vals in day_values.items():
