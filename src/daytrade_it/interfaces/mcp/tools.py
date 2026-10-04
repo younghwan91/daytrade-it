@@ -21,6 +21,7 @@ from uuid import UUID, uuid5
 from krx_quant_core.runtime import DataSpec, Run, start_run
 from pydantic import BaseModel, Field
 
+from daytrade_it.shared.killswitch import stop_file_active
 from daytrade_it.shared.runtime_host import require_backtest_host
 
 if TYPE_CHECKING:
@@ -872,7 +873,8 @@ _DART_DB_PATH = Path("../scalp-it/data/dart.db")
 
 
 def _kill_switch_active() -> bool:
-    return _KILL_SWITCH_PATH.exists()
+    # 전역은 호출 시점에 읽는다 -- 종이매매 폴러가 바꿔 끼우고 테스트가 monkeypatch 한다.
+    return stop_file_active(_KILL_SWITCH_PATH)
 
 
 @mcp_tool(
