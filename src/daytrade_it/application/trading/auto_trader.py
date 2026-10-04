@@ -75,6 +75,7 @@ from daytrade_it.infrastructure.brokers.base import (
     OrderType,
     now_kst,
 )
+from daytrade_it.shared.killswitch import stop_file_active
 from daytrade_it.shared.logging import get_logger
 
 logger = get_logger(__name__)
@@ -307,7 +308,7 @@ def _disclosure_blocks(ticker: str) -> bool:
 def _kill_switch_on() -> bool:
     from daytrade_it.interfaces.mcp import tools  # noqa: PLC0415
 
-    return tools._KILL_SWITCH_PATH.exists()
+    return stop_file_active(tools._KILL_SWITCH_PATH)
 
 
 class _SignalLookup:

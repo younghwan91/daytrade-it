@@ -101,6 +101,7 @@ from daytrade_it.infrastructure.external.toss_news_client import (
 from daytrade_it.infrastructure.persistence.database import DatabaseManager
 from daytrade_it.infrastructure.persistence.models import TradingSignalModel
 from daytrade_it.infrastructure.persistence.unit_of_work import UnitOfWork
+from daytrade_it.shared.killswitch import stop_file_active
 from daytrade_it.shared.logging import get_logger
 
 logger = get_logger(__name__)
@@ -135,7 +136,7 @@ DETAIL_HTTP_HEADERS = {
 
 
 def kill_switch_active() -> bool:
-    return KILL_SWITCH_PATH.exists()
+    return stop_file_active(KILL_SWITCH_PATH)
 
 
 #: scalp-it 수집기가 60 초마다 다시 읽는 핀 목록. 저장 전용이라 그쪽 매매 판단이나
