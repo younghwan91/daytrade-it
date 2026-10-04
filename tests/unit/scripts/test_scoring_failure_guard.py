@@ -163,3 +163,21 @@ class TestTickPinRotation:
         """실측: 30분 13~14 종목, 60분 19~24, 120분 33~39. 상한 100 을 혼자 안 먹는다."""
         assert dt.timedelta(minutes=15) <= poller.TICK_PIN_TTL <= dt.timedelta(minutes=120)
         assert 0 < poller.TICK_PIN_MAX <= 50
+
+
+class TestPreMarketPinCohort:
+    """장전 판정 종목은 매수 여부와 무관하게 핀한다 -- 표본이 판정 결과에 조건부가 되지 않게."""
+
+    def test_cutoff_is_just_after_the_open(self) -> None:
+        assert dt.time(9, 0) <= poller.PRE_MARKET_PIN_UNTIL <= dt.time(9, 10)
+
+    def test_cohort_fits_under_the_cap(self) -> None:
+        """실측 장전 판정 12~23 종목/일 + 장중 매수 핀이 상한 30 안에 든다."""
+        assert poller.TICK_PIN_MAX >= 23
+
+    def test_pin_happens_before_the_buy_only_return(self) -> None:
+        """핀 호출이 `if not sentiment.is_bullish: return` 보다 앞에 있어야 비매수 판정도 핀된다."""
+        src = Path(poller.__file__).read_text()
+        pin = src.index("PRE_MARKET_PIN_UNTIL:\n        _pin_for_tick_collection(ticker.value)")
+        bullish_return = src.index("if not sentiment.is_bullish:\n        return")
+        assert pin < bullish_return

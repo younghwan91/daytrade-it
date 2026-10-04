@@ -156,6 +156,10 @@ TICK_PIN_TTL = dt.timedelta(minutes=60)
 #: 미시구조를 실제로 쓸 수 있는 유일한 자리다.
 TICK_PIN_HELD_UNTIL = dt.time(15, 30)
 
+#: 장전 판정 전원을 핀하는 마감 시각. 개장 후 첫 5분은 08:xx 기사의 판정이
+#: 아직 끝나는 중이라 09:00 이 아니라 09:05 다 (실측: 장전 판정 12~23 종목/일).
+PRE_MARKET_PIN_UNTIL = dt.time(9, 5)
+
 #: 안전 상한. 키움 동시 구독 100 을 scalp-it 실매매와 나눠 쓰므로 혼자 다
 #: 먹지 않는다. TTL 이 먼저 걸려 보통 여기까지 오지 않는다.
 TICK_PIN_MAX = 30
@@ -453,6 +457,14 @@ async def process_pair(
             "v4_shadow": {**asdict(shadow), "score": shadow.score()} if shadow else None,
         },
     )
+    # 장전 판정 종목은 매수 여부와 상관없이 수집기에 핀한다 (2026-10-05).
+    # 매수 판정만 핀하면 호가·체결 표본이 판정 결과에 조건부가 돼, "도착 시점
+    # 체결 흐름이 선정에 보탬이 되는가"를 그 표본으로는 영영 물을 수 없다
+    # (연구 오류 분류 1번). 장전 코호트는 하루 12~23 종목이라 상한 30 안에 들고,
+    # 시가 진입이 유일하게 안정적이었던 구간이기도 하다. 장중은 그대로 매수만.
+    if dt.datetime.now(KST).time() <= PRE_MARKET_PIN_UNTIL:
+        _pin_for_tick_collection(ticker.value)
+
     # Entries are BUY-only: KRX retail can't short, and no SELL-side rule
     # was evaluated (dev had n=6 bearish main-subject pairs).
     if not sentiment.is_bullish:
