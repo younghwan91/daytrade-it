@@ -187,7 +187,11 @@ async def test_paper_pair_skips_the_signal_db_and_dedups_in_memory(
             metadata={"pre_entry_move": 0.01},
         )
 
-    monkeypatch.setattr(news_signal_poller, "generate_no_chase_confirmation", entry)
+    # The no-chase filter is called from the shared candidate builder
+    # (`news_entry.build_entry_candidate`), the same function replay runs.
+    from daytrade_it.application.signals import news_entry
+
+    monkeypatch.setattr(news_entry, "generate_no_chase_confirmation", entry)
 
     class Claude:
         calls = 0

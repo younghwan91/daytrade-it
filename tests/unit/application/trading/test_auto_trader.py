@@ -8,7 +8,14 @@ from pathlib import Path
 
 import pytest
 
-from daytrade_it.application.trading.auto_trader import AutoTrader, TradingLimits, rank_batch
+from daytrade_it.application.trading import auto_trader
+from daytrade_it.application.trading.auto_trader import (
+    AutoTrader,
+    TradingLimits,
+    limits_from_strings,
+    limits_to_strings,
+    rank_batch,
+)
 from daytrade_it.domain.entities.signal import SignalDirection, SignalSource, TradingSignal
 from daytrade_it.domain.value_objects import Confidence, Ticker
 from daytrade_it.infrastructure.brokers.base import (
@@ -768,3 +775,67 @@ async def test_vwap_exit_cancels_pending_add_on_first(tmp_path: Path) -> None:
     trader.manage()
     assert "0000002" in broker.cancelled
     assert [o.side for o in broker.orders][-1] == OrderSide.SELL
+
+
+# -- baseline metadata: what the replay needs to rerun the day (2026-10-05) ----
+
+
+def test_limits_round_trip_through_strings() -> None:
+    limits = TradingLimits(
+        max_open_positions=2,
+        vwap_exit_gap=None,
+        add_on_min_gain=Decimal("0.01"),
+        entry_order_ttl=dt.timedelta(minutes=5),
+        entry_start=dt.time(9, 0, 30),
+    )
+    raw = limits_to_strings(limits)
+    assert all(isinstance(v, str) for v in raw.values())
+    assert raw["max_open_positions"] == "2" and raw["vwap_exit_gap"] == "None"
+    assert raw["add_on_min_gain"] == "0.01" and raw["entry_start"] == "09:00:30"
+    assert limits_from_strings(raw) == limits
+    assert limits_from_strings(limits_to_strings(TradingLimits())) == TradingLimits()
+
+
+def test_limits_from_strings_tolerates_a_newer_ledger_with_unknown_keys() -> None:
+    raw = {**limits_to_strings(TradingLimits()), "future_knob": "1"}
+    assert limits_from_strings(raw) == TradingLimits()
+
+
+async def test_baseline_records_git_sha_limits_and_cash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(auto_trader, "_git_sha", lambda: "deadbeef")
+    limits = TradingLimits(max_open_positions=3, add_on_min_gain=Decimal("0.01"))
+    broker, clock = FakeBroker(), Clock("10:00")
+    await _trader(tmp_path, broker, clock, limits=limits).enter(_signal())
+    [baseline] = [r for r in _rows(tmp_path) if r["event"] == "baseline"]
+    assert baseline["positions"] == {}
+    assert baseline["git_sha"] == "deadbeef"
+    assert baseline["cash"] == "10000000"
+    assert limits_from_strings(baseline["limits"]) == limits
+
+
+async def test_baseline_without_account_or_git_still_lets_the_entry_through(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(auto_trader, "_git_sha", lambda: None)
+
+    class _NoAccountOnce(FakeBroker):
+        calls = 0
+
+        def get_account(self) -> Account:
+            _NoAccountOnce.calls += 1
+            if _NoAccountOnce.calls == 1:
+                raise BrokerError("account down", broker_name="fake")
+            return super().get_account()
+
+    broker, clock = _NoAccountOnce(), Clock("10:00")
+    await _trader(tmp_path, broker, clock).enter(_signal())
+    [baseline] = [r for r in _rows(tmp_path) if r["event"] == "baseline"]
+    assert baseline["cash"] is None and baseline["git_sha"] is None
+    assert _events(tmp_path) == ["baseline", "entry_submitted"]
+
+
+def test_git_sha_is_a_commit_hash_or_none() -> None:
+    sha = auto_trader._git_sha()
+    assert sha is None or (len(sha) == 40 and int(sha, 16) >= 0)

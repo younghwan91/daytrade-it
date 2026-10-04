@@ -77,18 +77,14 @@ from krx_quant_core.execution.oms import AlreadyRunning, InstanceLock
 from sqlalchemy import select
 
 from daytrade_it.application.news.mention_prefilter import skip_reason
-from daytrade_it.application.signals.entry_filter import generate_no_chase_confirmation
+from daytrade_it.application.signals.news_entry import build_entry_candidate
 from daytrade_it.application.trading.auto_trader import AutoTrader, rank_batch
 from daytrade_it.domain.entities.news import NewsArticle
 from daytrade_it.domain.services.signal_generator import SignalConfig, SignalGenerator
 from daytrade_it.domain.value_objects import Ticker
 from daytrade_it.infrastructure.brokers.base import KST, BrokerInterface
 from daytrade_it.infrastructure.brokers.kiwoom_broker import KiwoomBroker
-from daytrade_it.infrastructure.external.anthropic_client import (
-    PROMPT_VERSION,
-    AnthropicClient,
-    ArticleFeatures,
-)
+from daytrade_it.infrastructure.external.anthropic_client import AnthropicClient, ArticleFeatures
 from daytrade_it.infrastructure.external.quant_airflow_db_client import (
     QuantAirflowDBClient,
     StockInfo,
@@ -471,45 +467,24 @@ async def process_pair(
     if not sentiment.is_bullish:
         return
 
-    news_signal = gen.generate_from_news(
-        article.model_copy(update={"tickers": [ticker]}), sentiment
-    )
-    if news_signal is None:
-        return
-
     # 매수 판정이 난 종목을 scalp-it 수집기에 넘겨 체결·호가를 쌓게 한다.
     # 지금 `ticks`/`quotes` 는 우리가 실제로 산 종목의 21.4% 만 덮고 있어,
     # 체결강도·호가 잔량이 이 프로젝트에서 유일하게 검증하지 못한 가설로
     # 남아 있다. 하루 약 20 종목이고 수집기는 60 초마다 이 파일을 다시 읽는다.
     _pin_for_tick_collection(ticker.value)
 
+    # 뉴스 신호 + 추격 금지 필터 + 합성은 `news_entry.build_entry_candidate` 에
+    # 있다 -- 리플레이(`application/replay`)가 같은 함수를 불러 같은 판단을 한다.
     try:
-        entry_signal = generate_no_chase_confirmation(ticker, broker, db_client, expires_at)
+        candidate = build_entry_candidate(
+            article, ticker, features, broker, db_client, gen, expires_at
+        )
     except Exception:
         logger.exception("news_signal_poller: entry filter failed", ticker=ticker.value)
         return
-    if entry_signal is None:
+    if candidate is None:
         return
-
-    composite = gen.combine_signals([news_signal, entry_signal])
-    if composite is None:
-        return
-    composite = composite.model_copy(
-        update={
-            "news_article_id": article.id,
-            "expires_at": expires_at,
-            "metadata": {
-                **composite.metadata,
-                "prompt_version": PROMPT_VERSION,
-                "article_title": article.title[:200],
-                "subject": features.subject,
-                "material_type": features.material_type,
-                "surprise": features.surprise,
-                "news_score": sentiment.score,
-                "pre_entry_move": entry_signal.metadata["pre_entry_move"],
-            },
-        }
-    )
+    composite = candidate.signal
 
     if paper_seen is not None:
         paper_seen.add(pair_key)
@@ -530,14 +505,14 @@ async def process_pair(
         name=stock.name,
         direction=composite.direction.value,
         news_score=round(sentiment.score, 3),
-        pre_entry_move=entry_signal.metadata["pre_entry_move"],
+        pre_entry_move=composite.metadata["pre_entry_move"],
         article_title=article.title,
     )
 
     if trader is not None:
         if pending is not None:
             # Entered after the whole poll is judged, in rank_batch order.
-            pending.append((saved, int(features.surprise), float(sentiment.score)))
+            pending.append((saved, candidate.surprise, candidate.score))
             return
         try:
             await trader.enter(saved)

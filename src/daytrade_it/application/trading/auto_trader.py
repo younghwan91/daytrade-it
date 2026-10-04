@@ -50,14 +50,23 @@ Safety design follows scalp-it's order-safety audit
   cancelled orders alike, without a price).
 
 State lives in an append-only JSONL ledger per trading day, so a crash-
-restart resumes with the same baseline, entries, and exits.
+restart resumes with the same baseline, entries, and exits. The day's
+`baseline` row also carries what a replay needs to rerun the day with the
+code and limits that actually traded it (2026-10-05): the git sha of the
+running checkout (`git rev-parse HEAD`, null if unavailable), the
+`TradingLimits` as strings (`limits_to_strings`), and the deposit cash the
+account reported before the first order.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
 import json
-from collections.abc import Callable
+import subprocess
+import types
+import typing
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
@@ -143,6 +152,75 @@ class TradingLimits:
     #: RiskManager account-exposure check that gates entries (was ~500k).
     #: The deposit-cash check still applies (cash is shared with scalp-it).
     max_trader_exposure: Decimal = Decimal("1000000")
+
+
+_NONE = "None"
+
+
+def limits_to_strings(limits: TradingLimits) -> dict[str, str]:
+    """Every `TradingLimits` field as a string the ledger can hold.
+
+    Decimal -> its str, dt.time -> isoformat, dt.timedelta -> total seconds,
+    int -> str, None -> "None". `limits_from_strings` inverts it exactly.
+    """
+    out: dict[str, str] = {}
+    for f in dataclasses.fields(limits):
+        v = getattr(limits, f.name)
+        if v is None:
+            out[f.name] = _NONE
+        elif isinstance(v, dt.timedelta):
+            out[f.name] = str(v.total_seconds())
+        elif isinstance(v, dt.time):
+            out[f.name] = v.isoformat()
+        else:
+            out[f.name] = str(v)
+    return out
+
+
+def _decode_limit(tp: Any, raw: str, name: str) -> Any:
+    if raw == _NONE:
+        if type(None) in typing.get_args(tp):
+            return None
+        raise ValueError(f"limits.{name}: null is not allowed")
+    if typing.get_origin(tp) in (typing.Union, types.UnionType):
+        (tp,) = [a for a in typing.get_args(tp) if a is not type(None)]
+    if tp is Decimal:
+        return Decimal(raw)
+    if tp is dt.timedelta:
+        return dt.timedelta(seconds=float(raw))
+    if tp is dt.time:
+        return dt.time.fromisoformat(raw)
+    if tp is int:
+        return int(raw)
+    raise ValueError(f"limits.{name}: unsupported field type {tp!r}")
+
+
+def limits_from_strings(raw: Mapping[str, str]) -> TradingLimits:
+    """The `TradingLimits` a ledger `baseline.limits` row encodes.
+
+    Keys the current dataclass does not know are ignored (a ledger written by
+    a newer checkout), missing keys take today's defaults.
+    """
+    hints = typing.get_type_hints(TradingLimits)
+    known = {f.name for f in dataclasses.fields(TradingLimits)}
+    return TradingLimits(**{k: _decode_limit(hints[k], v, k) for k, v in raw.items() if k in known})
+
+
+def _git_sha() -> str | None:
+    """`git rev-parse HEAD` of this checkout, or None (no git, detached copy, timeout)."""
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=Path(__file__).resolve().parent,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except Exception:
+        return None
+    sha = proc.stdout.strip()
+    return sha if proc.returncode == 0 and sha else None
 
 
 @dataclass
@@ -407,8 +485,18 @@ class AutoTrader:
         except Exception:
             logger.exception("auto_trader: baseline holdings lookup failed (no entries)")
             return False
+        # Replay inputs, best effort: the baseline must never fail on them.
+        cash: Decimal | None = None
+        try:
+            cash = self._broker.get_account().cash
+        except Exception:
+            logger.warning("auto_trader: baseline cash lookup failed (recorded as null)")
         self._record(
-            "baseline", positions={p.ticker: int(p.quantity) for p in positions if p.quantity > 0}
+            "baseline",
+            positions={p.ticker: int(p.quantity) for p in positions if p.quantity > 0},
+            git_sha=_git_sha(),
+            limits=limits_to_strings(self._limits),
+            cash=None if cash is None else str(cash),
         )
         return True
 
