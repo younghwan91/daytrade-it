@@ -1,0 +1,17 @@
+{
+ "frozen_at": "2026-09-22T03:15:24",
+ "note": "Fixed BEFORE any HMM search. CONFIRM_WINDOWS.json (f9376cf) has no daily-resolution entry; this is the daily one, the most recent 15% of the daily-bar range, held out from every fit and every search.",
+ "track_c_daily": {
+  "all_days": 2436,
+  "search": [
+   "2016-10-18",
+   "2025-03-25"
+  ],
+  "confirm": [
+   "2025-03-26",
+   "2026-09-21"
+  ],
+  "n_search": 2071,
+  "n_confirm": 365
+ }
+}
