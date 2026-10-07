@@ -47,12 +47,9 @@ def _dsn() -> str:
                 dsn = line.split("=", 1)[1].strip().strip("\"'")
     if not dsn:
         sys.exit("KR_QUANT_DB 가 없다")
-    # 읽기만 하므로 trader 의 로컬 복제본을 우선 쓴다.
-    return (
-        dsn.replace("192.168.45.9:5433", "localhost:5432")
-        if os.environ.get("KR_QUANT_REPLICA", "1") == "1"
-        else dsn
-    )
+    # 2026-10-07 까지는 trader 의 로컬 리플리카(localhost:5432)로 바꿔 읽었다. trader 를
+    # 처분해 리플리카가 없다 — 그 치환이 남아 10-07 15:50 크론이 Connection refused 로 죽었다.
+    return dsn
 
 
 class Bars:

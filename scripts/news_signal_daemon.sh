@@ -3,8 +3,8 @@
 # 감싼다. scalp-it 의 pair_detect_daily.sh 와 같은 관례(경로는 스크립트 위치에서
 # 유도, cd 실패만 명시적으로 죽게, 나머지는 재시작 관용)를 따른다.
 #
-# ⚠️ 2026-09-14 부터 **실주문 1주**가 나간다(--execute --confirm-real, 사용자 지시).
-#    되돌리려면 아래 실행줄에서 --confirm-real 을 지운다 -- 그 즉시 dry-run(원장만 기록).
+# 2026-09-14~16 은 실주문 1주(--execute --confirm-real)였고, 2026-09-17 부터는 종이매매
+#    (--execute --paper)다 -- 아래 실행줄 위 주석에 이유와 재개 절차가 있다.
 #    --execute 까지 지우면 신호만 적재한다.
 # 안전장치(application/trading/auto_trader.py, interfaces/mcp/tools.py::execute_trade):
 #   진입 1주·지정가(매도1호가)·±3% 가격밴드·종목당 하루 1회·일일 10회·동시 2종목·
@@ -82,7 +82,6 @@ while [ "$(date +%s)" -lt "$END" ]; do
   REMAIN=$(( (END - $(date +%s)) / 60 ))
   [ "$REMAIN" -lt 1 ] && break
   echo "=== [$(date '+%F %T')] 뉴스 신호 데몬 시작 (남은 ${REMAIN}분)"
-  # ⚠️ --confirm-real 켜짐 → 진짜 주문이 나간다.
   # 2026-09-17 부터 종이매매(--paper)로 돌린다. 실주문은 나가지 않는다.
   #
   # 이유: 실매매를 `data/live_STOP` 으로 멈춘 상태인데(뉴스 선정의 초과수익이
