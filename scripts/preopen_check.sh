@@ -53,8 +53,17 @@ else
     ok "GPTQ_KIWOOM_IS_MOCK 이 false 로 명시적 설정되지 않음(기본 true) -- 실계좌 연결 전 반드시 명시 설정 확인"
 fi
 
+# 데몬이 종이매매(--paper)로 뜨면 킬스위치는 실주문 경로에만 걸리므로 의도된 상태다.
+# 2026-09-17 부터 그렇다 -- 그런데 이 줄이 매일 FAIL 을 내 진짜 FAIL 이 묻혔다(2026-10-08).
+# 판정은 주석이 아니라 런처의 실제 실행줄(주석 제외)에서 읽는다.
+DAEMON_RUN_LINE="$(grep -v '^\s*#' scripts/news_signal_daemon.sh | grep 'news_signal_poller.py' | head -1)"
 if [ -f data/live_STOP ]; then
-    bad "킬스위치 있음(data/live_STOP) -- execute_trade 가 모든 주문을 거부한다"
+    if printf '%s' "$DAEMON_RUN_LINE" | grep -q -- '--paper' \
+        && ! printf '%s' "$DAEMON_RUN_LINE" | grep -q -- '--confirm-real'; then
+        ok "킬스위치 있음(data/live_STOP) -- 데몬이 종이매매(--paper)라 의도된 상태(실주문 없음)"
+    else
+        bad "킬스위치 있음(data/live_STOP) -- execute_trade 가 모든 주문을 거부한다"
+    fi
 else
     ok "킬스위치 없음(data/live_STOP)"
 fi
