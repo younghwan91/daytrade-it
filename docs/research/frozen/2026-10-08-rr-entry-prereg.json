@@ -1,0 +1,45 @@
+{
+ "frozen_at": "2026-10-08T22:40:00+09:00",
+ "title": "ex-ante chart risk:reward entry filter on positively-judged news",
+ "question": "LLM 이 '오른다'(v2.sentiment_direction == 1)고 판정한 종목을, 순위 없이, 진입 시점까지의 분봉만으로 계산한 손익비가 비용 포함 2:1 이상인 자리에서만 사고, 손절/목표가 브래킷으로 청산하면 비용 후 거래당 기대값이 양수인가.",
+ "origin": "사용자 지시 2026-10-08: '신호 상위도 중요하지만 손익비가 안 나오면 들어가면 안 된다. 오른다는 평가가 나왔으면 상위를 매길 필요 없이 좋은 손익비 자리에선 매매를 시도하라.'",
+ "prior_exposure": "이 레포·scalp-it 어디에도 진입 전 차트 손익비 필터를 잰 기록이 없다(2026-10-08 조사). 기존 rr/lrr 라벨은 decide 이후 경로로 만든 사후 라벨이라 이 가설과 무관하다. stage1 의 search/confirm 창은 다른 가설로 소비됐지만, 이 규칙은 조정 가능한 파라미터가 없어(아래 고정값) 같은 날짜를 처음 보는 측정이다. 그래서 1단계는 '첫 측정', 2단계가 확정 판정이다.",
+ "rule": {
+  "candidates": "후보 = (code, day) 중 그날 v2.sentiment_direction == 1 판정이 하나 이상 있는 종목-일. 순위·점수·material_type·persistence 로 거르지 않는다. 시작 시각 = 그날 가장 이른 양(+) 판정의 decide_at.",
+  "bars": "minute_bars, ts 는 분 시작(naive KST). 09:00 <= ts < 15:00 만 쓴다(넥스트레이드 야간 봉 제외).",
+  "scan": "t = max(ceil_minute(decide_at), 09:01) 부터 14:30 까지 매 분. t 시점에 아는 것은 ts < t 인 완성 봉뿐.",
+  "entry_price": "E = 봉 t 의 open.",
+  "stop": "S = ts in [09:00, t) 봉들의 low 최솟값 (당일 저가 so far). S >= E 이면 그 분은 자리 아님.",
+  "target": "T = {전일 daily_bars.high, ts in [09:00, t) 봉들의 high 최댓값} 중 E 보다 큰 값의 최솟값 (가장 가까운 위 저항). 둘 다 E 이하이면 목표 없음 → 그 분은 자리 아님.",
+  "cost": "c = scripts/eval/costs.round_trip(day, market, at_open = t < 09:05).",
+  "rr_condition": "(T - E - c*E) / (E - S + c*E) >= 2.0",
+  "entry_exclusions": "E >= limit_up_price(전일 종가) 이면 매수 불가로 그 분 건너뜀. 첫 봉 open 이 전일 종가 대비 ±30% 밖이면(수정주가 이음매) 종목-일 제외.",
+  "one_trade": "종목-일당 최초로 조건을 만족한 분에 1회 진입. 손절 후 재진입 없음. 14:30 까지 없으면 거래 없음.",
+  "exit": "봉 t 부터 순서대로: (1) b > t 이고 open <= S 이면 open 에 청산(갭). (2) low <= S 이면 S - 1틱에 청산. (3) high > T (엄격히 위) 이면 T 에 청산. 같은 봉에서 (2)(3) 둘 다면 (2) 손절(보수적). (4) 없으면 15:00 봉 open, 15:00 봉이 없으면 15:00 이전 마지막 close.",
+  "net": "net = exit/E - 1 - c. 단위 bp."
+ },
+ "stage1": {
+  "data": "data/eval/prompt_v3/master.jsonl (v2 판정, decide_at 포함), 2026-03-17..2026-09-15.",
+  "primary_metric": "실행된 거래의 거래당 평균 net (bp), 날짜 클러스터 부트스트랩 95% CI (n_boot 2000, seed 0).",
+  "pass": {
+   "P1": "평균 net > 0 이고 CI 하한 > 0.",
+   "P2": "월별 평균 net 이 양수인 달 >= 4/7 (2026-03 은 부분 월이지만 한 달로 센다).",
+   "P3": "net 상위 1% 거래를 뺀 평균 net > 0."
+  },
+  "verdict": "P1·P2·P3 모두 → 통과, 2단계 진행. 하나라도 실패 → 기각, 2단계 데이터는 건드리지 않는다.",
+  "attribution_not_gating": "매치드 널: 같은 날 × 전일 거래대금 4분위 × 전일 수익률 4분위(그날 daily_bars 있는 전 종목으로 분위), 풀 = 그날 master 에 어떤 판정도 없는 종목. 후보당 3개, seed 0, 짝의 시작 시각을 그대로 물려받아 같은 규칙으로 스캔. news_alpha = 후보 거래 평균 net - 대조 거래 평균 net (날짜 클러스터 부트스트랩). 판정에는 안 쓰고 '뉴스 덕인가 손익비 규칙 덕인가'를 가르는 데만 쓴다.",
+  "reference_only": [
+   "sentiment_direction 0 / -1 후보에 같은 규칙",
+   "decide_at 한 번만 보고 안 되면 포기하는 변형",
+   "시장별(거래소/코스닥), persistence 별, reports_price_move 별",
+   "진입률(후보 중 거래 비율), 일평균 거래 수, 동시 보유 최대치, 승률, 실현 손익비, 청산 사유 분포"
+  ]
+ },
+ "stage2": {
+  "data": "2026-09-16 이후 모의 매매 데몬의 실시간 판정 data/news_judgments_paper/*.jsonl (daytrade-it 과 daytrade-it-judge 의 합집합, key 별 가장 이른 judged_at). decide_at = judged_at.",
+  "rule": "1단계와 동일. 아무것도 바꾸지 않는다.",
+  "pass": "거래 >= 100 이고 평균 net > 0 (점추정). 거래 < 100 이면 판정 보류, 날짜가 쌓이면 같은 규칙으로 1회 다시.",
+  "note": "1단계가 기각되면 돌리지 않는다."
+ },
+ "not_allowed": "결과를 본 뒤 2.0 비율·손절/목표 정의·14:30·15:00·후보 정의를 바꿔 다시 재는 것. 바꾸려면 새 사전등록과 새 데이터."
+}
