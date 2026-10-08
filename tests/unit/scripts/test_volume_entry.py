@@ -8,7 +8,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "scripts" / "eval"))
 
-from volume_entry import simulate  # noqa: E402
+from volume_entry import minute_base, simulate  # noqa: E402
 
 C = 0.004
 BASE = 1_000.0  # 평균 1분 거래대금. 5배 = 5,000
@@ -108,3 +108,8 @@ def test_no_baseline_no_trade():
         simulate(bars(QUIET, SPIKE_UP, (2, 100, 100, 100, 100, 1)), 1, float("nan"), 100, C, C)
         is None
     )
+
+
+def test_minute_base_converts_million_won():
+    # 일 거래대금 7,600 백만원(76억) → 1분 평균 2,000만원
+    assert minute_base(7_600) == pytest.approx(20_000_000)

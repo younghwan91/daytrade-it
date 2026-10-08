@@ -43,12 +43,19 @@ from rr_entry_filter import (
     summarize,
 )
 
-PREREG = REPO / "docs/research/frozen/2026-10-09-volume-entry-prereg.json"
+PREREG = REPO / "docs/research/frozen/2026-10-09-volume-entry-amend1.json"
 SPIKE = 5.0
 BASE_DAYS = 20
 SESSION_MIN = 380
+#: daily_bars.trade_value 는 백만원 단위다(분봉 close×volume 합과 비율 ~1e6, amend1). 원으로 바꿔 쓴다.
+DAILY_TV_UNIT = 1_000_000
 STOP = 0.02
 TARGET = 0.04
+
+
+def minute_base(daily_tv_million):
+    """직전 20거래일 평균 일 거래대금(백만원) → 평균 1분 거래대금(원)."""
+    return daily_tv_million * DAILY_TV_UNIT / SESSION_MIN
 
 
 def load_daily(con, first: dt.date, last: dt.date) -> pd.DataFrame:
@@ -62,9 +69,8 @@ def load_daily(con, first: dt.date, last: dt.date) -> pd.DataFrame:
     d["prev_close"] = g["close"].shift(1)
     d["prev_tv"] = g["trade_value"].shift(1)
     d["prev_ret"] = d["prev_close"] / g["close"].shift(2) - 1
-    d["base"] = (
+    d["base"] = minute_base(
         g["trade_value"].transform(lambda s: s.shift(1).rolling(BASE_DAYS, min_periods=1).mean())
-        / SESSION_MIN
     )
     return d[(d["date"] >= first) & (d["date"] <= last)].reset_index(drop=True)
 
