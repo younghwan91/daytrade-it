@@ -72,6 +72,10 @@ STATE = Path("data/eval/cache/universe_batch_state.json")
 
 INPUT_USD_PER_M = 1.0  # Haiku 4.5
 OUTPUT_USD_PER_M = 5.0
+#: (input, output) $/M by model — Haiku 5.5 (2026-10-07) is 1/10 of 4.5 for prompts ≤100k tokens.
+PRICES = {"claude-haiku-5-5": (0.10, 0.50)}
+#: Models that reject `temperature` (400 "`temperature` is deprecated for this model").
+NO_TEMPERATURE = {"claude-haiku-5-5"}
 BATCH_DISCOUNT = 0.5
 MAX_ATTEMPTS = 3  # same as live score_article (_MAX_RETRIES + 1)
 CHUNK = 10_000  # requests per batch (API limit 100k / 256 MB)
@@ -146,9 +150,9 @@ def build_request(pair: dict, model: str) -> dict:
         "params": {
             "model": model,
             "system": system,
-            "temperature": 0,
             "max_tokens": _MAX_OUTPUT_TOKENS,
             "messages": [{"role": "user", "content": user}],
+            **({} if model in NO_TEMPERATURE else {"temperature": 0}),
         },
     }
 
@@ -193,7 +197,9 @@ def _chars(req: dict) -> int:
 def estimate_cost(requests: list[dict], chars_per_token: float, output_tokens: int) -> dict:
     input_tokens = round(sum(_chars(r) for r in requests) / chars_per_token)
     out = len(requests) * output_tokens
-    usd = (input_tokens * INPUT_USD_PER_M + out * OUTPUT_USD_PER_M) / 1e6 * BATCH_DISCOUNT
+    model = requests[0]["params"]["model"] if requests else ""
+    in_usd, out_usd = PRICES.get(model, (INPUT_USD_PER_M, OUTPUT_USD_PER_M))
+    usd = (input_tokens * in_usd + out * out_usd) / 1e6 * BATCH_DISCOUNT
     return {
         "requests": len(requests),
         "input_tokens": input_tokens,
@@ -856,8 +862,10 @@ def main() -> None:
         missing = [f for f in ("pairs", "budget_usd", "sample") if getattr(args, f) is None]
         if missing:
             ap.error("required unless --collect-only: " + ", ".join(f"--{m}" for m in missing))
-    if not args.model.startswith("claude-haiku-4-5"):
-        sys.exit(f"model must be Haiku 4.5 (plan Global Constraints), got {args.model}")
+    # A-plan pinned Haiku 4.5. The swing persistence study (swing-it, 2026-10-08) judges a fresh
+    # window end-to-end with Haiku 5.5 into its own cache — the two models never share a cache.
+    if not (args.model.startswith("claude-haiku-4-5") or args.model == "claude-haiku-5-5"):
+        sys.exit(f"model must be Haiku 4.5 or 5.5, got {args.model}")
 
     # --collect-only touches no pair: skip reading the (large) pairs file entirely
     pairs = (
