@@ -266,3 +266,40 @@ def should_judge(
         )
         is None
     )
+
+
+# --- 스윙 전용(2026-10-08, swing-it 스윙 2호) ------------------------------------------------
+# 장중 판정(should_judge)과 **따로** 둔다: [특징주]·[장중수급포착] 은 장중 BUY 의 실제 원천이라 일부러
+# 거르지 않았다(위 테스트). 스윙 사건은 "주가 보도가 아닌 main·호재·비반복" 이라 이 태그들은 사건이 거의 없다 —
+# 2026-03~09 Haiku 4.5 판정 115,197쌍에서 사건(기준 16.3%) 비율 ≤1% · n≥50 인 태그만 골랐다
+# (합계 약 8.5천 쌍, 잃는 사건 ~5건). 스윙 백테스트와 스윙 실행은 이 함수 하나를 함께 쓴다.
+SWING_SKIP_TAGS: frozenset[str] = frozenset(
+    {
+        "장중수급포착",  # n=2890, 사건 0
+        "특징주",  # n=2461, 3
+        "증시키워드",  # n=531, 0
+        "마켓뷰",  # n=169, 0
+        "ET특징주",  # n=158, 1
+        "급등락주 짚어보기",  # n=158, 0
+        "테마시황",  # n=134, 0
+        "오늘의 주요공시",  # n=121, 0
+        "기고",  # n=64, 0
+        "전국 주요 신문 톱뉴스",  # n=59, 0
+        "정책의속살",  # n=55, 0
+        "MBN골드",  # n=55, 0
+        "핫타임",  # n=55, 0
+        "이슈플러스",  # n=53, 0
+    }
+)
+
+
+def swing_skip_tag(title: str | None) -> str | None:
+    """스윙 판정에서 뺄 태그(장중 roundup 포함), 아니면 None. 순수 함수."""
+    tag = roundup_tag(title)
+    if tag is not None:
+        return tag
+    match = BRACKET_RE.match(title or "")
+    if match is None:
+        return None
+    tag = match.group(1).strip()
+    return tag if tag in SWING_SKIP_TAGS else None

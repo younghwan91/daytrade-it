@@ -135,6 +135,11 @@ def custom_id_of(key: str) -> str:
     return key.replace("|", "_")
 
 
+SYSTEM_ADDENDUM = (
+    ""  # set from --system-addendum (swing persistence prompt, appended to the live _SYSTEM)
+)
+
+
 def build_request(pair: dict, model: str) -> dict:
     system, user = build_prompt(
         code=pair["code"],
@@ -145,6 +150,8 @@ def build_request(pair: dict, model: str) -> dict:
         body=pair.get("body") or "",
         category=pair.get("category"),
     )
+    if SYSTEM_ADDENDUM:
+        system = system + "\n\n" + SYSTEM_ADDENDUM
     return {
         "custom_id": custom_id_of(pair["key"]),
         "params": {
@@ -153,6 +160,9 @@ def build_request(pair: dict, model: str) -> dict:
             "max_tokens": _MAX_OUTPUT_TOKENS,
             "messages": [{"role": "user", "content": user}],
             **({} if model in NO_TEMPERATURE else {"temperature": 0}),
+            # Haiku 5.5 thinks by default and the 400-token cap went entirely to thinking (pilot 2026-10-08:
+            # 320/500 empty, 90 truncated). The live v2 judge (Haiku 4.5) never thought — disable to replicate it.
+            **({"thinking": {"type": "disabled"}} if model in NO_TEMPERATURE else {}),
         },
     }
 
@@ -831,6 +841,12 @@ def main() -> None:
     ap.add_argument("--chunk", type=int, default=CHUNK)
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument(
+        "--system-addendum",
+        type=Path,
+        default=None,
+        help="text appended to the live system prompt (swing persistence: prompts/r3.txt)",
+    )
+    ap.add_argument(
         "--adopt-batch",
         default=None,
         help="record an existing batch for a failed (uncertain) create, then resume",
@@ -864,6 +880,9 @@ def main() -> None:
             ap.error("required unless --collect-only: " + ", ".join(f"--{m}" for m in missing))
     # A-plan pinned Haiku 4.5. The swing persistence study (swing-it, 2026-10-08) judges a fresh
     # window end-to-end with Haiku 5.5 into its own cache — the two models never share a cache.
+    global SYSTEM_ADDENDUM
+    if args.system_addendum is not None:
+        SYSTEM_ADDENDUM = args.system_addendum.read_text(encoding="utf-8").strip()
     if not (args.model.startswith("claude-haiku-4-5") or args.model == "claude-haiku-5-5"):
         sys.exit(f"model must be Haiku 4.5 or 5.5, got {args.model}")
 

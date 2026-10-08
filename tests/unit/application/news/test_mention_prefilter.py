@@ -331,3 +331,34 @@ class TestAdoptedThresholds:
         for title, (n, expected) in cases.items():
             assert skip_reason(title, n, enabled=True) == expected
             assert should_judge("기아", "000270", title, "", n, enabled=True) is False
+
+
+class TestSwingSkipTag:
+    """스윙 전용 필터 — 장중 should_judge 와 독립."""
+
+    @pytest.mark.parametrize(
+        "title, tag",
+        [
+            ("[장중수급포착] 한화생명, 외국인/기관 동시 순매수… 주가 +8.15%", "장중수급포착"),
+            ("[특징주] 삼성전기, 10%대 급등에 신고가 경신", "특징주"),
+            ("【마켓뷰】 코스피 숨고르기", "마켓뷰"),
+            ("[표] 외국인 순매수 상위", "표"),  # 장중 roundup 도 스윙에서 뺀다
+        ],
+    )
+    def test_skips(self, title, tag):
+        from daytrade_it.application.news.mention_prefilter import swing_skip_tag
+
+        assert swing_skip_tag(title) == tag
+
+    @pytest.mark.parametrize(
+        "title", ["[단독] 삼성전자, 美 공장 증설", "[컨콜] SK하이닉스 HBM 수요", "LG엔솔 수주"]
+    )
+    def test_keeps(self, title):
+        from daytrade_it.application.news.mention_prefilter import swing_skip_tag
+
+        assert swing_skip_tag(title) is None
+
+    def test_live_judge_unchanged(self):
+        from daytrade_it.application.news.mention_prefilter import should_judge
+
+        assert should_judge(None, None, "[특징주] 삼성전기, 10%대 급등", None, 1, enabled=True)
