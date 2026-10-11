@@ -22,6 +22,11 @@ Changes from the scalp-it port (`v1`), each backed by that eval:
 
 Toss gives only ~300-char summaries; full article text isn't fetched.
 No SDK dependency: a raw httpx call, same as scalp-it's provider.
+
+모델은 Claude Haiku 5.5 (`claude-haiku-5-5`). v2 가 측정·운영된 건 Haiku 4.5
+(`claude-haiku-4-5-20251001`) 였고, 2026-10-12 부터 Haiku 5.5 만 쓴다 — 그
+4.5 결과는 `data/legacy/` 에 보관했다. 요청 모양은 swing-it `news/judge.py`
+와 같다(:func:`request_payload`).
 """
 
 from __future__ import annotations
@@ -277,9 +282,37 @@ def build_prompt(
 
 # --- HTTP call ---------------------------------------------------------------
 
-DEFAULT_MODEL = "claude-haiku-4-5-20251001"
+DEFAULT_MODEL = "claude-haiku-5-5"
 _MAX_OUTPUT_TOKENS = 400
 _MAX_RETRIES = 2
+
+
+def request_payload(model: str, system: str, user: str) -> dict[str, Any]:
+    """Messages API 요청 본문 — Haiku 5.5 기준.
+
+    - ``temperature`` 는 보내지 않는다: Haiku 5.5 는 기본값이 아닌 값을 400 으로 거절한다.
+    - ``thinking`` 은 끈다: Haiku 5.5 는 기본으로 생각하고, 400 토큰 상한을 생각이 다
+      먹는다(swing-it 파일럿 2026-10-08: 500건 중 320건 빈 응답). 기본 effort(medium)
+      에서는 ``disabled`` 가 허용된다.
+    - system 은 ``cache_control`` 블록으로 보낸다. 모델이 읽는 텍스트는 평문과 같다.
+      Haiku 5.5 의 최소 캐시 접두는 512 토큰이라 지금 ``_SYSTEM``(약 200자)은 실제로는
+      캐시되지 않는다 — 오류는 없고, system 이 길어지면 그때부터 캐시된다.
+    """
+    return {
+        "model": model,
+        "system": [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
+        "max_tokens": _MAX_OUTPUT_TOKENS,
+        "thinking": {"type": "disabled"},
+        "messages": [{"role": "user", "content": user}],
+    }
+
+
+def response_text(body: dict[str, Any]) -> str:
+    """응답에서 첫 ``text`` 블록의 텍스트. thinking 등 다른 블록은 건너뛴다(없으면 "")."""
+    for block in body.get("content") or []:
+        if isinstance(block, dict) and block.get("type") == "text":
+            return str(block.get("text", ""))
+    return ""
 
 
 class AnthropicClient:
@@ -313,17 +346,10 @@ class AnthropicClient:
                 "anthropic-version": "2023-06-01",
                 "content-type": "application/json",
             },
-            json={
-                "model": self._model,
-                "system": system,
-                "temperature": 0,
-                "max_tokens": _MAX_OUTPUT_TOKENS,
-                "messages": [{"role": "user", "content": user}],
-            },
+            json=request_payload(self._model, system, user),
         )
         response.raise_for_status()
-        blocks = response.json().get("content") or []
-        return "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
+        return response_text(response.json())
 
     async def score_article(
         self,

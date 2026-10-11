@@ -15,7 +15,11 @@ Evaluation discipline:
   and new scoring rules over the same outputs cost nothing.
 
 Usage:
-  uv run python scripts/eval/eval_news_prompts.py --variants v1,v2,v3 --model claude-haiku-4-5-20251001
+  uv run python scripts/eval/eval_news_prompts.py --variants v1,v2,v3 --model claude-haiku-5-5
+
+2026-09-13 평가는 Haiku 4.5(`claude-haiku-4-5-20251001`)로 돌았다. 2026-10-12 부터
+Haiku 5.5 만 쓴다 — 4.5 캐시 파일은 `data/legacy/` 에 보관했다. 요청 모양은 운영
+클라이언트(`anthropic_client.request_payload`)와 같다.
 """
 
 from __future__ import annotations
@@ -33,6 +37,8 @@ from pathlib import Path
 
 import httpx
 from scipy.stats import spearmanr
+
+from daytrade_it.infrastructure.external.anthropic_client import request_payload, response_text
 
 EVAL_SET = Path("data/eval/news_eval_set.jsonl")
 CACHE_DIR = Path("data/eval/cache")
@@ -303,18 +309,10 @@ async def judge_all(rows: list[dict], variant: str, model: str) -> list[Scored]:
                                 "anthropic-version": "2023-06-01",
                                 "content-type": "application/json",
                             },
-                            json={
-                                "model": model,
-                                "system": system,
-                                "temperature": 0,
-                                "max_tokens": 400,
-                                "messages": [{"role": "user", "content": user}],
-                            },
+                            json=request_payload(model, system, user),
                         )
                         resp.raise_for_status()
-                        text = "".join(
-                            b.get("text", "") for b in resp.json()["content"] if b["type"] == "text"
-                        )
+                        text = response_text(resp.json())
                         cache[key] = extract_json(text)
                         with cache_path.open("a") as f:
                             f.write(
@@ -374,7 +372,7 @@ def report(label: str, scored: list[Scored], fn: Callable[[dict], float], thr: f
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--variants", default="v1,v2,v3")
-    parser.add_argument("--model", default="claude-haiku-4-5-20251001")
+    parser.add_argument("--model", default="claude-haiku-5-5")
     parser.add_argument(
         "--show-test", action="store_true", help="also print the held-out test split"
     )

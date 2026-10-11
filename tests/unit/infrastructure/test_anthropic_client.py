@@ -2,14 +2,19 @@
 
 import json
 
+import httpx
 import pytest
 
 from daytrade_it.infrastructure.external.anthropic_client import (
+    DEFAULT_MODEL,
     SIGNAL_THRESHOLD,
+    AnthropicClient,
     ArticleFeatures,
     SchemaError,
     build_prompt,
     parse_features,
+    request_payload,
+    response_text,
 )
 
 _VALID = {
@@ -180,3 +185,75 @@ def test_production_prompt_is_the_evaluated_prompt() -> None:
     assert anthropic_client._SYSTEM == module.SYSTEM_V2
     assert anthropic_client._USER_TEMPLATE == module.USER_V2
     assert anthropic_client._USER_TEMPLATE_FULL_BODY == module.USER_V4
+
+
+# --- 요청 모양 (Haiku 5.5) -------------------------------------------------------
+
+
+def test_default_model_is_haiku_5_5() -> None:
+    assert DEFAULT_MODEL == "claude-haiku-5-5"
+
+
+def test_request_payload_matches_haiku_5_5_constraints() -> None:
+    """temperature 없음(5.5 는 기본값 외 400), thinking 끔(400 토큰 상한을 생각이 먹는다),
+    system 은 캐시 블록 하나 — 텍스트는 평문 그대로."""
+    payload = request_payload("claude-haiku-5-5", "SYS", "USER")
+    assert "temperature" not in payload
+    assert payload["thinking"] == {"type": "disabled"}
+    assert payload["system"] == [
+        {"type": "text", "text": "SYS", "cache_control": {"type": "ephemeral"}}
+    ]
+    assert payload["messages"] == [{"role": "user", "content": "USER"}]
+    assert payload["model"] == "claude-haiku-5-5"
+    assert payload["max_tokens"] == 400
+
+
+def test_response_text_skips_thinking_blocks() -> None:
+    body = {
+        "content": [
+            {"type": "thinking", "thinking": "", "signature": "x"},
+            {"type": "text", "text": "first"},
+            {"type": "text", "text": "second"},
+        ]
+    }
+    assert response_text(body) == "first"
+    assert response_text({"content": [{"type": "thinking", "thinking": ""}]}) == ""
+    assert response_text({}) == ""
+
+
+async def test_score_article_sends_haiku_5_5_request() -> None:
+    """네트워크 없이(MockTransport) 실제 _complete 경로가 보내는 본문을 확인한다."""
+    seen: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "content": [
+                    {"type": "thinking", "thinking": ""},
+                    {"type": "text", "text": json.dumps(_VALID, ensure_ascii=False)},
+                ]
+            },
+        )
+
+    client = AnthropicClient(api_key="test-key")
+    await client.close()
+    client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    async with client:
+        features = await client.score_article(
+            code="005930",
+            name="삼성전자",
+            market="KOSPI",
+            sector="반도체",
+            title="t",
+            body="b",
+            category=None,
+        )
+    assert features.subject == "main"
+    assert len(seen) == 1
+    body = seen[0]
+    assert body["model"] == "claude-haiku-5-5"
+    assert "temperature" not in body
+    assert body["thinking"] == {"type": "disabled"}
+    assert body["system"][0]["cache_control"] == {"type": "ephemeral"}

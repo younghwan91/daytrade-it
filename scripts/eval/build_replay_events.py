@@ -159,7 +159,7 @@ async def judge(pairs: list[dict], stocks: dict) -> dict[str, dict]:
             except ExternalAPIError as exc:
                 # A single pair's model output can fail the fixed schema
                 # (e.g. a persistence value outside the allowed set) even
-                # at temperature 0 and after retries -- skip that pair
+                # after retries -- skip that pair
                 # rather than losing every already-judged pair in the run.
                 print(f"WARNING: score_article failed for {key}: {exc} -- skipping this pair")
                 continue
