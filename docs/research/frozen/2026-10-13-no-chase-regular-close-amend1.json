@@ -1,0 +1,16 @@
+{
+ "amends": "전진 게이트(scripts/eval/forward_gate.py, 기본 --since 2026-09-14 — frozen 원본 파일 없음)와 라이브 추격 금지 R17(src/daytrade_it/application/signals/entry_filter.py, MAX_PRE_ENTRY_MOVE 3%, 2026-09-15)",
+ "at": "2026-10-13T01:40:00+09:00",
+ "kind": "규칙 변경(사용자 결정 \"정규장으로 되돌림\") — 3% 문턱·10일 조회 창·나머지 정책은 그대로. 추격 판정의 전일 종가 기준만 바꾼다.",
+ "rule_before": "2026-09-14 ~ 2026-10-12 세션: 전일 종가 = daily_bars_adjusted 마지막 행 종가. 2026-09-14 부터 이 값에 KRX 애프터마켓(16:00~20:00 연속매매, ETF·ETN 제외) 체결이 섞였다. 3% 문턱은 09-14 전(일봉 종가 = 정규장 종가) 날짜로 고른 값이라 그 기간에는 뜻이 바뀌어 있었다.",
+ "rule_after": "2026-10-13 세션부터: 전일 종가 = 직전 세션 minute_bars 정규장(09:00 <= ts < 15:33, KST naive) 마지막 봉 종가(QuantAirflowDBClient.get_regular_session_close, 경계는 domain/services/krx_session). 그 봉이 없거나 일봉 마지막 날짜보다 오래됐으면 일봉 종가로 돌아가고 prev_close_source=daily_fallback 으로 로그·신호 metadata 에 남긴다.",
+ "fallback_reason": "분봉은 scalp-it 15:45 크론(top-1400 + 장전 판정 핀)만 적재한다. 09-15~10-12 데몬 로그의 추격 판정 종목-일 756 건 중 21 건(2.8%)이 직전 세션 정규장 분봉이 없었다. 차단하면 유니버스가 조용히 분봉 유니버스로 줄고(10-12 이전 규칙과 다른 매매 집합), 일봉 종가 대체는 그 종목들에 대해 10-12 이전 동작 그대로다. 애프터마켓 괴리는 대부분 수 % 안이지만 008930 10-07 처럼 14% 인 경우도 있어 대체 건은 따로 센다(로그 경고).",
+ "start": "2026-10-13",
+ "start_condition": "2026-10-13 07:50 pull-all 이 이 변경이 머지된 main 을 당긴 경우. 머지가 늦어 첫 세션이 다른 날이면 이 파일을 고치지 말고 amend2 로 start 와 entry_filter.REGULAR_CLOSE_FROM 을 함께 옮긴다. 확인 방법: 그날 데몬 로그의 'entry_filter: extended, no entry' 행에 prev_close_source 가 있는가 — replay_parity.check_no_chase_basis 가 어긋나면 그날 리플레이를 실패시킨다.",
+ "forward_record": "기존 구간(--since 2026-09-14 → data/eval/forward_gate/latest.*)은 지우지 않고 계속 쓴다. 단 2026-10-13 부터 두 규칙이 섞인 기록이다. 현재 규칙의 전진 기록 = 새 구간 2026-10-13~ → data/eval/forward_gate/regular_close/latest.* (forward_gate.py 기본 실행이 두 보고서를 다 쓴다, --no-regular-segment 로 끈다). 7개 조건·비용 36.7bp·G7(≥10일·≥30거래)·--n-trials 200 은 그대로.",
+ "verdict_rule": "현재 규칙(정규장 기준)의 승격 판단은 새 구간 보고서로만 한다. 새 구간이 G7 을 채우기 전에는 promote=true 가 나와도 판단하지 않는다. 기존 구간 보고서는 기록용이다. 실매매 재개 조건(promote=true + 사용자 명시 승인)은 바뀌지 않는다.",
+ "invalid_run_seen": "봤다. 기존 구간 2026-10-12 15:50 결과(15일·76거래, 중앙값 −87.3bp, promote=False)와, 이 변경 전에 계산한 영향(09-15~10-12 차단 308 건 중 4 건은 정규장 기준이면 통과, 진입 88 건 중 2 건 — 008930·126600, 10-08 — 은 정규장 기준이면 차단)을 본 뒤의 결정이다. 그래서 09-14~10-12 를 새 규칙으로 다시 채점해 새 구간에 넣지 않는다. 새 구간은 배포 이후 거래만 센다.",
+ "replay": "application/replay/prev_close.FrozenPrevCloseDB 가 REGULAR_CLOSE_FROM 전 날짜에는 정규장 종가를 내주지 않아(라이브가 일봉 종가를 쓰던 날) 필터가 그날 라이브와 같은 기준을 쓰고, 그 뒤 날짜에는 동결 krx_close 를 내준다. replay_parity 의 data_vintage 판정 기준은 FrozenPrevCloses.no_chase_prices, vintage 플래그 대조는 전환 뒤 날짜에 supply_demand 의 기준가(close/(1+flu_rt/1e4)).",
+ "known_limits": "minute_bars 종가는 수정주가가 아니다. 무상증자·권리락처럼 기준가가 다시 정해지는 날에는 정규장 종가가 그날 기준가와 달라 상승폭을 낮게 잰다(필터가 느슨해지는 쪽). 키움 기준가 필드는 새 API 호출이라 쓰지 않았다.",
+ "guard": "tests/unit/application/signals/test_entry_filter.py (정규장 기준·대체·오래된 봉), tests/unit/application/replay/test_prev_close.py (날짜별 기준), tests/unit/scripts/test_replay_parity.py (check_no_chase_basis·전환 뒤 vintage 대조), tests/integration/test_quant_airflow_db_client_integration.py::TestRegularSessionClose (005930 09-17 정규장 252,500)"
+}
