@@ -139,3 +139,24 @@ def test_regular_close_older_than_the_daily_close_is_a_fallback() -> None:
     )
     assert f.no_chase_fallbacks == ["A"]
     assert f.no_chase_prices == {"A": Decimal(100)}
+
+
+def test_daily_round_trips_and_feeds_the_filter_from_the_switch(tmp_path: Path) -> None:
+    """From REGULAR_CLOSE_FROM the stub's daily input is the frozen daily_bars_adjusted row,
+    not `closes`: a code whose minute bars stop a session early (closes and krx both on the
+    older date) is compared, as live does, to the prior session's daily row and falls back."""
+    older = NEW_PREV - dt.timedelta(days=3)
+    f = FrozenPrevCloses(
+        day=NEW_DAY,
+        closes={"328380": (Decimal(3770), older)},
+        krx={"328380": (Decimal(3760), older)},
+        daily={"328380": (Decimal(3600), NEW_PREV)},
+    )
+    path = tmp_path / "f.json"
+    dump_prev_closes(path, f)
+    assert load_prev_closes(path) == f
+    assert f.no_chase_prices == {"328380": Decimal(3600)}
+    assert f.no_chase_fallbacks == ["328380"]
+    # before the switch the daily input stays `closes` (files frozen before `daily`)
+    pre = FrozenPrevCloses(day=DAY, closes=FROZEN.closes, daily={"424870": (Decimal(1), PREV)})
+    assert pre.no_chase_prices == {"424870": Decimal(2900)}

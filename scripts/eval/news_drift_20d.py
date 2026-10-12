@@ -7,6 +7,10 @@
 
 탐색(explore)은 지표 전체를, 확인(confirm)은 --features 로 넘긴 후보만 잰다. 확인 구간 이벤트는
 --period confirm 일 때만 계산된다. LLM 판정은 쓰지 않는다. DB 는 읽기 전용.
+
+오염 경고: 가격은 ``daily_bars_adjusted`` 다. 2026-09-14 부터 그 종가·고가·저가·거래대금에 KRX 애프터마켓
+(16:00~20:00) 체결이 섞였다. 확인 구간 끝(2026-08-31) 근처 진입의 20일 지평은 그 날을 넘는다 —
+:func:`warn_aftermarket_closes` 가 실행 때 행 수를 알린다. 2026-09-14 이후 날짜로 구간을 늘리지 않는다.
 """
 
 from __future__ import annotations
@@ -23,6 +27,7 @@ import numpy as np
 import pandas as pd
 from krx_quant_core.stats.matched_null import matched_control
 from krx_quant_core.stats.metrics import newey_west_t
+from krx_session import AFTERMARKET_FROM
 from rr_entry_filter import db_url, log
 
 REPO = Path(__file__).resolve().parents[2]
@@ -79,8 +84,32 @@ def load_prices(con, first: dt.date, last: dt.date) -> pd.DataFrame:
     px["gap"] = px["open"] / c1 - 1
     for name, h in HORIZONS.items():
         px[name] = g["close"].shift(-(h - 1)) / px["open"] - 1
+    warn_aftermarket_closes(px, g, first, last)
     px["size_rank"] = px.groupby("date")["tv20"].rank(ascending=False)
     return px
+
+
+def warn_aftermarket_closes(px: pd.DataFrame, g, first: dt.date, last: dt.date) -> int:  # noqa: ANN001
+    """오염 경고: 지평 종가가 :data:`AFTERMARKET_FROM` 이후인 진입 행 수를 알린다.
+
+    2026-09-14 부터 ``daily_bars_adjusted`` 종가에 KRX 애프터마켓(16:00~20:00) 체결이 섞였다. 이 측정기는
+    수정주가 수익률이 필요해 ``krx_session.regular_daily``(원 ``daily_bars``)로 바꾸지 않았고, 확인 구간
+    (~2026-08-31) 은 이미 이 코드로 채점됐다(2026-10-09). 지평이 그 날을 넘는 행은 정규장 종가가 아닌 값으로
+    수익률을 잰다 — 그 날짜 이후로 구간을 늘려 다시 돌리지 않는다.
+    """
+    date = pd.to_datetime(px["date"])
+    in_window = (date >= pd.Timestamp(first)) & (date <= pd.Timestamp(last))
+    n = 0
+    for name, h in HORIZONS.items():
+        exit_date = pd.to_datetime(g["date"].shift(-(h - 1)))
+        bad = in_window & px[name].notna() & (exit_date >= pd.Timestamp(AFTERMARKET_FROM))
+        n = max(n, int(bad.sum()))
+    if n:
+        log(
+            f"경고: 지평 종가가 {AFTERMARKET_FROM} 이후(애프터마켓 포함 종가)인 진입 행 최대 {n:,} 개 "
+            "— 그 수익률은 정규장 기준이 아니다"
+        )
+    return n
 
 
 # ---------------------------------------------------------------- 뉴스

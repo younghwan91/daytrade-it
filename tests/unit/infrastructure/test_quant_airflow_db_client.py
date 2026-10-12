@@ -290,6 +290,27 @@ class TestReadOnlyEnforcement:
 
         mock_conn.set_session.assert_called_once_with(readonly=True, autocommit=True)
 
+    def test_statement_timeout_is_opt_in(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The news daemon passes one; research reads (long) get none by default."""
+        executed: list[tuple] = []
+
+        def make_conn() -> MagicMock:
+            conn = MagicMock()
+            conn.closed = False
+            cur = conn.cursor.return_value.__enter__.return_value
+            cur.execute.side_effect = lambda sql, params=None: executed.append((sql, params))
+            return conn
+
+        monkeypatch.setattr(
+            "daytrade_it.infrastructure.external.quant_airflow_db_client.psycopg2.connect",
+            lambda **_kw: make_conn(),
+        )
+        settings = QuantAirflowDBSettings(host="db.local", password="secret")
+        QuantAirflowDBClient(settings=settings).connect()
+        assert executed == []
+        QuantAirflowDBClient(settings=settings, statement_timeout_s=30).connect()
+        assert executed == [("SET statement_timeout = %s", (30000,))]
+
     def test_no_write_statements_anywhere_in_module(self) -> None:
         """Static guard: this module must never contain SQL write verbs."""
         import inspect

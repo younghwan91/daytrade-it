@@ -165,3 +165,57 @@ def test_choose_prev_close_prefers_a_regular_bar_newer_than_the_daily_bar() -> N
     only_daily = choose_prev_close(daily, None)
     assert only_daily is not None
     assert only_daily.source == DAILY_FALLBACK
+
+
+# M1: a failing minute_bars read (DB outage, statement timeout) must not drop the pair.
+
+
+class _RecordingLogger:
+    def __init__(self) -> None:
+        self.records: list[tuple[str, str, dict]] = []
+
+    def __getattr__(self, level: str):  # noqa: ANN204
+        def log(event: str, **kw: object) -> None:
+            self.records.append((level, event, kw))
+
+        return log
+
+
+class _FailingRegularDB(_DB):
+    def get_regular_session_close(self, ticker, *, before, lookback_days):  # noqa: ANN001, ANN201
+        from daytrade_it.shared.errors.exceptions import DatabaseError
+
+        raise DatabaseError(message="canceling statement due to statement timeout")
+
+
+def test_regular_close_query_error_falls_back_to_the_daily_close(monkeypatch) -> None:  # noqa: ANN001
+    from daytrade_it.application.signals import entry_filter
+
+    log = _RecordingLogger()
+    monkeypatch.setattr(entry_filter, "logger", log)
+    signal = generate_no_chase_confirmation(
+        Ticker(value="005930"), _Broker("70000", "70100"), _FailingRegularDB(70000.0), _EXPIRES
+    )
+    assert signal is not None
+    assert signal.metadata["prev_close_source"] == DAILY_FALLBACK
+    [(level, _ev, kw)] = [r for r in log.records if "fallback" in r[1]]
+    assert level == "warning"
+    assert "statement timeout" in kw["regular_error"]
+
+
+def test_pre_switch_fallback_is_debug_not_a_warning(monkeypatch) -> None:  # noqa: ANN001
+    """Replaying a day before REGULAR_CLOSE_FROM: the daily close was the rule, every pair
+    falls back -- one warning per pair would bury real ones."""
+    import time_machine
+
+    from daytrade_it.application.signals import entry_filter
+
+    log = _RecordingLogger()
+    monkeypatch.setattr(entry_filter, "logger", log)
+    day = entry_filter.REGULAR_CLOSE_FROM - dt.timedelta(days=1)
+    with time_machine.travel(dt.datetime.combine(day, dt.time(9, 30)), tick=False):
+        signal = generate_no_chase_confirmation(
+            Ticker(value="005930"), _Broker("70000", "70100"), _DB(70000.0, None), _EXPIRES
+        )
+    assert signal is not None
+    assert [lvl for lvl, ev, _ in log.records if "fallback" in ev] == ["debug"]

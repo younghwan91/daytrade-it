@@ -279,6 +279,7 @@ class QuantAirflowDBClient:
         user: str | None = None,
         password: str | None = None,
         connect_timeout: float | None = None,
+        statement_timeout_s: float | None = None,
         settings: QuantAirflowDBSettings | None = None,
     ) -> None:
         """Initialize the client. Explicit args win; otherwise falls back to settings.
@@ -291,6 +292,11 @@ class QuantAirflowDBClient:
             password: Password for `user`. Defaults to configured settings.
             connect_timeout: Connection timeout in seconds. Defaults to
                 configured settings.
+            statement_timeout_s: Server-side ``statement_timeout`` for every
+                query on this client's connections, in seconds. ``None`` (the
+                default) sets none -- research scripts run long reads. The
+                news daemon passes one so a stuck query cannot stall its loop;
+                a timed-out query raises `DatabaseError` like any other.
             settings: Explicit settings object (mainly for tests). If not
                 given, lazily pulled from ``get_settings().quant_airflow_db``
                 only when needed, so constructing this client with all
@@ -305,6 +311,9 @@ class QuantAirflowDBClient:
             "password": password,
             "connect_timeout": connect_timeout,
         }
+        self._statement_timeout_ms = (
+            None if statement_timeout_s is None else int(statement_timeout_s * 1000)
+        )
         self._settings = settings
         self._conn: Any | None = None
 
@@ -365,6 +374,17 @@ class QuantAirflowDBClient:
         # connection now fails at the Postgres level, independent of what
         # this client's own code does or doesn't send.
         conn.set_session(readonly=True, autocommit=True)
+        if self._statement_timeout_ms is not None:
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("SET statement_timeout = %s", (self._statement_timeout_ms,))
+            except psycopg2.Error as exc:
+                conn.close()
+                raise DatabaseError(
+                    message="Failed to set statement_timeout on quant-airflow TimescaleDB",
+                    error_code=error_codes.DATABASE_CONNECTION_ERROR,
+                    cause=exc,
+                ) from exc
 
         logger.info(
             "Connected to quant-airflow TimescaleDB (read-only)",
@@ -598,11 +618,22 @@ class QuantAirflowDBClient:
         ``known_date < known_before`` (disclosed on an earlier day, so usable
         from that trading day's open).
 
+        Pass **both** for point-in-time use: ``asof=<day - 1>`` and
+        ``known_before=<day>``. ``known_before`` filters which periods are
+        visible, not which version: with ``asof=None`` each visible period
+        carries its *latest* version, so a restatement filed after ``day``
+        leaks its values (5 code-periods had more than one version on
+        2026-10-13). The pair is slightly stricter than ``known_before``
+        alone: 25 of 93,836 periods had their first version recorded
+        (``knowledge_date``) after ``known_date``, and ``asof`` hides them
+        until then.
+
         Args:
             ticker: KRX 6-digit code.
             asof: Ceiling on ``knowledge_date``. ``None`` means latest-known.
             known_before: Keep only periods whose ``known_date`` is strictly
                 before this date. ``None`` keeps all (not lookahead-safe).
+                Pair it with ``asof`` (see above).
 
         Returns:
             One row per ``period``, ordered by period ascending.

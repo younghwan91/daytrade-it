@@ -77,6 +77,7 @@ from krx_quant_core.execution.oms import AlreadyRunning, InstanceLock
 from sqlalchemy import select
 
 from daytrade_it.application.news.mention_prefilter import skip_reason
+from daytrade_it.application.signals.entry_filter import REGULAR_CLOSE_FROM
 from daytrade_it.application.signals.news_entry import build_entry_candidate
 from daytrade_it.application.trading.auto_trader import AutoTrader, rank_batch
 from daytrade_it.domain.entities.news import NewsArticle
@@ -506,6 +507,8 @@ async def process_pair(
         direction=composite.direction.value,
         news_score=round(sentiment.score, 3),
         pre_entry_move=composite.metadata["pre_entry_move"],
+        prev_close=composite.metadata.get("prev_close"),
+        prev_close_source=composite.metadata.get("prev_close_source"),
         article_title=article.title,
     )
 
@@ -612,6 +615,47 @@ async def run(
         lock.release()
 
 
+#: kr_quant statement timeout for the daemon's client. The no-chase filter's cold
+#: minute_bars read took ~15 s on 2026-10-13; a timed-out read falls back to the daily
+#: close (`entry_filter`), it never drops the pair.
+DB_STATEMENT_TIMEOUT_S = 30
+
+
+def log_no_chase_basis(
+    db_client: QuantAirflowDBClient, today: dt.date, prior_session: dt.date
+) -> None:
+    """Startup line `no_chase_basis=...` (replay_parity.check_no_chase_basis reads it) and a
+    warning if the prior session's regular minute bars are missing.
+
+    The diagnostic query is best-effort: a DB error is logged and startup goes on --
+    raising here killed `_run_locked` and the daemon wrapper restarted it every 5 s,
+    reconnecting Kiwoom each time without a disconnect.
+    """
+    logger.info(
+        "news_signal_poller: no-chase basis",
+        no_chase_basis="regular" if today >= REGULAR_CLOSE_FROM else "daily",
+        regular_close_from=str(REGULAR_CLOSE_FROM),
+    )
+    # The filter measures against the prior regular-session close from minute bars
+    # (scalp-it's 15:45 cron). If they are missing for the prior session, every ticker
+    # falls back to the after-market-inclusive daily close -- say so at startup.
+    # (Also warms the minute_bars chunk; the first cold read took ~15 s on 2026-10-13.)
+    try:
+        regular = db_client.get_regular_session_close(
+            Ticker(value="005930"), before=today, lookback_days=14
+        )
+    except Exception:
+        logger.exception("news_signal_poller: regular-close startup check failed, continuing")
+        return
+    if regular is None or regular.date < prior_session:
+        logger.warning(
+            "news_signal_poller: prior-session regular minute bars missing, "
+            "no-chase falls back to the daily close",
+            prior_session=str(prior_session),
+            regular_close_date=None if regular is None else str(regular.date),
+        )
+
+
 async def _run_locked(
     *,
     once: bool,
@@ -632,18 +676,27 @@ async def _run_locked(
         logger.error("news_signal_poller: broker connect failed, exiting")
         return
 
-    db_client = QuantAirflowDBClient()
-    stocks = db_client.get_stock_master()
+    # A hung kr_quant query would stall the poll loop (the filter runs per judged pair).
+    db_client = QuantAirflowDBClient(statement_timeout_s=DB_STATEMENT_TIMEOUT_S)
     # min_confidence=0: the BUY set must be exactly score > SIGNAL_THRESHOLD,
     # the rule that was evaluated (see anthropic_client.ArticleFeatures).
     gen = SignalGenerator(SignalConfig(min_confidence=0.0))
 
     today = dt.date.today()
-    prior_bars = db_client.get_adjusted_daily_bars(
-        Ticker(value="005930"),
-        start=today - dt.timedelta(days=14),
-        end=today - dt.timedelta(days=1),
-    )
+    # The daemon cannot run without these two; on a DB error exit cleanly (the wrapper
+    # restarts in 5 s) instead of leaving the Kiwoom session connected.
+    try:
+        stocks = db_client.get_stock_master()
+        prior_bars = db_client.get_adjusted_daily_bars(
+            Ticker(value="005930"),
+            start=today - dt.timedelta(days=14),
+            end=today - dt.timedelta(days=1),
+        )
+    except Exception:
+        logger.exception("news_signal_poller: kr_quant startup read failed, exiting")
+        broker.disconnect()
+        db_client.close()
+        return
     if not prior_bars:
         logger.error("news_signal_poller: cannot determine previous trading day, exiting")
         broker.disconnect()
@@ -654,16 +707,7 @@ async def _run_locked(
     # bars (scalp-it's 15:45 cron). If they are missing for the prior session, every
     # ticker falls back to the after-market-inclusive daily close -- say so at startup.
     # (Also warms the minute_bars chunk; the first cold read took ~15 s on 2026-10-13.)
-    regular = db_client.get_regular_session_close(
-        Ticker(value="005930"), before=today, lookback_days=14
-    )
-    if regular is None or regular.date < prior_bars[-1].date:
-        logger.warning(
-            "news_signal_poller: prior-session regular minute bars missing, "
-            "no-chase falls back to the daily close",
-            prior_session=str(prior_bars[-1].date),
-            regular_close_date=None if regular is None else str(regular.date),
-        )
+    log_no_chase_basis(db_client, today, prior_bars[-1].date)
 
     # Articles are marked seen when polled. Polling before the open would
     # burn them on a pre-open quote (the eval entered pre-market news at the

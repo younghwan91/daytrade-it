@@ -174,6 +174,8 @@ async def test_paper_pair_skips_the_signal_db_and_dedups_in_memory(
         raise AssertionError("paper mode must not touch the signal DB")
 
     monkeypatch.setattr(news_signal_poller, "UnitOfWork", no_db)
+    log = _RecordingLogger()
+    monkeypatch.setattr(news_signal_poller, "logger", log)
     ticker = Ticker(value="005930")
     expires = dt.datetime.now(dt.UTC) + dt.timedelta(hours=1)
 
@@ -184,7 +186,12 @@ async def test_paper_pair_skips_the_signal_db_and_dedups_in_memory(
             confidence=Confidence(value=0.6),
             source=SignalSource.TECHNICAL,
             expires_at=expires_at,
-            metadata={"pre_entry_move": 0.01},
+            metadata={
+                "pre_entry_move": 0.01,
+                "prev_close": "3600",
+                "prev_close_date": "2026-10-12",
+                "prev_close_source": "daily_fallback",
+            },
         )
 
     # The no-chase filter is called from the shared candidate builder
@@ -240,6 +247,12 @@ async def test_paper_pair_skips_the_signal_db_and_dedups_in_memory(
     )
     assert len(pending) == 1
     assert paper_seen == {f"{article.id}|005930"}
+    # The composite keeps the no-chase basis (combine_signals rebuilds metadata) and the
+    # PERSISTED log carries it, so the forward gate can count daily-close fallbacks.
+    assert pending[0][0].metadata["prev_close_source"] == "daily_fallback"
+    assert pending[0][0].metadata["prev_close"] == "3600"
+    [persisted] = [kw for _l, ev, kw in log.records if ev.endswith("SIGNAL PERSISTED")]
+    assert (persisted["prev_close"], persisted["prev_close_source"]) == ("3600", "daily_fallback")
 
     # A restart that lost the judgment log still doesn't re-enter the pair.
     await process_pair(
@@ -380,3 +393,83 @@ def test_live_and_paper_locks_do_not_block_each_other(
                 paper=held == "paper",
             )
         )
+
+
+class _FailingKrQuant:
+    """kr_quant client whose every read raises, as on a DB outage or statement timeout."""
+
+    def __init__(self, *a: object, **kw: object) -> None:
+        self.closed = False
+
+    def _fail(self, *a: object, **kw: object) -> None:
+        from daytrade_it.shared.errors.exceptions import DatabaseError
+
+        raise DatabaseError(message="canceling statement due to statement timeout")
+
+    get_regular_session_close = _fail
+    get_stock_master = _fail
+    get_adjusted_daily_bars = _fail
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_startup_basis_line_survives_a_failing_regular_close_query(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """M1: the diagnostic query raising must not kill startup (the wrapper restarted it every
+    5 s, reconnecting Kiwoom each time); the `no_chase_basis` line is logged before it."""
+    import news_signal_poller
+
+    log = _RecordingLogger()
+    monkeypatch.setattr(news_signal_poller, "logger", log)
+    day = news_signal_poller.REGULAR_CLOSE_FROM
+    news_signal_poller.log_no_chase_basis(_FailingKrQuant(), day, day - dt.timedelta(days=1))
+    levels = [(lvl, kw.get("no_chase_basis")) for lvl, _ev, kw in log.records]
+    assert levels == [("info", "regular"), ("exception", None)]
+
+    log.records.clear()
+    before = day - dt.timedelta(days=1)
+    news_signal_poller.log_no_chase_basis(_FailingKrQuant(), before, before)
+    assert log.records[0][2]["no_chase_basis"] == "daily"
+
+
+def test_startup_db_failure_disconnects_the_broker_and_returns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+
+    import news_signal_poller
+
+    events: list[str] = []
+
+    class Broker:
+        def __init__(self, api: object) -> None:
+            pass
+
+        def connect(self) -> bool:
+            events.append("connect")
+            return True
+
+        def disconnect(self) -> None:
+            events.append("disconnect")
+
+    monkeypatch.setenv("GPTQ_DATABASE_URL", "postgresql://x/y")  # pragma: allowlist secret
+    monkeypatch.setenv("KIWOOM_APP_KEY", "k")
+    monkeypatch.setenv("KIWOOM_APP_SECRET", "s")
+    monkeypatch.setattr(news_signal_poller, "DatabaseManager", lambda **_kw: object())
+    monkeypatch.setattr(news_signal_poller, "KiwoomAPI", lambda **_kw: object())
+    monkeypatch.setattr(news_signal_poller, "KiwoomBroker", Broker)
+    monkeypatch.setattr(news_signal_poller, "QuantAirflowDBClient", _FailingKrQuant)
+    monkeypatch.setattr(news_signal_poller, "logger", _RecordingLogger())
+    asyncio.run(
+        news_signal_poller._run_locked(
+            once=True,
+            stop_at=dt.time(15, 20),
+            execute=False,
+            confirm_real=False,
+            exits_until=dt.time(15, 30),
+            paper=True,
+        )
+    )
+    assert events == ["connect", "disconnect"]

@@ -12,7 +12,14 @@ Served to SimBroker (`krx` is the price-limit base, R18) and, through
 `FrozenPrevCloseDB`, to the no-chase filter (R17) on the basis live used that
 day: before `entry_filter.REGULAR_CLOSE_FROM` live read the daily close, so the
 stub serves no regular-session close and the filter falls back to `closes`;
-from that day on it serves `krx` and the filter picks it exactly as live does.
+from that day on it serves `krx` and, as the daily input, the frozen last
+`daily_bars_adjusted` row (`daily`) -- the two values live's filter reads -- so
+`entry_filter.choose_prev_close`, the one implementation, picks exactly as live
+does. Serving `closes` as the daily input there would diverge for a ticker with
+no minute bars for the prior session but some for an older one: live compares
+the stale regular bar to the prior session's daily row and falls back, while
+`closes` would carry the same stale date and keep the stale regular close
+(2026-10-12 328380: live 3,600 vs replay 3,760).
 """
 
 from __future__ import annotations
@@ -23,7 +30,13 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
 
-from daytrade_it.application.signals.entry_filter import REGULAR_CLOSE_FROM
+from daytrade_it.application.signals.entry_filter import (
+    DAILY_FALLBACK,
+    LOOKBACK_DAYS,
+    REGULAR_CLOSE_FROM,
+    PrevClose,
+    choose_prev_close,
+)
 from daytrade_it.domain.value_objects import Ticker
 from daytrade_it.infrastructure.external.quant_airflow_db_client import (
     AdjustedDailyBar,
@@ -47,8 +60,13 @@ class FrozenPrevCloses:
     #: Tickers whose frozen no-chase basis differs from an independent reference by > 0.1%
     #: (replay_parity.vintage_flags).
     flags: list[dict] = field(default_factory=list)
-    #: Event tickers with no regular bar in the lookback (no prev close).
+    #: Event tickers with no bar by 20:00 in the lookback (no frozen `closes` row).
     missing: list[str] = field(default_factory=list)
+    #: code -> (close, date) of the last ``daily_bars_adjusted`` row before `day`, as
+    #: kr_quant held it at freeze time: the daily input of live's no-chase filter from
+    #: REGULAR_CLOSE_FROM. None = frozen before this field existed (2026-10-13); the stub
+    #: then serves `closes` as the daily input (pre-switch days only, see replay_parity).
+    daily: dict[str, tuple[Decimal, dt.date]] | None = None
 
     @property
     def prices(self) -> dict[str, Decimal]:
@@ -56,7 +74,7 @@ class FrozenPrevCloses:
 
     @property
     def krx_prices(self) -> dict[str, Decimal]:
-        """R18: the KRX regular-session close (price-limit base), not the unified close."""
+        """R18: the KRX regular-session close (price-limit base), not the after-market-inclusive close."""
         return {c: p for c, (p, _) in self.krx.items()}
 
     @property
@@ -64,29 +82,64 @@ class FrozenPrevCloses:
         """Did live's no-chase filter read the regular-session close on this day?"""
         return self.day >= REGULAR_CLOSE_FROM
 
-    @property
-    def no_chase_prices(self) -> dict[str, Decimal]:
-        """The prior close live's no-chase filter measured against on this day.
+    def daily_input(
+        self, code: str, *, start: dt.date | None = None, end: dt.date | None = None
+    ) -> tuple[Decimal, dt.date] | None:
+        """The daily row live's filter would read for `code` in [start, end], or None.
 
-        From REGULAR_CLOSE_FROM: the regular close, else (no regular bar, or one older
-        than the after-market-inclusive close) `closes` -- `entry_filter.choose_prev_close`.
+        From REGULAR_CLOSE_FROM the frozen `daily_bars_adjusted` row (`daily`); before it
+        (and for files frozen without `daily`) the after-market-inclusive `closes`.
         """
+        src = self.daily if self.daily is not None and self.regular_no_chase else self.closes
+        hit = src.get(code)
+        if hit is None:
+            return None
+        if (start is not None and hit[1] < start) or (end is not None and hit[1] > end):
+            return None
+        return hit
+
+    def regular_input(
+        self, code: str, *, before: dt.date, lookback_days: int
+    ) -> tuple[Decimal, dt.date] | None:
+        """The regular-session close live's filter would read: none before REGULAR_CLOSE_FROM."""
         if not self.regular_no_chase:
-            return self.prices
+            return None
+        hit = self.krx.get(code)
+        if hit is None or not (before - dt.timedelta(days=lookback_days) <= hit[1] < before):
+            return None
+        return hit
+
+    @property
+    def no_chase_basis(self) -> dict[str, PrevClose]:
+        """Per code, the prior close live's no-chase filter measured against on this day.
+
+        The same inputs `FrozenPrevCloseDB` serves the filter (same lookback window),
+        decided by `entry_filter.choose_prev_close` -- not a second implementation.
+        """
         out = {}
-        for c, (p, d) in self.closes.items():
-            k = self.krx.get(c)
-            out[c] = k[0] if k is not None and k[1] >= d else p
+        for c in sorted(set(self.closes) | set(self.daily or {}) | set(self.krx)):
+            d = self.daily_input(
+                c,
+                start=self.day - dt.timedelta(days=LOOKBACK_DAYS),
+                end=self.day - dt.timedelta(days=1),
+            )
+            r = self.regular_input(c, before=self.day, lookback_days=LOOKBACK_DAYS)
+            p = choose_prev_close(_daily_bar(c, d), _regular(c, r))
+            if p is not None:
+                out[c] = p
         return out
 
     @property
+    def no_chase_prices(self) -> dict[str, Decimal]:
+        """The prior close live's no-chase filter measured against on this day."""
+        return {c: p.price for c, p in self.no_chase_basis.items()}
+
+    @property
     def no_chase_fallbacks(self) -> list[str]:
-        """Codes whose no-chase basis falls back to `closes` on a regular-close day."""
+        """Codes whose no-chase basis falls back to the daily close on a regular-close day."""
         if not self.regular_no_chase:
             return []
-        return sorted(
-            c for c, (_, d) in self.closes.items() if c not in self.krx or self.krx[c][1] < d
-        )
+        return sorted(c for c, p in self.no_chase_basis.items() if p.source == DAILY_FALLBACK)
 
     @property
     def prev_session(self) -> dt.date:
@@ -110,6 +163,10 @@ def dump_prev_closes(path: Path, frozen: FrozenPrevCloses) -> None:
         "flags": frozen.flags,
         "missing": frozen.missing,
     }
+    if frozen.daily is not None:
+        row["daily"] = {
+            c: {"close": str(p), "date": d.isoformat()} for c, (p, d) in frozen.daily.items()
+        }
     path.write_text(json.dumps(row, ensure_ascii=False, indent=1, sort_keys=True))
 
 
@@ -128,13 +185,20 @@ def load_prev_closes(path: Path) -> FrozenPrevCloses:
         },
         flags=row.get("flags", []),
         missing=row.get("missing", []),
+        daily=None
+        if row.get("daily") is None
+        else {
+            c: (Decimal(v["close"]), dt.date.fromisoformat(v["date"]))
+            for c, v in row["daily"].items()
+        },
     )
 
 
 class FrozenPrevCloseDB:
     """Replay-only stand-in for the two `QuantAirflowDBClient` reads the no-chase filter makes.
 
-    `get_adjusted_daily_bars` serves `closes` (the daily close as kr_quant held it);
+    `get_adjusted_daily_bars` serves `FrozenPrevCloses.daily_input` (the frozen
+    `daily_bars_adjusted` row from REGULAR_CLOSE_FROM, `closes` before);
     `get_regular_session_close` serves `krx` only from REGULAR_CLOSE_FROM, so the
     filter reproduces each day's live basis.
     """
@@ -149,30 +213,31 @@ class FrozenPrevCloseDB:
         start: dt.date | str | None = None,
         end: dt.date | str | None = None,
     ) -> list[AdjustedDailyBar]:
-        hit = self._frozen.closes.get(ticker.value)
-        if hit is None:
-            return []
-        close, date = hit
-        if (start is not None and date < _date(start)) or (end is not None and date > _date(end)):
-            return []
-        return [
-            AdjustedDailyBar(
-                code=ticker.value, date=date, close=float(close), source="replay_frozen"
-            )
-        ]
+        hit = self._frozen.daily_input(
+            ticker.value,
+            start=None if start is None else _date(start),
+            end=None if end is None else _date(end),
+        )
+        bar = _daily_bar(ticker.value, hit)
+        return [] if bar is None else [bar]
 
     def get_regular_session_close(
         self, ticker: Ticker, *, before: dt.date, lookback_days: int
     ) -> RegularSessionClose | None:
-        if not self._frozen.regular_no_chase:
-            return None
-        hit = self._frozen.krx.get(ticker.value)
-        if hit is None:
-            return None
-        close, date = hit
-        if not (before - dt.timedelta(days=lookback_days) <= date < before):
-            return None
-        return RegularSessionClose(code=ticker.value, date=date, close=float(close))
+        return _regular(
+            ticker.value,
+            self._frozen.regular_input(ticker.value, before=before, lookback_days=lookback_days),
+        )
+
+
+def _daily_bar(code: str, hit: tuple[Decimal, dt.date] | None) -> AdjustedDailyBar | None:
+    if hit is None:
+        return None
+    return AdjustedDailyBar(code=code, date=hit[1], close=float(hit[0]), source="replay_frozen")
+
+
+def _regular(code: str, hit: tuple[Decimal, dt.date] | None) -> RegularSessionClose | None:
+    return None if hit is None else RegularSessionClose(code=code, date=hit[1], close=float(hit[0]))
 
 
 def _date(v: dt.date | str) -> dt.date:

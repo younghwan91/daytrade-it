@@ -47,6 +47,7 @@ from daytrade_it.infrastructure.external.quant_airflow_db_client import (
     QuantAirflowDBClient,
     RegularSessionClose,
 )
+from daytrade_it.shared.errors.exceptions import DatabaseError
 from daytrade_it.shared.logging import get_logger
 
 logger = get_logger(__name__)
@@ -64,7 +65,8 @@ MAX_PRE_ENTRY_MOVE = Decimal("0.03")
 #: signal's confidence in `combine_signals()`'s weighted average.
 _FILTER_CONFIDENCE = 0.5
 
-_LOOKBACK_DAYS = 10
+#: Calendar days searched back for the prior close (daily bar and regular-session bar).
+LOOKBACK_DAYS = 10
 
 #: First live session whose prior close is the regular-session close (deployed by the
 #: 07:50 pull that day). Before it, live measured against the daily close (after-market
@@ -114,22 +116,35 @@ def generate_no_chase_confirmation(
 
     today = dt.date.today()
     bars = db_client.get_adjusted_daily_bars(
-        ticker, start=today - dt.timedelta(days=_LOOKBACK_DAYS), end=today - dt.timedelta(days=1)
+        ticker, start=today - dt.timedelta(days=LOOKBACK_DAYS), end=today - dt.timedelta(days=1)
     )
-    regular = db_client.get_regular_session_close(
-        ticker, before=today, lookback_days=_LOOKBACK_DAYS
-    )
+    # The minute_bars read is the slow one (cold chunks took ~15 s on 2026-10-13; the
+    # poller's client has a statement timeout). A failure must not drop the pair: fall
+    # back to the daily close, as for a ticker without minute bars, and say why.
+    regular_error: str | None = None
+    try:
+        regular = db_client.get_regular_session_close(
+            ticker, before=today, lookback_days=LOOKBACK_DAYS
+        )
+    except DatabaseError as exc:
+        regular, regular_error = None, str(exc)
     prev = choose_prev_close(bars[-1] if bars else None, regular)
     if prev is None:
-        logger.warning("entry_filter: no prior daily close", ticker=ticker.value)
+        logger.warning(
+            "entry_filter: no prior daily close", ticker=ticker.value, regular_error=regular_error
+        )
         return None
     if prev.source == DAILY_FALLBACK:
-        logger.warning(
+        # Before REGULAR_CLOSE_FROM (replay of those days) the daily close *was* the rule:
+        # one warning per judged pair would bury real ones.
+        log = logger.warning if today >= REGULAR_CLOSE_FROM else logger.debug
+        log(
             "entry_filter: no regular-session close, daily close fallback",
             ticker=ticker.value,
             prev_close=str(prev.price),
             prev_close_date=str(prev.date),
             regular_close_date=None if regular is None else str(regular.date),
+            regular_error=regular_error,
         )
 
     prev_close = prev.price

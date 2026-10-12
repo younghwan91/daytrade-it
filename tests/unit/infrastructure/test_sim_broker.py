@@ -249,7 +249,7 @@ def test_open_below_the_limit_is_not_locked_even_if_bar_is_flat() -> None:
 
 
 def test_limit_lock_uses_limit_base_not_prev_close() -> None:
-    # NXT close 2900 but KRX close 2705: upper limit is ~3515 (2705 * 1.3), not 3770.
+    # After-market-inclusive close 2900 but KRX regular close 2705: upper limit is ~3515 (2705 * 1.3), not 3770.
     bars = {
         "000009": [_bar("09:00", 3515, 3515, 3515, 3515), _bar("09:01", 3515, 3515, 3515, 3515)]
     }

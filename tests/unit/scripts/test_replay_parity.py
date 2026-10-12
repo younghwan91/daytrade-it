@@ -453,7 +453,7 @@ def test_last_regular_closes_ignore_after_hours_and_the_day_itself() -> None:
 def test_unified_closes_take_the_last_bar_up_to_2000_including_after_market() -> None:
     """Before REGULAR_CLOSE_FROM live no-chase read kr_quant's daily close, which from
     2026-09-14 is the KRX after-market (16:00-20:00) last price."""
-    from replay_parity import last_unified_closes  # noqa: PLC0415
+    from replay_parity import last_aftermarket_closes  # noqa: PLC0415
 
     rows = [
         ("A", dt.datetime(2026, 9, 14, 15, 30), 2900.0),
@@ -463,7 +463,7 @@ def test_unified_closes_take_the_last_bar_up_to_2000_including_after_market() ->
         ("B", dt.datetime(2026, 9, 11, 15, 35), 510.0),  # halted on 09-14
         ("C", dt.datetime(2026, 9, 14, 20, 0), 70.0),
     ]
-    assert last_unified_closes(rows, DAY) == {
+    assert last_aftermarket_closes(rows, DAY) == {
         "A": (Decimal(2950), dt.date(2026, 9, 14)),
         "B": (Decimal(510), dt.date(2026, 9, 11)),
         "C": (Decimal(70), dt.date(2026, 9, 14)),
@@ -493,7 +493,7 @@ def test_frozen_prev_closes_are_built_once_and_reused(tmp_path: Path) -> None:
 
     def fetch_daily(codes, day):  # noqa: ANN001, ANN202
         calls.append("daily")
-        return {"A": Decimal(2720)}
+        return {"A": (Decimal(2720), dt.date(2026, 9, 14))}
 
     first = frozen_prev_closes(["A", "B"], DAY, tmp_path, fetch_bars, fetch_daily)
     second = frozen_prev_closes(["A", "B"], DAY, tmp_path, fetch_bars, fetch_daily)
@@ -534,14 +534,14 @@ def test_from_the_switch_vintage_flags_compare_the_regular_close_to_the_implied_
 
     def fetch_daily(codes, d):  # noqa: ANN001, ANN202
         calls.append("daily")
-        return {}
+        return {"A": (Decimal(66200), prev), "B": (Decimal(1000), prev)}
 
     def fetch_base(codes, d):  # noqa: ANN001, ANN202
         calls.append("base")
         return {"A": Decimal(58100), "B": Decimal(1010)}
 
     f = frozen_prev_closes(["A", "B"], day, tmp_path, fetch_bars, fetch_daily, fetch_base)
-    assert calls == ["base"]
+    assert calls == ["daily", "base"]
     assert [(x["code"], x["sd_base"]) for x in f.flags] == [("B", "1010")]
     assert f.no_chase_prices == {"A": Decimal(58100), "B": Decimal(1000)}
 
@@ -562,6 +562,23 @@ def test_no_chase_basis_check_fails_a_day_whose_live_log_contradicts_the_switch_
     check_no_chase_basis([row(new, prev_close_source="krx_regular")], new)
     check_no_chase_basis([row(old)], old)
     check_no_chase_basis([], new)  # no evidence: nothing to contradict
+    # A day without any `extended` row is still checked: persisted rows and the
+    # daemon's startup line carry the basis too.
+    persisted = "news_signal_poller: ACTIONABLE SIGNAL PERSISTED"
+    startup = "news_signal_poller: no-chase basis"
+    check_no_chase_basis(
+        [
+            {**row(new), "event": startup, "no_chase_basis": "regular"},
+            {**row(new), "event": persisted, "prev_close_source": "krx_regular"},
+        ],
+        new,
+    )
+    with pytest.raises(ReplayDataError, match="lack"):
+        check_no_chase_basis([{**row(new), "event": persisted}], new)
+    with pytest.raises(ReplayDataError, match="lack"):
+        check_no_chase_basis([{**row(new), "event": startup, "no_chase_basis": "daily"}], new)
+    with pytest.raises(ReplayDataError, match="carry"):
+        check_no_chase_basis([{**row(old), "event": startup, "no_chase_basis": "regular"}], old)
     with pytest.raises(ReplayDataError, match="lack"):
         check_no_chase_basis([row(new)], new)
     with pytest.raises(ReplayDataError, match="carry"):
@@ -686,6 +703,20 @@ def test_day_fails_when_over_5pct_of_event_tickers_lack_a_frozen_prev_close() ->
         check_prev_close_coverage(
             FrozenPrevCloses(day=DAY, closes=closes, missing=["999998", "999999"])
         )
+    # From the switch a frozen daily row is a basis too (live falls back to it).
+    from replay_parity import REGULAR_CLOSE_FROM  # noqa: PLC0415
+
+    new = REGULAR_CLOSE_FROM
+    prev = new - dt.timedelta(days=1)
+    new_closes = {c: (p, prev) for c, (p, _) in closes.items()}
+    check_prev_close_coverage(
+        FrozenPrevCloses(
+            day=new,
+            closes=new_closes,
+            missing=["999998", "999999"],
+            daily={"999998": (Decimal(10), prev), "999999": (Decimal(10), prev)},
+        )
+    )
 
 
 def test_load_session_bars_runs_the_session_hours_guard(monkeypatch) -> None:
@@ -829,3 +860,191 @@ def test_cli_refuses_to_run_off_simnode(monkeypatch) -> None:  # noqa: ANN001
     monkeypatch.setattr("sys.argv", ["replay_parity.py", "--days", "2026-09-15"])
     with pytest.raises(RuntimeError, match="simnode"):
         replay_parity.main()
+
+
+def test_an_empty_reference_skips_flags_instead_of_flagging_every_code(tmp_path: Path) -> None:
+    """Frozen before supply_demand loaded the day: no reference, so no flags (they would be
+    frozen into the file for good)."""
+    from replay_parity import REGULAR_CLOSE_FROM, frozen_prev_closes  # noqa: PLC0415
+
+    day = REGULAR_CLOSE_FROM
+    prev = day - dt.timedelta(days=1)
+
+    def fetch_bars(codes, d):  # noqa: ANN001, ANN202
+        return [("A", dt.datetime.combine(prev, dt.time(15, 30)), 100.0)]
+
+    f = frozen_prev_closes(
+        ["A"],
+        day,
+        tmp_path,
+        fetch_bars,
+        lambda _c, _d: {"A": (Decimal(101), prev)},
+        lambda _c, _d: {},
+    )
+    assert f.flags == []
+    pre = frozen_prev_closes(
+        ["A"],
+        DAY,
+        tmp_path,
+        lambda _c, _d: [("A", dt.datetime(2026, 9, 14, 15, 30), 100.0)],
+        lambda _c, _d: {},
+    )
+    assert pre.flags == []
+
+
+def test_a_regular_close_day_frozen_without_daily_is_refused(tmp_path: Path) -> None:
+    import pytest  # noqa: PLC0415
+    from replay_parity import REGULAR_CLOSE_FROM, frozen_prev_closes  # noqa: PLC0415
+
+    from daytrade_it.application.replay.prev_close import (  # noqa: PLC0415
+        FrozenPrevCloses,
+        dump_prev_closes,
+    )
+
+    day = REGULAR_CLOSE_FROM
+    prev = day - dt.timedelta(days=1)
+    dump_prev_closes(
+        tmp_path / f"{day}.json", FrozenPrevCloses(day=day, closes={"A": (Decimal(1), prev)})
+    )
+    with pytest.raises(ValueError, match="daily"):
+        frozen_prev_closes(["A"], day, tmp_path)
+
+
+# M2: live and replay must pick the same no-chase prior close from the same kr_quant
+# state. Built from one in-memory "kr_quant" (minute bars + daily_bars_adjusted): live
+# reads it through a client with the same queries' semantics, replay freezes it with
+# `frozen_prev_closes` and serves it through `FrozenPrevCloseDB`. Both then run the real
+# `generate_no_chase_confirmation`.
+
+
+class _KrQuant:
+    """Tiny kr_quant: `minute` (code, ts KST naive, close) and `daily` (code, date, close)."""
+
+    def __init__(self, minute: list, daily: list) -> None:
+        self.minute, self.daily = minute, daily
+
+    # live QuantAirflowDBClient reads
+    def get_adjusted_daily_bars(self, ticker, *, start, end):  # noqa: ANN001, ANN201
+        from daytrade_it.infrastructure.external.quant_airflow_db_client import (  # noqa: PLC0415
+            AdjustedDailyBar,
+        )
+
+        return [
+            AdjustedDailyBar(code=c, date=d, close=cl, source="kiwoom")
+            for c, d, cl in sorted(self.daily, key=lambda r: r[1])
+            if c == ticker.value and start <= d <= end
+        ]
+
+    def get_regular_session_close(self, ticker, *, before, lookback_days):  # noqa: ANN001, ANN201
+        from daytrade_it.domain.services.krx_session import (  # noqa: PLC0415
+            last_regular_closes,
+        )
+        from daytrade_it.infrastructure.external.quant_airflow_db_client import (  # noqa: PLC0415
+            RegularSessionClose,
+        )
+
+        lo = dt.datetime.combine(before - dt.timedelta(days=lookback_days), dt.time())
+        rows = [r for r in self.minute if r[0] == ticker.value and r[1] >= lo]
+        hit = last_regular_closes(rows, before).get(ticker.value)
+        return (
+            None
+            if hit is None
+            else RegularSessionClose(code=ticker.value, date=hit[1], close=hit[0])
+        )
+
+    # replay_parity fetchers
+    def fetch_bars(self, codes, day):  # noqa: ANN001, ANN201
+        return [r for r in self.minute if r[0] in codes and r[1].date() < day]
+
+    def fetch_daily(self, codes, day):  # noqa: ANN001, ANN201
+        out: dict = {}
+        for c, d, cl in sorted(self.daily, key=lambda r: r[1]):
+            if c in codes and d < day:
+                out[c] = (Decimal(str(cl)), d)
+        return out
+
+
+class _Quote:
+    def __init__(self, prices: dict) -> None:
+        self.prices = prices
+
+    def get_quote(self, ticker: str):  # noqa: ANN201
+        from daytrade_it.infrastructure.brokers.base import Quote  # noqa: PLC0415
+
+        p = Decimal(self.prices[ticker])
+        return Quote(ticker=ticker, bid=p, ask=p, last_price=p)
+
+
+def test_live_and_replay_pick_the_same_no_chase_close_including_stale_minute_bars(
+    tmp_path: Path,
+) -> None:
+    import time_machine  # noqa: PLC0415
+    from replay_parity import REGULAR_CLOSE_FROM, frozen_prev_closes  # noqa: PLC0415
+
+    from daytrade_it.application.replay.prev_close import FrozenPrevCloseDB  # noqa: PLC0415
+    from daytrade_it.application.signals.entry_filter import (  # noqa: PLC0415
+        generate_no_chase_confirmation,
+    )
+    from daytrade_it.domain.value_objects import Ticker  # noqa: PLC0415
+
+    day = REGULAR_CLOSE_FROM  # Tue 10-13: prior session Mon 10-12, the one before Fri 10-09
+    prev, older = dt.date(2026, 10, 12), dt.date(2026, 10, 9)
+
+    def at(d: dt.date, hm: str) -> dt.datetime:
+        h, m = map(int, hm.split(":"))
+        return dt.datetime.combine(d, dt.time(h, m))
+
+    kq = _KrQuant(
+        minute=[
+            # Minute-gap shape: minute bars for 10-09 only, none for 10-12; daily row for 10-12.
+            ("300328", at(older, "15:30"), 3760.0),
+            ("300328", at(older, "19:00"), 3770.0),
+            # normal: regular close 10-12, after-market moved the daily close.
+            ("005930", at(prev, "15:30"), 58100.0),
+            ("005930", at(prev, "19:59"), 66200.0),
+            # regular bar newer than the daily row (daily not loaded for 10-12 yet).
+            ("000660", at(prev, "15:30"), 110.0),
+        ],
+        daily=[
+            ("300328", older, 3770.0),
+            ("300328", prev, 3600.0),
+            ("005930", prev, 66200.0),
+            ("000660", older, 100.0),
+            # no minute bars at all: daily only.
+            ("123456", prev, 500.0),
+        ],
+    )
+    # Each price sits between the two candidate bases so a wrong pick flips the decision
+    # (cap 3%): 300328 3720 = +3.3% vs 3600 (refused) but -1.1% vs 3760.
+    quotes = _Quote({"300328": 3720, "005930": 60000, "000660": 112, "123456": 520})
+    codes = sorted(quotes.prices)
+    frozen = frozen_prev_closes(codes, day, tmp_path, kq.fetch_bars, kq.fetch_daily, lambda *_: {})
+    expires = dt.datetime.combine(day, dt.time(15, 20), tzinfo=KST)
+
+    def run(db: object) -> dict:
+        out = {}
+        with time_machine.travel(dt.datetime.combine(day, dt.time(9, 30), tzinfo=KST), tick=False):
+            for c in codes:
+                sig = generate_no_chase_confirmation(Ticker(value=c), quotes, db, expires)
+                out[c] = (
+                    None
+                    if sig is None
+                    else (
+                        Decimal(sig.metadata["prev_close"]),
+                        sig.metadata["prev_close_source"],
+                    )
+                )
+        return out
+
+    live = run(kq)
+    replay = run(FrozenPrevCloseDB(frozen))
+    assert live == replay
+    assert live["300328"] is None  # refused against the 10-12 daily close 3,600
+    basis = frozen.no_chase_basis
+    assert {c: (b.price, b.source) for c, b in basis.items()} == {
+        "300328": (Decimal(3600), "daily_fallback"),
+        "005930": (Decimal(58100), "krx_regular"),
+        "000660": (Decimal(110), "krx_regular"),
+        "123456": (Decimal(500), "daily_fallback"),
+    }
+    assert frozen.no_chase_fallbacks == ["123456", "300328"]
