@@ -23,6 +23,9 @@ from daytrade_it.infrastructure.external.quant_airflow_db_client import (
     StockInfo,
 )
 
+#: No-chase basis fields copied from the filter signal onto the composite.
+_BASIS_KEYS = ("prev_close", "prev_close_date", "prev_close_source")
+
 
 @dataclass(frozen=True)
 class EntryCandidate:
@@ -94,6 +97,9 @@ def build_entry_candidate(
                 "surprise": features.surprise,
                 "news_score": sentiment.score,
                 "pre_entry_move": entry_signal.metadata["pre_entry_move"],
+                # combine_signals rebuilds metadata; keep the no-chase basis so the
+                # forward gate and replay parity can tell daily-close fallbacks apart.
+                **{k: entry_signal.metadata[k] for k in _BASIS_KEYS if k in entry_signal.metadata},
             },
         }
     )

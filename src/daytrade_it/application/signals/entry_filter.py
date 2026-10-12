@@ -15,17 +15,39 @@ This filter emits a `SignalSource.TECHNICAL` BUY when the stock is NOT
 extended, which is what `SignalGenerator.combine_signals()` needs alongside
 a NEWS signal. It never emits SELL: news SELLs are not entries here (KRX
 retail can't short), and `execute_trade` refuses a SELL without a holding.
+
+Prior close (R17) = the KRX **regular-session** close: the prior session's last
+minute bar 09:00 <= ts < 15:33 (`domain.services.krx_session`). From 2026-09-14
+the daily close in `daily_bars_adjusted` includes KRX after-market trades
+(16:00-20:00), and from then until 2026-10-12 this filter measured the move
+against that after-market close; the 3% cap was chosen on pre-09-14 days, when
+the daily close was the regular close. Back to the regular close from the
+2026-10-13 session (user decision; forward record restarts then,
+`docs/research/frozen/2026-10-13-no-chase-regular-close-amend1.json`).
+
+A ticker with no regular minute bar for the prior session (scalp-it collects
+minute bars for its top-1400 universe only; ~3% of filtered ticker-days in
+09-15..10-12) falls back to the daily close, logged and tagged
+`prev_close_source=daily_fallback`. That is the pre-10-13 behaviour for those
+names; refusing them instead would silently shrink the universe to the minute-
+bar universe, and the after-market gap is a few % on most names.
 """
 
 from __future__ import annotations
 
 import datetime as dt
+from dataclasses import dataclass
 from decimal import Decimal
 
 from daytrade_it.domain.entities.signal import SignalDirection, SignalSource, TradingSignal
 from daytrade_it.domain.value_objects import Confidence, Ticker
 from daytrade_it.infrastructure.brokers.base import BrokerInterface
-from daytrade_it.infrastructure.external.quant_airflow_db_client import QuantAirflowDBClient
+from daytrade_it.infrastructure.external.quant_airflow_db_client import (
+    AdjustedDailyBar,
+    QuantAirflowDBClient,
+    RegularSessionClose,
+)
+from daytrade_it.shared.errors.exceptions import DatabaseError
 from daytrade_it.shared.logging import get_logger
 
 logger = get_logger(__name__)
@@ -43,7 +65,40 @@ MAX_PRE_ENTRY_MOVE = Decimal("0.03")
 #: signal's confidence in `combine_signals()`'s weighted average.
 _FILTER_CONFIDENCE = 0.5
 
-_LOOKBACK_DAYS = 10
+#: Calendar days searched back for the prior close (daily bar and regular-session bar).
+LOOKBACK_DAYS = 10
+
+#: First live session whose prior close is the regular-session close (deployed by the
+#: 07:50 pull that day). Before it, live measured against the daily close (after-market
+#: included from 2026-09-14); the replay serves each day the basis live used then.
+REGULAR_CLOSE_FROM = dt.date(2026, 10, 13)
+
+#: `PrevClose.source` values (signal metadata / logs).
+KRX_REGULAR = "krx_regular"
+DAILY_FALLBACK = "daily_fallback"
+
+
+@dataclass(frozen=True)
+class PrevClose:
+    price: Decimal
+    date: dt.date
+    source: str
+
+
+def choose_prev_close(
+    daily: AdjustedDailyBar | None, regular: RegularSessionClose | None
+) -> PrevClose | None:
+    """The regular-session close, unless it is missing or older than the latest daily bar.
+
+    An older regular bar means the prior session's minute bars are missing; its close
+    would be a stale session's, so the daily close is used instead.
+    """
+    daily = daily if daily is not None and daily.close else None
+    if regular is not None and regular.close and (daily is None or regular.date >= daily.date):
+        return PrevClose(Decimal(str(regular.close)), regular.date, KRX_REGULAR)
+    if daily is not None:
+        return PrevClose(Decimal(str(daily.close)), daily.date, DAILY_FALLBACK)
+    return None
 
 
 def generate_no_chase_confirmation(
@@ -61,17 +116,46 @@ def generate_no_chase_confirmation(
 
     today = dt.date.today()
     bars = db_client.get_adjusted_daily_bars(
-        ticker, start=today - dt.timedelta(days=_LOOKBACK_DAYS), end=today - dt.timedelta(days=1)
+        ticker, start=today - dt.timedelta(days=LOOKBACK_DAYS), end=today - dt.timedelta(days=1)
     )
-    if not bars or not bars[-1].close:
-        logger.warning("entry_filter: no prior daily close", ticker=ticker.value)
+    # The minute_bars read is the slow one (cold chunks took ~15 s on 2026-10-13; the
+    # poller's client has a statement timeout). A failure must not drop the pair: fall
+    # back to the daily close, as for a ticker without minute bars, and say why.
+    regular_error: str | None = None
+    try:
+        regular = db_client.get_regular_session_close(
+            ticker, before=today, lookback_days=LOOKBACK_DAYS
+        )
+    except DatabaseError as exc:
+        regular, regular_error = None, str(exc)
+    prev = choose_prev_close(bars[-1] if bars else None, regular)
+    if prev is None:
+        logger.warning(
+            "entry_filter: no prior daily close", ticker=ticker.value, regular_error=regular_error
+        )
         return None
+    if prev.source == DAILY_FALLBACK:
+        # Before REGULAR_CLOSE_FROM (replay of those days) the daily close *was* the rule:
+        # one warning per judged pair would bury real ones.
+        log = logger.warning if today >= REGULAR_CLOSE_FROM else logger.debug
+        log(
+            "entry_filter: no regular-session close, daily close fallback",
+            ticker=ticker.value,
+            prev_close=str(prev.price),
+            prev_close_date=str(prev.date),
+            regular_close_date=None if regular is None else str(regular.date),
+            regular_error=regular_error,
+        )
 
-    prev_close = Decimal(str(bars[-1].close))
+    prev_close = prev.price
     move = (current_price - prev_close) / prev_close
     if move > MAX_PRE_ENTRY_MOVE:
         logger.info(
-            "entry_filter: extended, no entry", ticker=ticker.value, pre_entry_move=str(move)
+            "entry_filter: extended, no entry",
+            ticker=ticker.value,
+            pre_entry_move=str(move),
+            prev_close=str(prev_close),
+            prev_close_source=prev.source,
         )
         return None
 
@@ -84,7 +168,8 @@ def generate_no_chase_confirmation(
         metadata={
             "source_type": "no_chase_entry_filter",
             "prev_close": str(prev_close),
-            "prev_close_date": str(bars[-1].date),
+            "prev_close_date": str(prev.date),
+            "prev_close_source": prev.source,
             "current_price": str(current_price),
             "pre_entry_move": str(move),
             "max_pre_entry_move": str(MAX_PRE_ENTRY_MOVE),

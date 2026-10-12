@@ -181,6 +181,44 @@ class TestSupplyDemandMapping:
         assert client.get_latest_supply_demand(Ticker(value="005930")) is None
 
 
+class TestEarningsKnownDate:
+    """avail_date is the filing deadline; known_date adds the real periodic receipt date."""
+
+    @staticmethod
+    def _row(period: str, avail: dt.date, known: dt.date | None) -> tuple:
+        return ("005930", period, avail, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, avail, known)
+
+    def test_known_date_comes_from_periodic_receipts(self) -> None:
+        late = self._row("2026Q2", dt.date(2026, 8, 14), dt.date(2026, 8, 20))
+        client, cur = _client_with_mock_cursor([late])
+        (row,) = client.get_earnings(Ticker(value="005930"))
+        assert row.avail_date == dt.date(2026, 8, 14)
+        assert row.known_date == dt.date(2026, 8, 20)
+        sql = cur.execute.call_args.args[0]
+        assert "earnings_disclosures" in sql and "kind = 'periodic'" in sql
+        assert "GREATEST(e.avail_date" in sql
+
+    def test_known_before_drops_periods_filed_after_avail_date(self) -> None:
+        """Filed 08-20 although avail_date says 08-14: not usable on 08-18."""
+        rows = [
+            self._row("2026Q1", dt.date(2026, 5, 15), dt.date(2026, 5, 15)),
+            self._row("2026Q2", dt.date(2026, 8, 14), dt.date(2026, 8, 20)),
+        ]
+        client, _ = _client_with_mock_cursor(rows)
+        got = client.get_earnings(Ticker(value="005930"), known_before=dt.date(2026, 8, 18))
+        assert [r.period for r in got] == ["2026Q1"]
+        client, _ = _client_with_mock_cursor(rows)
+        assert len(client.get_earnings(Ticker(value="005930"))) == 2
+
+    def test_known_before_is_strict(self) -> None:
+        """Disclosed on day D (possibly after the close) is usable from the next trading day."""
+        rows = [self._row("2026Q2", dt.date(2026, 8, 14), dt.date(2026, 8, 14))]
+        client, _ = _client_with_mock_cursor(rows)
+        assert client.get_earnings(Ticker(value="005930"), known_before=dt.date(2026, 8, 14)) == []
+        client, _ = _client_with_mock_cursor(rows)
+        assert client.get_earnings(Ticker(value="005930"), known_before=dt.date(2026, 8, 17))
+
+
 class TestNewsJudgmentMapping:
     def test_from_raw_derives_kst_from_utc(self) -> None:
         judged_at_utc = dt.datetime(2026, 3, 15, 15, 1, tzinfo=dt.UTC)
@@ -251,6 +289,27 @@ class TestReadOnlyEnforcement:
         client.connect()
 
         mock_conn.set_session.assert_called_once_with(readonly=True, autocommit=True)
+
+    def test_statement_timeout_is_opt_in(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The news daemon passes one; research reads (long) get none by default."""
+        executed: list[tuple] = []
+
+        def make_conn() -> MagicMock:
+            conn = MagicMock()
+            conn.closed = False
+            cur = conn.cursor.return_value.__enter__.return_value
+            cur.execute.side_effect = lambda sql, params=None: executed.append((sql, params))
+            return conn
+
+        monkeypatch.setattr(
+            "daytrade_it.infrastructure.external.quant_airflow_db_client.psycopg2.connect",
+            lambda **_kw: make_conn(),
+        )
+        settings = QuantAirflowDBSettings(host="db.local", password="secret")
+        QuantAirflowDBClient(settings=settings).connect()
+        assert executed == []
+        QuantAirflowDBClient(settings=settings, statement_timeout_s=30).connect()
+        assert executed == [("SET statement_timeout = %s", (30000,))]
 
     def test_no_write_statements_anywhere_in_module(self) -> None:
         """Static guard: this module must never contain SQL write verbs."""

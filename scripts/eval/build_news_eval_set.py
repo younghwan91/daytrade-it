@@ -1,5 +1,9 @@
 """Build the news→price-reaction evaluation set.
 
+경고(2026-10-12): 이 평가셋으로 한 연구는 기각됐고 코드는 고치지 않는다. 청산가 = daily_bars_adjusted 종가인데
+2026-09-14 부터 그 종가에 KRX 애프터마켓(16:00~20:00) 체결이 섞였다 — 그 이후 행의 close·excess 는 정규장
+청산이 아니다. 다시 만들 일이 있으면 scripts/eval/krx_session.regular_daily 로 읽는다.
+
 For every (Toss article, KRX ticker) pair in kr_quant's `news_articles` /
 `news_article_tickers`, attach what a day trader acting on that article
 would actually have got: enter after publication, flat by that session's

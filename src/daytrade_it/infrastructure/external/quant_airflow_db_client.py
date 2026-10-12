@@ -37,6 +37,7 @@ import psycopg2
 from krx_quant_core.market.session import KST
 from pydantic import BaseModel, Field
 
+from daytrade_it.domain.services.krx_session import REGULAR_END, REGULAR_OPEN
 from daytrade_it.domain.value_objects import Ticker
 from daytrade_it.shared.errors import error_codes
 from daytrade_it.shared.errors.exceptions import DatabaseError
@@ -95,7 +96,14 @@ def judged_at_to_kst(judged_at: dt.datetime) -> dt.datetime:
 
 
 class AdjustedDailyBar(BaseModel):
-    """One row of ``daily_bars_adjusted`` (split-adjusted daily OHLCV, KRW)."""
+    """One row of ``daily_bars_adjusted`` (split-adjusted daily OHLCV, KRW).
+
+    From 2026-09-14 the high/low/close/volume/trade_value include KRX after-market
+    trades (16:00-20:00 continuous session, ETF/ETN excluded); only the open is the
+    regular-session value. The next day's price-limit base is the regular-session close
+    (minute bars 09:00 <= ts < 15:33), not this close. ``trade_value`` is in millions
+    of KRW.
+    """
 
     code: str
     date: dt.date
@@ -104,8 +112,20 @@ class AdjustedDailyBar(BaseModel):
     low: float | None = None
     close: float | None = None
     volume: int | None = None
-    trade_value: int | None = None
+    trade_value: int | None = Field(default=None, description="Traded value, millions of KRW")
     source: str = Field(description="Provenance, e.g. 'kiwoom' or 'naver' (delisted backfill)")
+
+
+class RegularSessionClose(BaseModel):
+    """The last KRX regular-session minute bar (``REGULAR_OPEN <= ts < REGULAR_END``) of a session.
+
+    Price as collected (``minute_bars`` is not the split-adjusted daily table). This is the
+    next session's price-limit base (기준가) except when a corporate action resets the base.
+    """
+
+    code: str
+    date: dt.date
+    close: float
 
 
 class StockInfo(BaseModel):
@@ -118,12 +138,22 @@ class StockInfo(BaseModel):
 
 
 class SupplyDemandRow(BaseModel):
-    """One row of ``supply_demand`` (investor net-buy flows)."""
+    """One row of ``supply_demand`` (investor net-buy flows).
+
+    Investor columns are net-bought **quantities** (shares), not KRW. ``close`` includes
+    KRX after-market trades from 2026-09-14; ``close / (1 + flu_rt / 1e4)`` is the day's
+    price-limit base (the previous regular-session close).
+    """
 
     code: str
     date: dt.date
-    close: int | None = None
-    flu_rt: float | None = Field(default=None, description="Change rate, %")
+    close: int | None = Field(
+        default=None, description="Close; includes KRX after-market trades from 2026-09-14"
+    )
+    flu_rt: float | None = Field(
+        default=None,
+        description="Change vs. the day's base price in percent x 100 (21.0 = +0.21%)",
+    )
     acc_trde_qty: int | None = Field(default=None, description="Accumulated trading volume")
     individual: int | None = None
     foreign_: int | None = None
@@ -132,7 +162,11 @@ class SupplyDemandRow(BaseModel):
 
 
 class SectorIndexRow(BaseModel):
-    """One row of ``sector_index`` (KOSPI/KOSDAQ sector indices)."""
+    """One row of ``sector_index`` (KOSPI/KOSDAQ sector indices).
+
+    OHLC are index points x 100 stored as integers (KOSPI 6,384.24 -> 638424).
+    Rows start 2024-01-26.
+    """
 
     code: str
     name: str | None = None
@@ -146,11 +180,20 @@ class SectorIndexRow(BaseModel):
 
 
 class EarningsRow(BaseModel):
-    """One row of ``earnings`` (DART financials, point-in-time)."""
+    """One row of ``earnings`` (DART financials, versioned by ``knowledge_date``).
+
+    ``avail_date`` is the statutory filing deadline, not the disclosure date: 17.7% of
+    periods with a periodic-report receipt date in ``earnings_disclosures`` were filed
+    after it (2026-10-12), so filtering on ``avail_date`` alone looks ahead. Use
+    ``known_date`` (first usable the next trading day) for as-of work.
+    """
 
     code: str
     period: str
-    avail_date: dt.date | None = Field(default=None, description="Lookahead-safe availability date")
+    avail_date: dt.date | None = Field(
+        default=None,
+        description="Statutory filing deadline - NOT lookahead-safe; see known_date",
+    )
     netinc: float | None = None
     netinc_prior: float | None = None
     revenue: float | None = None
@@ -158,6 +201,14 @@ class EarningsRow(BaseModel):
     op_income: float | None = None
     op_income_prior: float | None = None
     knowledge_date: dt.date
+    known_date: dt.date | None = Field(
+        default=None,
+        description=(
+            "max(avail_date, first periodic-report receipt date); usable from the next "
+            "trading day. Falls back to avail_date when no periodic receipt exists "
+            "(before 2018Q3)."
+        ),
+    )
 
 
 class ConsensusRow(BaseModel):
@@ -228,6 +279,7 @@ class QuantAirflowDBClient:
         user: str | None = None,
         password: str | None = None,
         connect_timeout: float | None = None,
+        statement_timeout_s: float | None = None,
         settings: QuantAirflowDBSettings | None = None,
     ) -> None:
         """Initialize the client. Explicit args win; otherwise falls back to settings.
@@ -240,6 +292,11 @@ class QuantAirflowDBClient:
             password: Password for `user`. Defaults to configured settings.
             connect_timeout: Connection timeout in seconds. Defaults to
                 configured settings.
+            statement_timeout_s: Server-side ``statement_timeout`` for every
+                query on this client's connections, in seconds. ``None`` (the
+                default) sets none -- research scripts run long reads. The
+                news daemon passes one so a stuck query cannot stall its loop;
+                a timed-out query raises `DatabaseError` like any other.
             settings: Explicit settings object (mainly for tests). If not
                 given, lazily pulled from ``get_settings().quant_airflow_db``
                 only when needed, so constructing this client with all
@@ -254,6 +311,9 @@ class QuantAirflowDBClient:
             "password": password,
             "connect_timeout": connect_timeout,
         }
+        self._statement_timeout_ms = (
+            None if statement_timeout_s is None else int(statement_timeout_s * 1000)
+        )
         self._settings = settings
         self._conn: Any | None = None
 
@@ -314,6 +374,17 @@ class QuantAirflowDBClient:
         # connection now fails at the Postgres level, independent of what
         # this client's own code does or doesn't send.
         conn.set_session(readonly=True, autocommit=True)
+        if self._statement_timeout_ms is not None:
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("SET statement_timeout = %s", (self._statement_timeout_ms,))
+            except psycopg2.Error as exc:
+                conn.close()
+                raise DatabaseError(
+                    message="Failed to set statement_timeout on quant-airflow TimescaleDB",
+                    error_code=error_codes.DATABASE_CONNECTION_ERROR,
+                    cause=exc,
+                ) from exc
 
         logger.info(
             "Connected to quant-airflow TimescaleDB (read-only)",
@@ -420,6 +491,39 @@ class QuantAirflowDBClient:
         ]
 
     # -------------------------------------------------------------------
+    # minute_bars (regular session)
+    # -------------------------------------------------------------------
+
+    def get_regular_session_close(
+        self, ticker: Ticker, *, before: dt.date, lookback_days: int
+    ) -> RegularSessionClose | None:
+        """Close of `ticker`'s latest regular-session minute bar strictly before `before`.
+
+        Searches ``[before - lookback_days, before)``. ``minute_bars.ts`` is KST wall time
+        without a time zone, so the bounds are compared as-is (no ``AT TIME ZONE``). Minute
+        bars are collected by scalp-it's 15:45 cron for its top-1400 universe; small caps
+        outside it have none (returns ``None``).
+        """
+        sql = (
+            "SELECT ts, close FROM minute_bars WHERE code = %s AND ts >= %s AND ts < %s "
+            "AND ts::time >= %s AND ts::time < %s ORDER BY ts DESC LIMIT 1"
+        )
+        rows = self._query(
+            sql,
+            (
+                ticker.value,
+                before - dt.timedelta(days=lookback_days),
+                before,
+                REGULAR_OPEN,
+                REGULAR_END,
+            ),
+        )
+        if not rows or rows[0][1] is None:
+            return None
+        ts, close = rows[0]
+        return RegularSessionClose(code=ticker.value, date=ts.date(), close=close)
+
+    # -------------------------------------------------------------------
     # stocks
     # -------------------------------------------------------------------
 
@@ -496,6 +600,7 @@ class QuantAirflowDBClient:
         ticker: Ticker,
         *,
         asof: dt.date | str | None = None,
+        known_before: dt.date | None = None,
     ) -> list[EarningsRow]:
         """Fetch earnings for `ticker`, one row per period, as-of `asof`.
 
@@ -506,28 +611,50 @@ class QuantAirflowDBClient:
         version if ``asof`` is ``None``) to avoid a plain ``SELECT *``
         silently duplicating rows once restatements exist.
 
+        ``asof`` bounds the restatement version only. It does not make a row
+        lookahead-safe: ``avail_date`` is the filing deadline and 17.7% of
+        periodic reports came later. For point-in-time use pass
+        ``known_before=<trading day>``, which keeps rows with
+        ``known_date < known_before`` (disclosed on an earlier day, so usable
+        from that trading day's open).
+
+        Pass **both** for point-in-time use: ``asof=<day - 1>`` and
+        ``known_before=<day>``. ``known_before`` filters which periods are
+        visible, not which version: with ``asof=None`` each visible period
+        carries its *latest* version, so a restatement filed after ``day``
+        leaks its values (5 code-periods had more than one version on
+        2026-10-13). The pair is slightly stricter than ``known_before``
+        alone: 25 of 93,836 periods had their first version recorded
+        (``knowledge_date``) after ``known_date``, and ``asof`` hides them
+        until then.
+
         Args:
             ticker: KRX 6-digit code.
             asof: Ceiling on ``knowledge_date``. ``None`` means latest-known.
+            known_before: Keep only periods whose ``known_date`` is strictly
+                before this date. ``None`` keeps all (not lookahead-safe).
+                Pair it with ``asof`` (see above).
 
         Returns:
             One row per ``period``, ordered by period ascending.
         """
         cols = (
-            "code, period, avail_date, netinc, netinc_prior, revenue, "
-            "revenue_prior, op_income, op_income_prior, knowledge_date"
+            "e.code, e.period, e.avail_date, e.netinc, e.netinc_prior, e.revenue, "
+            "e.revenue_prior, e.op_income, e.op_income_prior, e.knowledge_date, "
+            "GREATEST(e.avail_date, (SELECT min(d.rcept_dt) FROM earnings_disclosures d "
+            "WHERE d.code = e.code AND d.period = e.period AND d.kind = 'periodic'))"
         )
         if asof is not None:
             sql = (
-                f"SELECT DISTINCT ON (code, period) {cols} FROM earnings "
-                "WHERE code = %s AND knowledge_date <= %s "
-                "ORDER BY code, period, knowledge_date DESC"
+                f"SELECT DISTINCT ON (e.code, e.period) {cols} FROM earnings e "
+                "WHERE e.code = %s AND e.knowledge_date <= %s "
+                "ORDER BY e.code, e.period, e.knowledge_date DESC"
             )
             params: tuple[Any, ...] = (ticker.value, asof)
         else:
             sql = (
-                f"SELECT DISTINCT ON (code, period) {cols} FROM earnings "
-                "WHERE code = %s ORDER BY code, period, knowledge_date DESC"
+                f"SELECT DISTINCT ON (e.code, e.period) {cols} FROM earnings e "
+                "WHERE e.code = %s ORDER BY e.code, e.period, e.knowledge_date DESC"
             )
             params = (ticker.value,)
 
@@ -544,9 +671,14 @@ class QuantAirflowDBClient:
                 op_income=r[7],
                 op_income_prior=r[8],
                 knowledge_date=r[9],
+                known_date=r[10],
             )
             for r in rows
         ]
+        if known_before is not None:
+            results = [
+                e for e in results if e.known_date is not None and e.known_date < known_before
+            ]
         return sorted(results, key=lambda e: e.period)
 
     # -------------------------------------------------------------------
