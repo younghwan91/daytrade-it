@@ -700,6 +700,7 @@ async def _run_locked(
     if not prior_bars:
         logger.error("news_signal_poller: cannot determine previous trading day, exiting")
         broker.disconnect()
+        db_client.close()
         return
     stale_before = session_close_kst(prior_bars[-1].date)
     expires_at = session_close_kst(today)

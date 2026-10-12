@@ -894,7 +894,11 @@ def test_an_empty_reference_skips_flags_instead_of_flagging_every_code(tmp_path:
 
 def test_a_regular_close_day_frozen_without_daily_is_refused(tmp_path: Path) -> None:
     import pytest  # noqa: PLC0415
-    from replay_parity import REGULAR_CLOSE_FROM, frozen_prev_closes  # noqa: PLC0415
+    from replay_parity import (  # noqa: PLC0415
+        REGULAR_CLOSE_FROM,
+        ReplayDataError,
+        frozen_prev_closes,
+    )
 
     from daytrade_it.application.replay.prev_close import (  # noqa: PLC0415
         FrozenPrevCloses,
@@ -906,7 +910,7 @@ def test_a_regular_close_day_frozen_without_daily_is_refused(tmp_path: Path) -> 
     dump_prev_closes(
         tmp_path / f"{day}.json", FrozenPrevCloses(day=day, closes={"A": (Decimal(1), prev)})
     )
-    with pytest.raises(ValueError, match="daily"):
+    with pytest.raises(ReplayDataError, match="daily"):
         frozen_prev_closes(["A"], day, tmp_path)
 
 

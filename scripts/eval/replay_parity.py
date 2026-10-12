@@ -375,7 +375,7 @@ def frozen_prev_closes(
         if uncovered:
             raise ValueError(f"{path} was frozen without event codes {uncovered}")
         if frozen.regular_no_chase and frozen.daily is None:
-            raise ValueError(
+            raise ReplayDataError(
                 f"{path} was frozen without `daily` (needed from {REGULAR_CLOSE_FROM})"
             )
         return frozen
