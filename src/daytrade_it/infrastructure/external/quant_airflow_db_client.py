@@ -37,6 +37,7 @@ import psycopg2
 from krx_quant_core.market.session import KST
 from pydantic import BaseModel, Field
 
+from daytrade_it.domain.services.krx_session import REGULAR_END, REGULAR_OPEN
 from daytrade_it.domain.value_objects import Ticker
 from daytrade_it.shared.errors import error_codes
 from daytrade_it.shared.errors.exceptions import DatabaseError
@@ -113,6 +114,18 @@ class AdjustedDailyBar(BaseModel):
     volume: int | None = None
     trade_value: int | None = Field(default=None, description="Traded value, millions of KRW")
     source: str = Field(description="Provenance, e.g. 'kiwoom' or 'naver' (delisted backfill)")
+
+
+class RegularSessionClose(BaseModel):
+    """The last KRX regular-session minute bar (``REGULAR_OPEN <= ts < REGULAR_END``) of a session.
+
+    Price as collected (``minute_bars`` is not the split-adjusted daily table). This is the
+    next session's price-limit base (기준가) except when a corporate action resets the base.
+    """
+
+    code: str
+    date: dt.date
+    close: float
 
 
 class StockInfo(BaseModel):
@@ -456,6 +469,39 @@ class QuantAirflowDBClient:
             )
             for r in rows
         ]
+
+    # -------------------------------------------------------------------
+    # minute_bars (regular session)
+    # -------------------------------------------------------------------
+
+    def get_regular_session_close(
+        self, ticker: Ticker, *, before: dt.date, lookback_days: int
+    ) -> RegularSessionClose | None:
+        """Close of `ticker`'s latest regular-session minute bar strictly before `before`.
+
+        Searches ``[before - lookback_days, before)``. ``minute_bars.ts`` is KST wall time
+        without a time zone, so the bounds are compared as-is (no ``AT TIME ZONE``). Minute
+        bars are collected by scalp-it's 15:45 cron for its top-1400 universe; small caps
+        outside it have none (returns ``None``).
+        """
+        sql = (
+            "SELECT ts, close FROM minute_bars WHERE code = %s AND ts >= %s AND ts < %s "
+            "AND ts::time >= %s AND ts::time < %s ORDER BY ts DESC LIMIT 1"
+        )
+        rows = self._query(
+            sql,
+            (
+                ticker.value,
+                before - dt.timedelta(days=lookback_days),
+                before,
+                REGULAR_OPEN,
+                REGULAR_END,
+            ),
+        )
+        if not rows or rows[0][1] is None:
+            return None
+        ts, close = rows[0]
+        return RegularSessionClose(code=ticker.value, date=ts.date(), close=close)
 
     # -------------------------------------------------------------------
     # stocks

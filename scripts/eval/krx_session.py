@@ -12,8 +12,9 @@
   ``minute_bars`` 정규장(:data:`REGULAR_OPEN` <= ts < :data:`REGULAR_END`) 집계로 바꾼다. 그날 정규장 분봉이 없으면
   그 열들은 NaN 이다(일봉 값으로 돌아가지 않는다). 검산(2026-10-12): 09-10~11 은 집계 종가·고가·저가가 일봉과
   99.9% 같고 거래대금 비 중앙값 0.999, 09-16~17 은 종가 일치 14% 뿐이다.
-- :func:`last_regular_closes` — 분봉 행에서 종목별 직전 정규장 종가. 리플레이(``replay_parity`` R18, 가격제한 기준가)가
-  같은 함수를 쓴다.
+- :func:`last_regular_closes` — 분봉 행에서 종목별 직전 정규장 종가. 정본은 운영 코드와 같이 쓰는
+  ``daytrade_it.domain.services.krx_session`` 이고(운영 src 는 scripts 를 import 하지 않는다) 여기서는 다시 내보낸다.
+  리플레이(``replay_parity`` R17 no-chase 기준·R18 가격제한 기준가)가 같은 함수를 쓴다.
 
 ``tests/unit/scripts/test_research_price_gate.py`` 가 ``scripts/`` 에서 ``limit_up_price``·``limit_down_price`` 를
 부르면서 ``daily_bars`` 를 직접 SELECT 하는 파일을 막는다.
@@ -30,26 +31,26 @@ import datetime as dt
 import numpy as np
 import pandas as pd
 
-#: 일봉에 KRX 애프터마켓 체결이 섞이기 시작한 첫 거래일.
-AFTERMARKET_FROM = dt.date(2026, 9, 14)
-#: 정규장 + 종가 단일가 봉: 보통 15:30, 변동성 완화장치로 연장되면 15:32
-#: (09-01..09-15: 15:30 봉 2,895, 15:32 봉 22, 15:31/15:33/15:34 없음). 그 뒤 봉은 시간외·애프터마켓이다.
-REGULAR_OPEN, REGULAR_END = dt.time(9, 0), dt.time(15, 33)
+from daytrade_it.domain.services.krx_session import (
+    AFTERMARKET_FROM,
+    REGULAR_END,
+    REGULAR_OPEN,
+    last_regular_closes,
+)
+
+__all__ = [
+    "AFTERMARKET_FROM",
+    "PATCHED",
+    "REGULAR_END",
+    "REGULAR_OPEN",
+    "last_regular_closes",
+    "patch_regular",
+    "regular_daily",
+    "regular_session_bars",
+]
+
 #: 정규장으로 다시 만드는 열. 시가는 오염되지 않았다.
 PATCHED = ("high", "low", "close", "trade_value")
-
-
-def last_regular_closes(
-    rows: list[tuple[str, dt.datetime, float]], day: dt.date
-) -> dict[str, tuple[float, dt.date]]:
-    """``(code, ts, close)`` 분봉 행에서 종목별로 `day` 이전 마지막 정규장 봉의 (종가, 날짜). ts 는 KST naive."""
-    best: dict[str, tuple[dt.datetime, float]] = {}
-    for code, ts, close in rows:
-        if ts.date() >= day or not (REGULAR_OPEN <= ts.time() < REGULAR_END):
-            continue
-        if code not in best or ts > best[code][0]:
-            best[code] = (ts, close)
-    return {c: (cl, ts.date()) for c, (ts, cl) in best.items()}
 
 
 def regular_session_bars(con, first: dt.date, last: dt.date) -> pd.DataFrame:  # noqa: ANN001

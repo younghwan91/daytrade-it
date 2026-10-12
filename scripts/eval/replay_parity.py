@@ -19,11 +19,15 @@ the first exit's submission time must agree within one manage tick (30 s,
 (`sell_fill`).
 
 Previous closes (I2) come from `data/eval/prev_close/YYYY-MM-DD.json`: the
-prior session's last minute bar with ts <= 20:00 (unified KRX+NXT close, R17;
-the KRX close < 15:33 is stored as krx_close), frozen once and served to SimBroker
-and the no-chase filter; tickers whose frozen close is > 0.1% off today's
-daily_bars_adjusted are printed. `data_vintage` (R11) is judged against the
-frozen close.
+prior session's last minute bar with ts <= 20:00 (`close`, incl. KRX after-market
+16:00-20:00 trades, 2026-09-14~) and the KRX regular-session close < 15:33
+(`krx_close`), frozen once. SimBroker's price-limit base is `krx_close` (R18). The
+no-chase filter (R17) gets the basis live used that day: `close` before
+`entry_filter.REGULAR_CLOSE_FROM` (2026-10-13), `krx_close` from then on (falling
+back to `close` where there is no regular bar, as live does). Tickers whose frozen
+basis is > 0.1% off an independent reference are printed: daily_bars_adjusted
+before the switch, supply_demand's implied price-limit base from it.
+`data_vintage` (R11) is judged against the frozen basis.
 
 The day's live configuration comes from the live ledger's `baseline` row when
 it carries one (`limits`, `cash`, `git_sha`; AutoTrader writes them from
@@ -46,8 +50,6 @@ from urllib.parse import unquote, urlparse
 
 import psycopg2
 from krx_quant_core.market.ticks import tick_size
-from krx_session import REGULAR_END, REGULAR_OPEN
-from krx_session import last_regular_closes as _last_regular_closes
 
 from daytrade_it.application.replay.day_replay import (
     MAX_MISSING_BARS,
@@ -63,12 +65,15 @@ from daytrade_it.application.replay.prev_close import (
     dump_prev_closes,
     load_prev_closes,
 )
+from daytrade_it.application.signals.entry_filter import REGULAR_CLOSE_FROM
 from daytrade_it.application.trading.auto_trader import (
     TradingLimits,
     add_on_hit,
     limits_from_strings,
     vwap_exit_hit,
 )
+from daytrade_it.domain.services.krx_session import REGULAR_END, REGULAR_OPEN
+from daytrade_it.domain.services.krx_session import last_regular_closes as _last_regular_closes
 from daytrade_it.infrastructure.brokers.base import KST, MinuteBar
 from daytrade_it.infrastructure.brokers.sim_broker import SimBroker
 from daytrade_it.infrastructure.external.quant_airflow_db_client import QuantAirflowDBClient
@@ -81,11 +86,12 @@ DART = Path("../scalp-it/data/dart.db")
 WORK = Path("data/eval/replay_work")
 PREV_CLOSE = Path("data/eval/prev_close")
 #: Regular session incl. the closing auction print (REGULAR_OPEN <= ts < REGULAR_END,
-#: 15:30 or 15:32 when a VI extends the auction) lives in `krx_session`, the research
-#: gate that also rebuilds regular-session daily bars from 2026-09-14 on.
-#: R17: live no-chase reads the unified KRX+NXT daily close = last bar by 20:00.
+#: 15:30 or 15:32 when a VI extends the auction) lives in `domain.services.krx_session`,
+#: shared with the live no-chase filter and the research gate `scripts/eval/krx_session`.
+#: Before REGULAR_CLOSE_FROM live no-chase read kr_quant's daily close, which from
+#: 2026-09-14 includes KRX after-market trades (16:00-20:00) = last bar by 20:00.
 UNIFIED_END = dt.time(20, 0)
-#: No KRX/NXT trading before 08:00: an earlier bar means a timezone mix-up.
+#: No trading before 08:00 KST: an earlier bar means a timezone mix-up.
 EARLIEST_BAR = dt.time(8, 0)
 PREV_CLOSE_LOOKBACK = dt.timedelta(days=10)  # entry_filter._LOOKBACK_DAYS
 MANAGE_TICK = dt.timedelta(seconds=30)
@@ -234,6 +240,28 @@ def daily_adjusted_closes(codes: list[str], day: dt.date) -> dict[str, Decimal]:
         return {code: Decimal(str(close)) for code, close in cur.fetchall()}
 
 
+def regular_base_prices(codes: list[str], day: dt.date) -> dict[str, Decimal]:
+    """`day`'s price-limit base implied by supply_demand: close / (1 + flu_rt / 1e4).
+
+    flu_rt is % x 100 and both close and flu_rt include the after-market, so the ratio is the
+    base = the prior regular-session close (005930 09-18: 260,000 / 1.0297 = 252,500), up to
+    flu_rt's 0.01% rounding. A corporate action that resets the base shows up as a gap.
+    Reference for vintage_flags only.
+    """
+    with _conn() as c, c.cursor() as cur:
+        cur.execute(
+            "SELECT code, close, flu_rt FROM supply_demand WHERE code = ANY(%s) AND date = %s",
+            (codes, day),
+        )
+        return {
+            code: (Decimal(close) / (1 + Decimal(str(flu)) / Decimal(10_000))).quantize(
+                Decimal(1), rounding=ROUND_HALF_UP
+            )
+            for code, close, flu in cur.fetchall()
+            if close and flu is not None
+        }
+
+
 def prior_regular_bars(codes: list[str], day: dt.date) -> list[tuple[str, dt.datetime, float]]:
     """(code, ts, close) of each code's last regular bar and last bar by 20:00 in the
     lookback before `day`."""
@@ -254,9 +282,11 @@ def prior_regular_bars(codes: list[str], day: dt.date) -> list[tuple[str, dt.dat
 def last_regular_closes(
     rows: list[tuple[str, dt.datetime, float]], day: dt.date
 ) -> dict[str, tuple[Decimal, dt.date]]:
-    """Each code's close at its latest regular-session bar strictly before `day` (R18 base).
+    """Each code's close at its latest regular-session bar strictly before `day`.
 
-    `krx_session.last_regular_closes` is the one implementation; research scripts use it too.
+    R18 price-limit base, and R17 no-chase basis from REGULAR_CLOSE_FROM.
+    `domain.services.krx_session.last_regular_closes` is the one implementation; the live
+    filter's SQL and research scripts use the same bounds.
     """
     return {c: (Decimal(str(cl)), d) for c, (cl, d) in _last_regular_closes(rows, day).items()}
 
@@ -264,7 +294,8 @@ def last_regular_closes(
 def last_unified_closes(
     rows: list[tuple[str, dt.datetime, float]], day: dt.date
 ) -> dict[str, tuple[Decimal, dt.date]]:
-    """Each code's close at its latest bar with ts <= 20:00 strictly before `day` (NXT incl.)."""
+    """Each code's close at its latest bar with ts <= 20:00 strictly before `day` (KRX
+    after-market incl.) -- what kr_quant's daily close holds from 2026-09-14."""
     best: dict[str, tuple[dt.datetime, float]] = {}
     for code, ts, close in rows:
         if ts.date() >= day or ts.time() > UNIFIED_END:
@@ -275,13 +306,20 @@ def last_unified_closes(
 
 
 def vintage_flags(
-    closes: dict[str, tuple[Decimal, dt.date]], daily: dict[str, Decimal]
+    closes: dict[str, tuple[Decimal, dt.date]],
+    reference: dict[str, Decimal],
+    ref_name: str = "daily_adjusted",
 ) -> list[dict]:
-    """Frozen closes more than VINTAGE_TOL off today's daily_bars_adjusted (or absent there)."""
+    """Frozen closes more than VINTAGE_TOL off `reference` (or absent there).
+
+    Reference: today's daily_bars_adjusted for the daily-close basis (before
+    REGULAR_CLOSE_FROM), `regular_base_prices` ("sd_base") for the regular-close basis --
+    daily_bars_adjusted carries the after-market close and would flag most tickers.
+    """
     out = []
     for code in sorted(closes):
         frozen, date = closes[code]
-        d = daily.get(code)
+        d = reference.get(code)
         dev = None if d is None else frozen / d - 1
         if dev is None or abs(dev) > VINTAGE_TOL:
             out.append(
@@ -289,7 +327,7 @@ def vintage_flags(
                     "code": code,
                     "frozen": str(frozen),
                     "date": date.isoformat(),
-                    "daily_adjusted": str(d),
+                    ref_name: str(d),
                     "dev": None if dev is None else f"{dev:+.4%}",
                 }
             )
@@ -307,6 +345,7 @@ def frozen_prev_closes(
     out_dir: Path = PREV_CLOSE,
     fetch_bars=prior_regular_bars,  # noqa: ANN001
     fetch_daily=daily_adjusted_closes,  # noqa: ANN001
+    fetch_base=regular_base_prices,  # noqa: ANN001
 ) -> FrozenPrevCloses:
     """Load `out_dir/<day>.json`, or build it once from minute bars and freeze it.
 
@@ -322,11 +361,16 @@ def frozen_prev_closes(
         return frozen
     rows = fetch_bars(codes, day)
     closes = last_unified_closes(rows, day)
+    krx = last_regular_closes(rows, day)
+    if day >= REGULAR_CLOSE_FROM:
+        flags = vintage_flags(krx, fetch_base(codes, day), "sd_base")
+    else:
+        flags = vintage_flags(closes, fetch_daily(codes, day))
     frozen = FrozenPrevCloses(
         day=day,
         closes=closes,
-        krx=last_regular_closes(rows, day),
-        flags=vintage_flags(closes, fetch_daily(codes, day)),
+        krx=krx,
+        flags=flags,
         missing=sorted(set(codes) - set(closes)),
     )
     dump_prev_closes(path, frozen)
@@ -375,6 +419,29 @@ def fill_deviations(live: list[dict], fills: list[dict]) -> list[tuple[str, str,
 
 def _kst(ts: str) -> dt.datetime:
     return dt.datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(KST)
+
+
+def check_no_chase_basis(rows: list[dict], day: dt.date) -> None:
+    """Fail the day if live's no-chase log contradicts the basis the replay serves.
+
+    From REGULAR_CLOSE_FROM the live filter logs `prev_close_source` on every
+    `extended` row; before it the field did not exist. A mismatch means the switch
+    was deployed on another day than REGULAR_CLOSE_FROM says, and the replay would
+    measure the move against a different prior close than live did.
+    """
+    seen = {
+        "prev_close_source" in r
+        for r in rows
+        if r.get("event") == "entry_filter: extended, no entry"
+        and "timestamp" in r
+        and _kst(r["timestamp"]).date() == day
+    }
+    want = day >= REGULAR_CLOSE_FROM
+    if seen and seen != {want}:
+        raise ReplayDataError(
+            f"live no-chase rows on {day} {'lack' if want else 'carry'} prev_close_source: "
+            f"the regular-close switch did not deploy on REGULAR_CLOSE_FROM={REGULAR_CLOSE_FROM}"
+        )
 
 
 def live_decisions(rows: list[dict], day: dt.date, exclude_orders: set[str]) -> list[dict]:
@@ -986,10 +1053,13 @@ def exit_divergences(
 
 
 def check_prev_close_coverage(frozen: FrozenPrevCloses) -> None:
-    """Fail the day if > 5% of event tickers have no prior-session regular bar.
+    """Fail the day if > 5% of event tickers have no prior-session bar (ts <= 20:00).
 
     Without it the no-chase filter finds no prior close and silently drops the
-    pair, so the replay would trade a different universe than live did.
+    pair, so the replay would trade a different universe than live did. A ticker
+    with a bar by 20:00 but no regular bar still has a no-chase basis (the
+    daily-close fallback, `FrozenPrevCloses.no_chase_fallbacks`), so it counts as
+    covered.
     """
     n = len(frozen.closes) + len(frozen.missing)
     if n and len(frozen.missing) / n > MAX_MISSING_BARS:
@@ -1012,8 +1082,10 @@ def prepare_day(
     frozen = frozen_prev_closes(codes, day)
     print(
         f"  prev close frozen: {len(frozen.closes)} codes (prior session "
-        f"{frozen.prev_session}), no close: {frozen.missing}; "
-        f"> {VINTAGE_TOL:.1%} off daily_bars_adjusted: {len(frozen.flags)}"
+        f"{frozen.prev_session}), no close: {frozen.missing}; no-chase basis "
+        f"{'regular-session close' if frozen.regular_no_chase else 'daily close'}"
+        f"{f', daily fallback: {frozen.no_chase_fallbacks}' if frozen.regular_no_chase else ''}; "
+        f"> {VINTAGE_TOL:.1%} off reference: {len(frozen.flags)}"
     )
     for f in frozen.flags:
         print(f"    PREV_CLOSE_FLAG {f}")
@@ -1059,6 +1131,7 @@ def main() -> None:
         print(f"== {day}")
         try:
             cfg, cash = live_day_config(day, raw_live)
+            check_no_chase_basis(log_rows, day)
             base = baseline_row(raw_live) or {}
             print(
                 f"  live config: {'ledger baseline' if base.get('limits') else 'LIVE_CONFIGS'}; "
@@ -1066,7 +1139,7 @@ def main() -> None:
                 f"no-chase cap {no_chase_cap(cfg):.2%}; add_on {cfg.limits.add_on_min_gain}"
             )
             bars, frozen, broker, stale_before = prepare_day(day, events, cash)
-            prev = frozen.prices
+            prev = frozen.no_chase_prices
             res = replay_day(
                 day,
                 events,

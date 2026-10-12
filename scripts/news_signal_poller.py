@@ -3,7 +3,7 @@
 Polls Toss's live news dashboard and, for every (article, tagged company)
 pair, scores it with Claude (`infrastructure/external/anthropic_client.py`,
 prompt v2). A bullish main/partial-subject pair whose stock is not already
-up > 2% vs. the prior close (`application/signals/entry_filter.py`) becomes
+up > 3% vs. the prior regular-session close (`application/signals/entry_filter.py`) becomes
 a COMPOSITE BUY signal in `gptquant.trading_signals`, expiring at that
 session's close, for `execute_trade(signal_id=...)` to pick up.
 
@@ -650,6 +650,20 @@ async def _run_locked(
         return
     stale_before = session_close_kst(prior_bars[-1].date)
     expires_at = session_close_kst(today)
+    # The no-chase filter measures against the prior regular-session close from minute
+    # bars (scalp-it's 15:45 cron). If they are missing for the prior session, every
+    # ticker falls back to the after-market-inclusive daily close -- say so at startup.
+    # (Also warms the minute_bars chunk; the first cold read took ~15 s on 2026-10-13.)
+    regular = db_client.get_regular_session_close(
+        Ticker(value="005930"), before=today, lookback_days=14
+    )
+    if regular is None or regular.date < prior_bars[-1].date:
+        logger.warning(
+            "news_signal_poller: prior-session regular minute bars missing, "
+            "no-chase falls back to the daily close",
+            prior_session=str(prior_bars[-1].date),
+            regular_close_date=None if regular is None else str(regular.date),
+        )
 
     # Articles are marked seen when polled. Polling before the open would
     # burn them on a pre-open quote (the eval entered pre-market news at the

@@ -435,12 +435,12 @@ def test_last_regular_closes_ignore_after_hours_and_the_day_itself() -> None:
 
     rows = [
         ("A", dt.datetime(2026, 9, 14, 15, 30), 2900.0),
-        ("A", dt.datetime(2026, 9, 14, 15, 35), 2950.0),  # NXT after-market
+        ("A", dt.datetime(2026, 9, 14, 15, 35), 2950.0),  # after the closing auction
         ("A", dt.datetime(2026, 9, 14, 19, 59), 2960.0),
         ("A", dt.datetime(2026, 9, 11, 15, 30), 2800.0),
         ("B", dt.datetime(2026, 9, 11, 15, 19), 500.0),  # halted on 09-14
         ("B", dt.datetime(2026, 9, 11, 15, 32), 510.0),  # closing auction extended by VI
-        ("B", dt.datetime(2026, 9, 11, 15, 35), 520.0),  # NXT after-market
+        ("B", dt.datetime(2026, 9, 11, 15, 35), 520.0),  # after the closing auction
         ("A", dt.datetime(2026, 9, 15, 9, 0), 3000.0),
     ]
     got = last_regular_closes(rows, DAY)
@@ -450,8 +450,9 @@ def test_last_regular_closes_ignore_after_hours_and_the_day_itself() -> None:
     }
 
 
-def test_unified_closes_take_the_last_bar_up_to_2000_including_nxt() -> None:
-    """R17: live no-chase reads kr_quant's unified daily close = NXT after-market last price."""
+def test_unified_closes_take_the_last_bar_up_to_2000_including_after_market() -> None:
+    """Before REGULAR_CLOSE_FROM live no-chase read kr_quant's daily close, which from
+    2026-09-14 is the KRX after-market (16:00-20:00) last price."""
     from replay_parity import last_unified_closes  # noqa: PLC0415
 
     rows = [
@@ -511,6 +512,60 @@ def test_frozen_prev_closes_refuse_a_file_missing_event_codes(tmp_path: Path) ->
     frozen_prev_closes(["A"], DAY, tmp_path, lambda _c, _d: [], lambda _c, _d: {})
     with pytest.raises(ValueError, match="Z"):
         frozen_prev_closes(["A", "Z"], DAY, tmp_path, lambda _c, _d: [], lambda _c, _d: {})
+
+
+def test_from_the_switch_vintage_flags_compare_the_regular_close_to_the_implied_base(
+    tmp_path: Path,
+) -> None:
+    """daily_bars_adjusted carries the after-market close, so it is no reference for the
+    regular-close basis; supply_demand's implied price-limit base is."""
+    from replay_parity import REGULAR_CLOSE_FROM, frozen_prev_closes  # noqa: PLC0415
+
+    day = REGULAR_CLOSE_FROM
+    prev = day - dt.timedelta(days=1)
+    calls: list[str] = []
+
+    def fetch_bars(codes, d):  # noqa: ANN001, ANN202
+        return [
+            ("A", dt.datetime.combine(prev, dt.time(15, 30)), 58100.0),
+            ("A", dt.datetime.combine(prev, dt.time(19, 59)), 66200.0),
+            ("B", dt.datetime.combine(prev, dt.time(15, 30)), 1000.0),
+        ]
+
+    def fetch_daily(codes, d):  # noqa: ANN001, ANN202
+        calls.append("daily")
+        return {}
+
+    def fetch_base(codes, d):  # noqa: ANN001, ANN202
+        calls.append("base")
+        return {"A": Decimal(58100), "B": Decimal(1010)}
+
+    f = frozen_prev_closes(["A", "B"], day, tmp_path, fetch_bars, fetch_daily, fetch_base)
+    assert calls == ["base"]
+    assert [(x["code"], x["sd_base"]) for x in f.flags] == [("B", "1010")]
+    assert f.no_chase_prices == {"A": Decimal(58100), "B": Decimal(1000)}
+
+
+def test_no_chase_basis_check_fails_a_day_whose_live_log_contradicts_the_switch_date() -> None:
+    import pytest  # noqa: PLC0415
+    from replay_parity import (  # noqa: PLC0415
+        REGULAR_CLOSE_FROM,
+        ReplayDataError,
+        check_no_chase_basis,
+    )
+
+    def row(day: dt.date, **kw) -> dict:  # noqa: ANN003
+        ts = dt.datetime.combine(day, dt.time(0, 5), tzinfo=dt.UTC).isoformat()
+        return {"event": "entry_filter: extended, no entry", "timestamp": ts, **kw}
+
+    new, old = REGULAR_CLOSE_FROM, REGULAR_CLOSE_FROM - dt.timedelta(days=1)
+    check_no_chase_basis([row(new, prev_close_source="krx_regular")], new)
+    check_no_chase_basis([row(old)], old)
+    check_no_chase_basis([], new)  # no evidence: nothing to contradict
+    with pytest.raises(ReplayDataError, match="lack"):
+        check_no_chase_basis([row(new)], new)
+    with pytest.raises(ReplayDataError, match="carry"):
+        check_no_chase_basis([row(old, prev_close_source="krx_regular")], old)
 
 
 def _fill(hms: str, price: int, limit: int, *, resting: bool, side: str = "buy") -> dict:

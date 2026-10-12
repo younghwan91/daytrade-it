@@ -28,9 +28,10 @@ ALLOWED = {
         "오염이라 다시 돌리지 않는다(파일 머리 경고)."
     ),
     "replay_parity.py": (
-        "실매매 리플레이. no-chase 는 R17(라이브가 애프터마켓 포함 일봉 종가를 쓴다)을 그대로 흉내 내고, "
-        "가격제한 기준가는 krx_session.last_regular_closes(R18)로 따로 만든다. daily_bars_adjusted 는 "
-        "vintage 플래그에만 쓴다."
+        "실매매 리플레이. no-chase(R17)는 그날 라이브가 쓴 기준을 그대로 흉내 낸다 — 2026-10-12 까지는 "
+        "애프터마켓 포함 일봉 종가(분봉 20:00 이하 마지막 봉), 2026-10-13(entry_filter.REGULAR_CLOSE_FROM)부터 "
+        "정규장 종가. 정규장 종가·가격제한 기준가(R18)는 krx_session.last_regular_closes 로 만든다. "
+        "daily_bars_adjusted 는 전환 전 날짜의 vintage 플래그에만 쓴다."
     ),
 }
 

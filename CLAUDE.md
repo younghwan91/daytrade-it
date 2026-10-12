@@ -55,8 +55,11 @@ uv run mypy src            # application·infrastructure·interfaces 는 pyproje
   섞였다. 시가만 정상이다(005930 09-17: 일봉 종가 256,000 vs 정규장 분봉 마지막 252,500). 다음 날 가격제한 기준가 =
   전일 정규장 종가(분봉 09:00 <= ts < 15:33 마지막 봉, 또는 그날 `supply_demand` close/(1+flu_rt/1e4)).
   - 연구 코드는 일봉을 `scripts/eval/krx_session.py`(`regular_daily`)로 읽는다 — 강제: `tests/unit/scripts/test_research_price_gate.py`.
-  - 라이브 추격 금지(R17, `application/signals/entry_filter.py`)·리플레이(`application/replay/prev_close.py`)는 애프터마켓
-    포함 종가를 일부러 쓴다. 3% 규칙은 09-14 전 정규장 종가로 평가한 것이라 의미가 바뀌었다 — 바꿀지는 사용자 결정.
+  - 라이브 추격 금지(R17, `application/signals/entry_filter.py`)는 2026-10-13 세션부터 전일 **정규장** 종가
+    (`get_regular_session_close`, 경계 정본 `domain/services/krx_session.py`)를 쓴다. 분봉이 없는 종목만 일봉 종가로
+    돌아가고 `prev_close_source=daily_fallback` 이 남는다. 09-14~10-12 는 애프터마켓 포함 종가였다 — 리플레이
+    (`application/replay/prev_close.py`)는 날짜별로 그날 라이브 기준을 흉내 낸다(`REGULAR_CLOSE_FROM`). 전진 기록은
+    새 구간 `data/eval/forward_gate/regular_close/` (사전등록 `frozen/2026-10-13-no-chase-regular-close-amend1.json`).
   - `docs/research/2026-10-05-cross-repo-synthesis.md` 끝의 "정정 (2026-10-08)" 절("일봉은 정상")은 틀렸다 — 인용하지 않는다.
 - `earnings.avail_date` 는 제출 마감일이라 정기보고서 17.7% 가 더 늦게 공시됐다(미래 정보) → `get_earnings(known_before=…)`.
   `supply_demand.flu_rt` 는 % × 100, `sector_index` 값은 × 100 정수다(필드 설명: `quant_airflow_db_client.py`).

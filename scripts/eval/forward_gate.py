@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """전진 승격 게이트를 장부에 돌린다 -- 매일 15:50 크론, 결과는 data/eval/forward_gate/.
 
-    uv run python scripts/eval/forward_gate.py            # 실매매+종이 장부 전체
+    uv run python scripts/eval/forward_gate.py            # 실매매+종이 장부 전체 + 정규장 기준 구간
     uv run python scripts/eval/forward_gate.py --since 2026-09-21 --n-trials 200
 
 입력: data/auto_trader*/YYYY-MM-DD.jsonl (거래), data/news_judgments*/ (무작위 대조용
@@ -9,6 +9,12 @@
 봉 시가 진입·15:00 봉 종가 청산). 비용은 왕복 36.7bp 고정 차감.
 
 판정은 숫자만 적는다 -- 7개 전부 통과(`promote: true`)가 아니면 실매매 재개 논의도 하지 않는다.
+
+구간 두 개를 쓴다(`docs/research/frozen/2026-10-13-no-chase-regular-close-amend1.json`):
+- `--since`(기본 2026-09-14) → `latest.*`·`<오늘>.md`. 지금까지의 기록 그대로다. 2026-10-12 까지는 추격 금지(R17)
+  전일 종가가 애프터마켓 포함 일봉 종가였고 2026-10-13 부터 정규장 종가라 두 규칙이 섞인다.
+- 정규장 기준 구간 `entry_filter.REGULAR_CLOSE_FROM`(2026-10-13)~ → `regular_close/latest.*`·`regular_close/<오늘>.md`.
+  현재 규칙의 전진 기록은 이쪽이다. `--no-regular-segment` 로 끈다.
 """
 
 from __future__ import annotations
@@ -32,10 +38,13 @@ from daytrade_it.application.research.forward_gate import (  # noqa: E402
     gate_report,
     ledger_trades,
 )
+from daytrade_it.application.signals.entry_filter import REGULAR_CLOSE_FROM  # noqa: E402
 from daytrade_it.infrastructure.external.anthropic_client import SIGNAL_THRESHOLD  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 OUT = ROOT / "data" / "eval" / "forward_gate"
+#: 정규장 종가 기준 추격 금지(R17) 구간의 출력. 기존 `OUT/latest.*` 는 그대로 둔다.
+REGULAR_OUT = OUT / "regular_close"
 
 
 def _dsn() -> str:
@@ -115,21 +124,12 @@ def random_control(bars: Bars, days: set[dt.date], rng: random.Random, draws: in
     }
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--since", type=dt.date.fromisoformat, default=dt.date(2026, 9, 14))
-    ap.add_argument(
-        "--n-trials", type=int, default=200, help="이 정책까지 시도한 후보 수(Deflated Sharpe 용)"
-    )
-    ap.add_argument("--seed", type=int, default=0)
-    args = ap.parse_args()
-
-    conn = psycopg2.connect(_dsn())
-    bars = Bars(conn.cursor())
+def gate_since(bars: Bars, since: dt.date, *, n_trials: int, seed: int) -> dict:
+    """`since` 이후 장부 거래에 7개 게이트를 돌린 보고서."""
     trades = []
     # 종이 장부의 주문번호(P000001...)는 날마다 다시 시작하므로 장부 파일(=하루)별로 짝을 맞춘다.
     for f in sorted(glob.glob(str(ROOT / "data" / "auto_trader*" / "*.jsonl"))):
-        if dt.date.fromisoformat(Path(f).stem) >= args.since:
+        if dt.date.fromisoformat(Path(f).stem) >= since:
             with open(f) as fh:
                 events = [json.loads(line) for line in fh]
             trades += ledger_trades(
@@ -137,18 +137,22 @@ def main() -> int:
             )
     trades, holidays = drop_days_without_market(trades, lambda code, day: bool(bars.day(code, day)))
     days = {t.day for t in trades}
-    rng = random.Random(args.seed)
+    rng = random.Random(seed)
     control = random_control(bars, days, rng)
-    rep = gate_report(trades, control, n_trials=args.n_trials, seed=args.seed)
+    rep = gate_report(trades, control, n_trials=n_trials, seed=seed)
+    rep["since"] = since.isoformat()
     rep["control_by_day_bp"] = {d.isoformat(): round(v, 1) for d, v in sorted(control.items())}
     rep["generated_at"] = dt.datetime.now().isoformat(timespec="seconds")
     rep["toll_bp"] = ROUND_TRIP_TOLL_BP
     rep["dropped_no_market_days"] = [d.isoformat() for d in holidays]
+    return rep
 
-    OUT.mkdir(parents=True, exist_ok=True)
-    (OUT / "latest.json").write_text(json.dumps(rep, indent=1, ensure_ascii=False, default=str))
+
+def write_report(rep: dict, out: Path, label: str = "") -> str:
+    """`out/latest.json`·`out/latest.md`·`out/<오늘>.md` 를 쓰고 md 를 돌려준다."""
     lines = [
-        f"# forward gate {rep['generated_at']} -- days {len(rep['days'])} trades {rep['n_trades']} "
+        f"# forward gate{label} {rep['generated_at']} -- since {rep['since']} "
+        f"days {len(rep['days'])} trades {rep['n_trades']} "
         f"median {rep['median_bp']:.1f}bp  promote={rep['promote']}",
         "",
         "| gate | value | ok |",
@@ -164,9 +168,37 @@ def main() -> int:
         "per-day sum bp: " + ", ".join(f"{d} {v:+.0f}" for d, v in rep["per_day_sum_bp"].items()),
     ]
     md = "\n".join(lines)
-    (OUT / "latest.md").write_text(md + "\n")
-    (OUT / f"{dt.date.today().isoformat()}.md").write_text(md + "\n")
-    print(md)
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "latest.json").write_text(json.dumps(rep, indent=1, ensure_ascii=False, default=str))
+    (out / "latest.md").write_text(md + "\n")
+    (out / f"{dt.date.today().isoformat()}.md").write_text(md + "\n")
+    return md
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--since", type=dt.date.fromisoformat, default=dt.date(2026, 9, 14))
+    ap.add_argument(
+        "--n-trials", type=int, default=200, help="이 정책까지 시도한 후보 수(Deflated Sharpe 용)"
+    )
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument(
+        "--no-regular-segment",
+        action="store_true",
+        help=f"정규장 종가 기준 구간({REGULAR_CLOSE_FROM}~) 보고서를 따로 쓰지 않는다",
+    )
+    args = ap.parse_args()
+
+    conn = psycopg2.connect(_dsn())
+    bars = Bars(conn.cursor())
+    rep = gate_since(bars, args.since, n_trials=args.n_trials, seed=args.seed)
+    print(write_report(rep, OUT))
+    if not args.no_regular_segment:
+        seg = gate_since(
+            bars, max(args.since, REGULAR_CLOSE_FROM), n_trials=args.n_trials, seed=args.seed
+        )
+        print()
+        print(write_report(seg, REGULAR_OUT, " (R17 regular close)"))
     return 0
 
 

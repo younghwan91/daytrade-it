@@ -154,6 +154,26 @@ class TestAdjustedDailyBars:
         assert bars == []
 
 
+class TestRegularSessionClose:
+    def test_is_the_last_regular_bar_not_the_after_market_close(
+        self, client: QuantAirflowDBClient
+    ) -> None:
+        """005930 2026-09-17: daily close 256,000 (after-market incl.) vs regular 252,500."""
+        got = client.get_regular_session_close(
+            Ticker(value=SAMSUNG_CODE), before=dt.date(2026, 9, 18), lookback_days=10
+        )
+        assert got is not None
+        assert (got.date, got.close) == (dt.date(2026, 9, 17), 252500.0)
+
+    def test_none_without_minute_bars(self, client: QuantAirflowDBClient) -> None:
+        assert (
+            client.get_regular_session_close(
+                Ticker(value="000000"), before=dt.date(2026, 9, 18), lookback_days=10
+            )
+            is None
+        )
+
+
 class TestSupplyDemand:
     def test_latest_supply_demand_for_known_ticker(self, client: QuantAirflowDBClient) -> None:
         row = client.get_latest_supply_demand(Ticker(value=SAMSUNG_CODE))

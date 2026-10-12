@@ -20,7 +20,10 @@ from daytrade_it.application.replay.events import ReplayEvent
 from daytrade_it.application.trading.auto_trader import TradingLimits
 from daytrade_it.infrastructure.brokers.base import KST, MinuteBar
 from daytrade_it.infrastructure.brokers.sim_broker import SimBroker
-from daytrade_it.infrastructure.external.quant_airflow_db_client import StockInfo
+from daytrade_it.infrastructure.external.quant_airflow_db_client import (
+    RegularSessionClose,
+    StockInfo,
+)
 
 DAY = dt.date(2026, 9, 15)
 V2 = {
@@ -74,6 +77,9 @@ class _Bar:
 class _DB:
     def get_adjusted_daily_bars(self, ticker, *, start=None, end=None):  # noqa: ANN001, ANN201
         return [_Bar()]
+
+    def get_regular_session_close(self, ticker, *, before, lookback_days):  # noqa: ANN001, ANN201
+        return RegularSessionClose(code=ticker.value, date=_Bar().date, close=_Bar().close)
 
 
 def _dart(tmp: Path) -> Path:
