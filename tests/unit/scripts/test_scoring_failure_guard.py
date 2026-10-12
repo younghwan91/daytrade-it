@@ -125,6 +125,16 @@ class TestTickPinRotation:
         monkeypatch.setattr(poller, "TICK_PIN_PATH", tmp_path / "pins.txt")
         monkeypatch.setattr(poller, "_pinned_codes", {})
         monkeypatch.setattr(poller, "_pin_day", None)
+        # 장중으로 시계를 고정한다 -- 실제 시계를 쓰면 15:30(TICK_PIN_HELD_UNTIL) 뒤에는 만료가 이미
+        # 지난 시각이라 핀이 바로 빠져 테스트가 장 마감 후에만 깨졌다(2026-10-12 ci-local 에서 발견).
+        intraday = dt.datetime.combine(dt.date.today(), dt.time(11, 0), tzinfo=poller.KST)
+
+        class _Clock(dt.datetime):
+            @classmethod
+            def now(cls, tz=None):  # type: ignore[override]
+                return intraday if tz is not None else intraday.replace(tzinfo=None)
+
+        monkeypatch.setattr(poller.dt, "datetime", _Clock)
 
     @staticmethod
     def _kept() -> list[str]:
