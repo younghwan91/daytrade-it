@@ -14,10 +14,11 @@
   워크트리 `src` 를 가리켜 런타임 데몬이 워크트리 코드로 돈다.
 - `~/git/daytrade-it-rlnews`(3c409b6, detached)도 런타임이다. 16:30 크론 `scripts/eval/pipeline/collect_toss_daily.sh`
   가 거기서 돈다(이 스크립트는 main 에 없다). 워크트리 정리 때 지우거나 체크아웃하지 않는다.
-- 크론은 `deploy/crontab.simnode` 를 고쳐 커밋한다. `crontab -e` 로 고친 건 07:50 cron-install 이 origin/main 기준으로
-  덮는다(위 rlnews 16:30 줄만 레포 밖 비관리 줄).
-- 장중에 live poller(`--paper` 없이)를 손으로 띄우지 않는다. `data/auto_trader/poller.lock` 을 잡아 크론 데몬이 하루 종일
-  쉰다(청산 포함). `--paper` 실행도 판정마다 데몬과 같은 Anthropic 크레딧을 쓴다.
+- 크론은 `deploy/crontab.simnode` 를 고쳐 커밋한다. `crontab -e` 로 고친 건 07:50 cron-install 이 이 체크아웃의 그 파일로
+  덮는다(위 rlnews 16:30 줄만 레포 밖 비관리 줄). 07:50 pull-all 은 현재 브랜치의 업스트림만 당기므로 main 이 아니면 배포가 멈춘다.
+- 장중에 크론 데몬과 같은 모드의 poller 를 손으로 띄우지 않는다. 모드별 lock(`data/auto_trader/poller.lock`,
+  `--paper` 는 `data/auto_trader_paper/poller.lock`)을 먼저 잡으면 크론 데몬이 그날 내내 쉰다(청산 포함). 지금 데몬은
+  `--paper` 다. `--paper` 실행도 판정마다 데몬과 같은 Anthropic 크레딧을 쓴다.
 - `pkill -f <패턴>` 금지 — simnode 의 다른 에이전트와 ssh 셸까지 죽인다(크론의 15:40 pkill 만 예외).
 
 ## 실매매 안전
@@ -51,7 +52,7 @@ uv run mypy src            # application·infrastructure·interfaces 는 pyproje
 
 - `daily_bars` 는 2026-09-14 부터 NXT 거래 종목의 종가·고가·저가·거래량에 NXT(~19:59) 체결이 섞였다
   (005930 09-17: 일봉 종가 256,000 vs 정규장 분봉 마지막 252,500). 정규장 값은 `minute_bars` 09:00~15:30 으로 다시
-  만든다(swing-it `src/swing_it/krx_session.py`). `docs/research/2026-10-05-cross-repo-synthesis.md` 끝의
+  만든다(swing-it `src/swing_it/krx_session.py`, 2026-10-12 기준 feature-combined-strategy 브랜치에만 있다). `docs/research/2026-10-05-cross-repo-synthesis.md` 끝의
   "정정 (2026-10-08)" 절("일봉은 정상")은 틀렸다 — 인용하지 않는다.
 - `minute_bars.ts` 는 시간대 없는 KST 다. `at time zone` 을 걸면 비교가 어긋난다(이 실수로 위 오염을 오진이라 판정했다).
 - `daily_bars.trade_value` 는 백만원 단위다(f09f4c8, volume-entry amend1 — 원으로 읽어 문턱이 꺼진 실행이 무효 처리됐다).
@@ -67,7 +68,7 @@ uv run mypy src            # application·infrastructure·interfaces 는 pyproje
 3. 실행 → `docs/research/<날짜>-<주제>.md` 와 `docs/research/README.md` 색인에 한 줄을 추가한다.
 4. `research/<주제>` 브랜치를 main 에 `--no-ff` 로 병합한다: `Merge research/<주제> — 연구 스크립트·문서만(새 파일), 실매매 코드 무변경`.
 
-- frozen 파일은 고치지 않는다(설정 deny + 훅). 구현 버그 정정은 새 파일 `<원본>-amendN.json` 에
+- frozen 의 기존 파일은 고치지 않는다(훅이 막는다, 새 파일은 허용). 구현 버그 정정은 새 파일 `<원본>-amendN.json` 에
   `amends`·`bug`·`invalid_run_seen`(버그 상태 결과를 봤는지)·`verdict_rule` 을 적는다.
 - 홀드아웃·`--confirm` 채점은 사용자 승인 없이 돌리지 않는다. 죽은 작업은 정지 지시가 있었는지 확인하기 전엔
   다시 띄우지 않는다(2026-09-22 재실행이 예약된 홀드아웃을 소진했다).

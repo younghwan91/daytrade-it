@@ -1,9 +1,4 @@
 {
-  "permissions": {
-    "deny": [
-      "Edit(**/docs/research/frozen/**)"
-    ]
-  },
   "hooks": {
     "PreToolUse": [
       {

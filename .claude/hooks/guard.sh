@@ -27,12 +27,22 @@ case "$tool" in
     if grep -qE 'docs/research/frozen/' <<<"$cmd" && grep -qE '(^|[;&|[:space:]])(rm|mv|truncate|git[[:space:]]+(rm|mv|restore|checkout))[[:space:]]|sed[[:space:]]+(-[a-zA-Z]*i|--in-place)' <<<"$cmd"; then
       deny "frozen 사전등록 파일을 셸로 바꾸지 않는다. 정정은 새 amendN 파일로."
     fi
+    # 런타임을 건드리는 명령: cwd 가 런타임이거나, `cd ~/git/daytrade-it` 하거나, `git -C ~/git/daytrade-it checkout|switch`.
+    # (워크트리 ~/git/daytrade-it-* · ~/git/.harness-wt/* 는 해당 없음.) 그 안의 checkout/switch 마디마다
+    # 대상이 main 이거나 `--` 파일 복원이 아니면 막는다.
     rt="$HOME/git/daytrade-it"
-    if grep -qE '\bgit\b.*\b(checkout|switch)\b' <<<"$cmd" \
-       && { grep -qE "git[[:space:]]+-C[[:space:]]+(~|$HOME)/git/daytrade-it/?[[:space:]]" <<<"$cmd" \
-            || { case "$cwd" in "$rt"|"$rt"/*) ! grep -qE 'git[[:space:]]+-C[[:space:]]' <<<"$cmd";; *) false;; esac; }; } \
-       && ! grep -qE '\b(checkout|switch)[[:space:]]+main\b|[[:space:]]--[[:space:]]' <<<"$cmd"; then
-      deny "~/git/daytrade-it 는 크론 런타임 체크아웃이다(main 고정). 작업은 git worktree add ../daytrade-it-<주제> -b <브랜치> origin/main 으로."
+    rtre="(~|$HOME)/git/daytrade-it/?"
+    in_rt=false
+    case "$cwd" in "$rt"|"$rt"/*) in_rt=true;; esac
+    grep -qE "(^|[;&|[:space:]])cd[[:space:]]+$rtre([[:space:];&|]|\$)" <<<"$cmd" && in_rt=true
+    grep -qE "git[[:space:]]+-C[[:space:]]+$rtre[[:space:]]+(-[^[:space:]]+[[:space:]]+)*(checkout|switch)\b" <<<"$cmd" && in_rt=true
+    if $in_rt; then
+      while IFS= read -r seg; do
+        [ -z "$seg" ] && continue
+        grep -qE '[[:space:]]--([[:space:]]|$)' <<<"$seg" && continue
+        grep -qE '(checkout|switch)([[:space:]]+(-q|--quiet|-f|--force))*[[:space:]]+main[[:space:]]*$' <<<"$seg" && continue
+        deny "~/git/daytrade-it 는 크론 런타임 체크아웃이다(main 고정). 작업은 git worktree add ../daytrade-it-<주제> -b <브랜치> origin/main 으로."
+      done < <(grep -oE '\bgit\b[^;&|]*[[:space:]](checkout|switch)\b[^;&|]*' <<<"$cmd")
     fi
     ;;
 esac
