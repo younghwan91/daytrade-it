@@ -201,12 +201,14 @@ pytest --cov=src/daytrade_it --cov-report=html
 pytest tests/unit/ tests/integration/ tests/e2e/    # by tier
 ```
 
-The suite carries a documented, tracked baseline of 40 pre-existing failures
-(stale `AAPL`/`NASDAQ`-format fixtures that predate the KRX ticker migration,
-plus 3 intentionally-isolated broken handler imports) — see `PLAN.md`'s
-per-phase Results sections for the history. `tests/integration/` includes a
-few tests that need a reachable `quant-airflow` TimescaleDB and skip cleanly
-without one.
+There is no longer a baseline of known failures: `tests/unit/` and
+`tests/integration/` are expected to pass (CI runs both; locally
+`uv run --extra dev pytest tests/unit tests/integration --no-cov -q`). The old
+"40 pre-existing failures" baseline is history — see `PLAN.md`'s per-phase
+Results sections. `tests/integration/` includes a few
+tests that need a reachable `quant-airflow` TimescaleDB and skip cleanly
+without one. `tests/e2e/` needs the API server running (`E2E_BASE_URL`,
+default `http://localhost:8000`).
 
 ---
 
