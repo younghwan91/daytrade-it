@@ -9,6 +9,9 @@
   트리거  09:01 이후, decide 가 속한 분 이후의 양봉, close×volume ≥ 5 × (직전 20거래일 평균 거래대금 / 380).
   진입    트리거 다음 봉 open (≤ 14:30, 상한가면 다음 트리거).
   청산    −2% (갭이면 open, 아니면 S−1틱) / +4% (엄격히 넘을 때) / 같은 봉이면 손절 / 15:00.
+
+전일 종가(상한가 기준가·이음매)·거래대금은 `krx_session.regular_daily` 로 읽는다 — 2026-09-14 부터 daily_bars 에
+KRX 애프터마켓(16:00~20:00)이 섞였기 때문이다(정정 docs/research/frozen/2026-10-09-volume-entry-amend2.json).
 """
 
 from __future__ import annotations
@@ -25,6 +28,7 @@ from costs import round_trip
 from krx_quant_core.market.limits import limit_up_price
 from krx_quant_core.market.ticks import tick_size_int
 from krx_quant_core.stats.matched_null import matched_control
+from krx_session import regular_daily
 from rr_entry_filter import (
     FLAT,
     LAST_SCAN,
@@ -59,11 +63,8 @@ def minute_base(daily_tv_million):
 
 
 def load_daily(con, first: dt.date, last: dt.date) -> pd.DataFrame:
-    d = pd.read_sql(
-        "select code, date, close, trade_value from daily_bars where date >= %s and date <= %s",
-        con,
-        params=(first - dt.timedelta(days=45), last),
-    )
+    """전일 정규장 종가(= 가격제한 기준가)·거래대금. 정규장 값이 없는 전일은 NaN → no_data."""
+    d = regular_daily(con, first - dt.timedelta(days=45), last)
     d = d.sort_values(["code", "date"])
     g = d.groupby("code")
     d["prev_close"] = g["close"].shift(1)
@@ -246,6 +247,9 @@ def run(args) -> dict:
                 counts[gname]["no_data"] += 1
                 continue
             drow = dkey.loc[(code, day)]
+            if not drow["prev_close"] > 0:  # 전일 정규장 종가 없음(애프터마켓 이후 분봉 공백)
+                counts[gname]["no_data"] += 1
+                continue
             if (day, mk) not in cost_cache:
                 cost_cache[(day, mk)] = (
                     round_trip(day, mk, at_open=True),

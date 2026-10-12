@@ -15,6 +15,9 @@
   조건   (T − E − cE) / (E − S + cE) ≥ 2,  c = costs.round_trip(day, market, at_open=t<09:05).
   청산   갭 손절(open ≤ S) → open, 손절(low ≤ S) → S−1틱, 목표(high > T) → T, 같은 봉이면 손절.
          없으면 15:00 봉 open.
+
+전일 종가(상한가 기준가·이음매)·전일 고가·거래대금은 `krx_session.regular_daily` 로 읽는다 — 2026-09-14 부터
+daily_bars 에 KRX 애프터마켓(16:00~20:00)이 섞였기 때문이다(정정 docs/research/frozen/2026-10-08-rr-entry-prereg-amend1.json).
 """
 
 from __future__ import annotations
@@ -34,6 +37,7 @@ from costs import round_trip
 from krx_quant_core.market.limits import limit_up_price
 from krx_quant_core.market.ticks import tick_size_int
 from krx_quant_core.stats.matched_null import cluster_bootstrap_ci, matched_control
+from krx_session import regular_daily
 
 REPO = Path(__file__).resolve().parents[2]
 PREREG = REPO / "docs/research/frozen/2026-10-08-rr-entry-prereg.json"
@@ -154,11 +158,8 @@ def candidates(judg: pd.DataFrame, direction: int) -> pd.DataFrame:
 
 
 def load_daily(con, first: dt.date, last: dt.date) -> pd.DataFrame:
-    d = pd.read_sql(
-        "select code, date, high, close, trade_value from daily_bars where date >= %s and date <= %s",
-        con,
-        params=(first - dt.timedelta(days=14), last),
-    )
+    """전일 정규장 고가·종가(= 가격제한 기준가)·거래대금. 정규장 값이 없는 전일은 NaN → no_data."""
+    d = regular_daily(con, first - dt.timedelta(days=14), last)
     d = d.sort_values(["code", "date"])
     g = d.groupby("code")
     d["prev_high"] = g["high"].shift(1)
@@ -435,6 +436,9 @@ def run(args) -> dict:
                 counts[gname]["no_data"] += 1
                 continue
             drow = dkey.loc[(code, day)]
+            if not drow["prev_close"] > 0:  # 전일 정규장 종가 없음(애프터마켓 이후 분봉 공백)
+                counts[gname]["no_data"] += 1
+                continue
             key = (day, mk)
             if key not in cost_cache:
                 cost_cache[key] = (

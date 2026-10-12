@@ -46,6 +46,8 @@ from urllib.parse import unquote, urlparse
 
 import psycopg2
 from krx_quant_core.market.ticks import tick_size
+from krx_session import REGULAR_END, REGULAR_OPEN
+from krx_session import last_regular_closes as _last_regular_closes
 
 from daytrade_it.application.replay.day_replay import (
     MAX_MISSING_BARS,
@@ -78,10 +80,9 @@ LIVE_LEDGER = Path("data/auto_trader")
 DART = Path("../scalp-it/data/dart.db")
 WORK = Path("data/eval/replay_work")
 PREV_CLOSE = Path("data/eval/prev_close")
-#: Regular session incl. the closing auction print: 15:30, or 15:32 when a VI
-#: extends the auction (09-01..09-15: 2,895 bars at 15:30, 22 at 15:32, none
-#: at 15:31/15:33/15:34). NXT after-market bars start at 15:35.
-REGULAR_OPEN, REGULAR_END = dt.time(9, 0), dt.time(15, 33)
+#: Regular session incl. the closing auction print (REGULAR_OPEN <= ts < REGULAR_END,
+#: 15:30 or 15:32 when a VI extends the auction) lives in `krx_session`, the research
+#: gate that also rebuilds regular-session daily bars from 2026-09-14 on.
 #: R17: live no-chase reads the unified KRX+NXT daily close = last bar by 20:00.
 UNIFIED_END = dt.time(20, 0)
 #: No KRX/NXT trading before 08:00: an earlier bar means a timezone mix-up.
@@ -253,14 +254,11 @@ def prior_regular_bars(codes: list[str], day: dt.date) -> list[tuple[str, dt.dat
 def last_regular_closes(
     rows: list[tuple[str, dt.datetime, float]], day: dt.date
 ) -> dict[str, tuple[Decimal, dt.date]]:
-    """Each code's close at its latest regular-session bar strictly before `day`."""
-    best: dict[str, tuple[dt.datetime, float]] = {}
-    for code, ts, close in rows:
-        if ts.date() >= day or not (REGULAR_OPEN <= ts.time() < REGULAR_END):
-            continue
-        if code not in best or ts > best[code][0]:
-            best[code] = (ts, close)
-    return {c: (Decimal(str(cl)), ts.date()) for c, (ts, cl) in best.items()}
+    """Each code's close at its latest regular-session bar strictly before `day` (R18 base).
+
+    `krx_session.last_regular_closes` is the one implementation; research scripts use it too.
+    """
+    return {c: (Decimal(str(cl)), d) for c, (cl, d) in _last_regular_closes(rows, day).items()}
 
 
 def last_unified_closes(

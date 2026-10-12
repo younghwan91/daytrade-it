@@ -1,0 +1,11 @@
+{
+ "amends": "docs/research/frozen/2026-10-09-volume-entry-prereg.json",
+ "previous_amend": "docs/research/frozen/2026-10-09-volume-entry-amend1.json",
+ "at": "2026-10-12T21:23:00+09:00",
+ "kind": "데이터 결함 정정 — 규칙의 숫자(5배·양봉·−2%·+4%·14:30·15:00·20거래일)는 바꾸지 않는다. '전일 종가'·'거래대금'을 정규장 값으로 읽는다.",
+ "bug": "2026-09-14 부터 daily_bars 의 고가·저가·종가·거래량·거래대금에 KRX 애프터마켓(16:00~20:00 연속매매, ETF·ETN 제외) 체결이 섞였다(시가만 정상). volume_entry.py 는 limit_up_price(daily_bars 전일 종가)로 상한가 진입을 거르고, 같은 종가로 ±30% 이음매를, daily_bars 거래대금 20거래일 평균으로 트리거 문턱 base 를, 거래대금·종가로 널 층을 만들었다.",
+ "invalid_run_seen": "stage A 결과(2026-03-17..09-15, 기각)를 봤다. 영향은 전일 종가가 09-14 인 09-15 하루와, base 평균 창에 09-14 거래대금이 들어간 09-15 — 오른다 판정 거래 8,895 중 53건(0.6%), 125거래일 중 1일. 판정(P1·P2·P3 전부 실패)이 이 하루로 바뀔 수 없다. 다시 돌리지 않았다. stage B(09-16 이후)는 사전등록대로 돌리지 않았고 이 정정 뒤에도 돌리지 않는다.",
+ "fix": "load_daily 가 scripts/eval/krx_session.regular_daily 를 쓴다: 09-14 이후 행의 고가·저가·종가·거래대금을 minute_bars 정규장(09:00 <= ts < 15:33) 집계로 바꾼다(거래대금 = 분봉 trade_value 합 / 1e6, 백만원 — amend1 의 단위 그대로). 정규장 분봉이 없는 종목은 NaN 이고 후보면 no_data 로 센다. base 의 20거래일 평균은 NaN 날을 건너뛴다(rolling mean, min_periods=1).",
+ "guard": "tests/unit/scripts/test_research_price_gate.py",
+ "verdict_rule": "변경 없음. stage A 판정(기각) 유지."
+}
