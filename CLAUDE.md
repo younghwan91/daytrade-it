@@ -50,10 +50,16 @@ uv run mypy src            # application·infrastructure·interfaces 는 pyproje
 
 ## 데이터 함정
 
-- `daily_bars` 는 2026-09-14 부터 NXT 거래 종목의 종가·고가·저가·거래량에 NXT(~19:59) 체결이 섞였다
-  (005930 09-17: 일봉 종가 256,000 vs 정규장 분봉 마지막 252,500). 정규장 값은 `minute_bars` 09:00~15:30 으로 다시
-  만든다(swing-it `src/swing_it/krx_session.py`, 2026-10-12 기준 feature-combined-strategy 브랜치에만 있다). `docs/research/2026-10-05-cross-repo-synthesis.md` 끝의
-  "정정 (2026-10-08)" 절("일봉은 정상")은 틀렸다 — 인용하지 않는다.
+- IMPORTANT: 2026-09-14 부터 KRX 애프터마켓(16:00~20:00 연속매매, ETF·ETN 제외) 체결이 키움 일봉 →
+  `daily_bars`·`daily_bars_adjusted`·`supply_demand.close` 의 종가·고가·저가·거래량과 `minute_bars` 16:00~19:59 봉에
+  섞였다. 시가만 정상이다(005930 09-17: 일봉 종가 256,000 vs 정규장 분봉 마지막 252,500). 다음 날 가격제한 기준가 =
+  전일 정규장 종가(분봉 09:00 <= ts < 15:33 마지막 봉, 또는 그날 `supply_demand` close/(1+flu_rt/1e4)).
+  - 연구 코드는 일봉을 `scripts/eval/krx_session.py`(`regular_daily`)로 읽는다 — 강제: `tests/unit/scripts/test_research_price_gate.py`.
+  - 라이브 추격 금지(R17, `application/signals/entry_filter.py`)·리플레이(`application/replay/prev_close.py`)는 애프터마켓
+    포함 종가를 일부러 쓴다. 3% 규칙은 09-14 전 정규장 종가로 평가한 것이라 의미가 바뀌었다 — 바꿀지는 사용자 결정.
+  - `docs/research/2026-10-05-cross-repo-synthesis.md` 끝의 "정정 (2026-10-08)" 절("일봉은 정상")은 틀렸다 — 인용하지 않는다.
+- `earnings.avail_date` 는 제출 마감일이라 정기보고서 17.7% 가 더 늦게 공시됐다(미래 정보) → `get_earnings(known_before=…)`.
+  `supply_demand.flu_rt` 는 % × 100, `sector_index` 값은 × 100 정수다(필드 설명: `quant_airflow_db_client.py`).
 - `minute_bars.ts` 는 시간대 없는 KST 다. `at time zone` 을 걸면 비교가 어긋난다(이 실수로 위 오염을 오진이라 판정했다).
 - `daily_bars.trade_value` 는 백만원 단위다(f09f4c8, volume-entry amend1 — 원으로 읽어 문턱이 꺼진 실행이 무효 처리됐다).
 - 비용은 리터럴로 쓰지 않는다. `scripts/eval/costs.py`(core `round_trip_cost` 위임)를 쓴다. 예전 `COST = 0.00215` 는
