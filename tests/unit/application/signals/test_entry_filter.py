@@ -193,6 +193,10 @@ def test_regular_close_query_error_falls_back_to_the_daily_close(monkeypatch) ->
 
     log = _RecordingLogger()
     monkeypatch.setattr(entry_filter, "logger", log)
+    # warning vs debug depends on today >= REGULAR_CLOSE_FROM; CI runs on UTC, a day behind KST.
+    import datetime as _dt  # noqa: PLC0415
+
+    monkeypatch.setattr(entry_filter, "REGULAR_CLOSE_FROM", _dt.date(2000, 1, 1))
     signal = generate_no_chase_confirmation(
         Ticker(value="005930"), _Broker("70000", "70100"), _FailingRegularDB(70000.0), _EXPIRES
     )
