@@ -95,7 +95,14 @@ def judged_at_to_kst(judged_at: dt.datetime) -> dt.datetime:
 
 
 class AdjustedDailyBar(BaseModel):
-    """One row of ``daily_bars_adjusted`` (split-adjusted daily OHLCV, KRW)."""
+    """One row of ``daily_bars_adjusted`` (split-adjusted daily OHLCV, KRW).
+
+    From 2026-09-14 the high/low/close/volume/trade_value include KRX after-market
+    trades (16:00-20:00 continuous session, ETF/ETN excluded); only the open is the
+    regular-session value. The next day's price-limit base is the regular-session close
+    (minute bars 09:00 <= ts < 15:33), not this close. ``trade_value`` is in millions
+    of KRW.
+    """
 
     code: str
     date: dt.date
@@ -104,7 +111,7 @@ class AdjustedDailyBar(BaseModel):
     low: float | None = None
     close: float | None = None
     volume: int | None = None
-    trade_value: int | None = None
+    trade_value: int | None = Field(default=None, description="Traded value, millions of KRW")
     source: str = Field(description="Provenance, e.g. 'kiwoom' or 'naver' (delisted backfill)")
 
 
@@ -118,12 +125,22 @@ class StockInfo(BaseModel):
 
 
 class SupplyDemandRow(BaseModel):
-    """One row of ``supply_demand`` (investor net-buy flows)."""
+    """One row of ``supply_demand`` (investor net-buy flows).
+
+    Investor columns are net-bought **quantities** (shares), not KRW. ``close`` includes
+    KRX after-market trades from 2026-09-14; ``close / (1 + flu_rt / 1e4)`` is the day's
+    price-limit base (the previous regular-session close).
+    """
 
     code: str
     date: dt.date
-    close: int | None = None
-    flu_rt: float | None = Field(default=None, description="Change rate, %")
+    close: int | None = Field(
+        default=None, description="Close; includes KRX after-market trades from 2026-09-14"
+    )
+    flu_rt: float | None = Field(
+        default=None,
+        description="Change vs. the day's base price in percent x 100 (21.0 = +0.21%)",
+    )
     acc_trde_qty: int | None = Field(default=None, description="Accumulated trading volume")
     individual: int | None = None
     foreign_: int | None = None
@@ -132,7 +149,11 @@ class SupplyDemandRow(BaseModel):
 
 
 class SectorIndexRow(BaseModel):
-    """One row of ``sector_index`` (KOSPI/KOSDAQ sector indices)."""
+    """One row of ``sector_index`` (KOSPI/KOSDAQ sector indices).
+
+    OHLC are index points x 100 stored as integers (KOSPI 6,384.24 -> 638424).
+    Rows start 2024-01-26.
+    """
 
     code: str
     name: str | None = None
@@ -146,11 +167,20 @@ class SectorIndexRow(BaseModel):
 
 
 class EarningsRow(BaseModel):
-    """One row of ``earnings`` (DART financials, point-in-time)."""
+    """One row of ``earnings`` (DART financials, versioned by ``knowledge_date``).
+
+    ``avail_date`` is the statutory filing deadline, not the disclosure date: 17.7% of
+    periods with a periodic-report receipt date in ``earnings_disclosures`` were filed
+    after it (2026-10-12), so filtering on ``avail_date`` alone looks ahead. Use
+    ``known_date`` (first usable the next trading day) for as-of work.
+    """
 
     code: str
     period: str
-    avail_date: dt.date | None = Field(default=None, description="Lookahead-safe availability date")
+    avail_date: dt.date | None = Field(
+        default=None,
+        description="Statutory filing deadline - NOT lookahead-safe; see known_date",
+    )
     netinc: float | None = None
     netinc_prior: float | None = None
     revenue: float | None = None
@@ -158,6 +188,14 @@ class EarningsRow(BaseModel):
     op_income: float | None = None
     op_income_prior: float | None = None
     knowledge_date: dt.date
+    known_date: dt.date | None = Field(
+        default=None,
+        description=(
+            "max(avail_date, first periodic-report receipt date); usable from the next "
+            "trading day. Falls back to avail_date when no periodic receipt exists "
+            "(before 2018Q3)."
+        ),
+    )
 
 
 class ConsensusRow(BaseModel):
@@ -496,6 +534,7 @@ class QuantAirflowDBClient:
         ticker: Ticker,
         *,
         asof: dt.date | str | None = None,
+        known_before: dt.date | None = None,
     ) -> list[EarningsRow]:
         """Fetch earnings for `ticker`, one row per period, as-of `asof`.
 
@@ -506,28 +545,39 @@ class QuantAirflowDBClient:
         version if ``asof`` is ``None``) to avoid a plain ``SELECT *``
         silently duplicating rows once restatements exist.
 
+        ``asof`` bounds the restatement version only. It does not make a row
+        lookahead-safe: ``avail_date`` is the filing deadline and 17.7% of
+        periodic reports came later. For point-in-time use pass
+        ``known_before=<trading day>``, which keeps rows with
+        ``known_date < known_before`` (disclosed on an earlier day, so usable
+        from that trading day's open).
+
         Args:
             ticker: KRX 6-digit code.
             asof: Ceiling on ``knowledge_date``. ``None`` means latest-known.
+            known_before: Keep only periods whose ``known_date`` is strictly
+                before this date. ``None`` keeps all (not lookahead-safe).
 
         Returns:
             One row per ``period``, ordered by period ascending.
         """
         cols = (
-            "code, period, avail_date, netinc, netinc_prior, revenue, "
-            "revenue_prior, op_income, op_income_prior, knowledge_date"
+            "e.code, e.period, e.avail_date, e.netinc, e.netinc_prior, e.revenue, "
+            "e.revenue_prior, e.op_income, e.op_income_prior, e.knowledge_date, "
+            "GREATEST(e.avail_date, (SELECT min(d.rcept_dt) FROM earnings_disclosures d "
+            "WHERE d.code = e.code AND d.period = e.period AND d.kind = 'periodic'))"
         )
         if asof is not None:
             sql = (
-                f"SELECT DISTINCT ON (code, period) {cols} FROM earnings "
-                "WHERE code = %s AND knowledge_date <= %s "
-                "ORDER BY code, period, knowledge_date DESC"
+                f"SELECT DISTINCT ON (e.code, e.period) {cols} FROM earnings e "
+                "WHERE e.code = %s AND e.knowledge_date <= %s "
+                "ORDER BY e.code, e.period, e.knowledge_date DESC"
             )
             params: tuple[Any, ...] = (ticker.value, asof)
         else:
             sql = (
-                f"SELECT DISTINCT ON (code, period) {cols} FROM earnings "
-                "WHERE code = %s ORDER BY code, period, knowledge_date DESC"
+                f"SELECT DISTINCT ON (e.code, e.period) {cols} FROM earnings e "
+                "WHERE e.code = %s ORDER BY e.code, e.period, e.knowledge_date DESC"
             )
             params = (ticker.value,)
 
@@ -544,9 +594,14 @@ class QuantAirflowDBClient:
                 op_income=r[7],
                 op_income_prior=r[8],
                 knowledge_date=r[9],
+                known_date=r[10],
             )
             for r in rows
         ]
+        if known_before is not None:
+            results = [
+                e for e in results if e.known_date is not None and e.known_date < known_before
+            ]
         return sorted(results, key=lambda e: e.period)
 
     # -------------------------------------------------------------------
