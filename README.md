@@ -249,7 +249,7 @@ modules above (`risk_gate.py`, `cost_model.py`, `tick_size.py`,
 thin re-exports — change the logic in core, not here. Strategy code,
 `AutoTrader` and `execute_trade` stay in this repo.
 
-#### krx-quant-core 공용 엔진 사용 (v0.5.0)
+#### krx-quant-core 공용 엔진 사용 (v0.7.0)
 
 | 쓰는 곳 | 코어 엔진 | 비고 |
 |---|---|---|
@@ -261,7 +261,7 @@ thin re-exports — change the logic in core, not here. Strategy code,
 
 실주문 경로(`AutoTrader`·`execute_trade`·`KiwoomBroker`)는 아직 코어 `OrderManager` 를 쓰지 않는다.
 
-> ⚠️ **장중 trader 에서 live poller(`--paper` 없이)를 손으로 띄우지 말 것 — 실데몬이 하루 종일 쉰다(청산 포함).**
+> ⚠️ **장중 live poller(`--paper` 없이)를 손으로 띄우지 말 것 — 실데몬이 하루 종일 쉰다(청산 포함).**
 > 손으로 띄운 poller 가 `data/auto_trader/poller.lock` 을 잡고 있으면 크론 데몬의 재시작이 전부 잠금에서 끝난다
 > (`data/news_signal_daemon.log` 에 `holder_pid` 가 찍힌 ERROR).
 > `--paper` 는 잠금이 따로(`data/auto_trader_paper/poller.lock`)라 실데몬과 독립이지만, 판정마다 Claude 를 불러
@@ -280,8 +280,8 @@ This system is one piece of a larger personal stack:
 | [`krx-news-client`](https://github.com/younghwan91/krx-news-client) | Toss/DART news scraping client library |
 | [`kiwoom-client`](https://github.com/younghwan91/kiwoom-client) | Kiwoom Securities REST API client |
 | [`krx-quant-core`](https://github.com/younghwan91/krx-quant-core) | KRX market rules, costs, risk gate, execution constants — shared with `scalp-it` |
-| `quant-airflow` | Batch ingestion (kiwoom + krx-news-client → TimescaleDB) — this system reads it read-only |
-| `kr-quant` | KOSPI/KOSDAQ research, downstream of `quant-airflow`, no live trading |
+| [`quant-airflow`](https://github.com/younghwan91/quant-airflow) | Batch ingestion (kiwoom + krx-news-client → TimescaleDB) — this system reads it read-only |
+| [`swing-it`](https://github.com/younghwan91/swing-it) | KOSPI/KOSDAQ research, downstream of `quant-airflow`, no live trading |
 
 ---
 
