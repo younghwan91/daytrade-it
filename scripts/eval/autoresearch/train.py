@@ -48,12 +48,16 @@ def signals(V: dict, x: dict) -> dict:
 
 
 def cfg(x: dict) -> dict:
-    return {"max_pos": 10, "max_entries": 30, "stop": x["stop"], "exit_kind": "close"}
+    return {"max_pos": x["slots"], "max_entries": 30, "stop": x["stop"], "exit_kind": "close"}
 
 
 def get_strategy() -> dict:
     return {
-        "params": {"theta": ("float", 0.01, 0.10), "stop": ("float", 0.015, 0.08)},
+        "params": {
+            "theta": ("float", 0.01, 0.10),
+            "stop": ("float", 0.015, 0.08),
+            "slots": ("int", 6, 10),
+        },
         "signals": signals,
         "cfg": cfg,
     }
