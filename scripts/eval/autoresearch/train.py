@@ -31,17 +31,17 @@ import numpy as np
 
 
 def signals(V: dict, x: dict) -> dict:
-    new = V["na"] > 0
-    pre = (V["pre_all"] > 0)[:, :, None] & (np.arange(V["C"].shape[2]) == 0)[None, None, :]
+    m = np.arange(V["C"].shape[2])
+    new = (V["na"] > 0) & (m >= 4)[None, None, :]  # 장중 기사만, 장초(진입 < 09:05) 제외
     with np.errstate(invalid="ignore", divide="ignore"):
         up = V["C"] / V["prev_close"][:, :, None] - 1.0
-    cand = (new | pre) & (up < x["theta"]) & V["uni"][:, :, None]
-    score = np.broadcast_to(-V["tv_rank"][:, :, None], cand.shape)
+    cand = new & (up < x["theta"]) & V["uni"][:, :, None]
+    score = np.broadcast_to(V["tv_rank"][:, :, None], cand.shape)
     return {"cand": cand, "score": score}
 
 
 def cfg(x: dict) -> dict:
-    return {"max_pos": 5, "max_entries": 10, "stop": x["stop"], "exit_kind": "close"}
+    return {"max_pos": 10, "max_entries": 30, "stop": x["stop"], "exit_kind": "close"}
 
 
 def get_strategy() -> dict:
