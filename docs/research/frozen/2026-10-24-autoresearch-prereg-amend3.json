@@ -1,0 +1,18 @@
+{
+ "title": "autoresearch 사전등록 1 정정 3 — 평가기 v3 확인 심사(MAJOR 2, CRITICAL 0) 반영, 평가기 v4(결과 전)",
+ "at": "2026-10-24",
+ "amends": "정정 2 (576cddc) 와 평가기 v3 (62792f9, 태그 daytrade-autoresearch-prereg-3). 새 태그 daytrade-autoresearch-prereg-4.",
+ "invalid_run_seen": "아니다. v3 로는 --smoke 만(점수 출력·원장 기록 없음). 리뷰어도 점수·수익 미계산.",
+ "review": "같은 리뷰어 3차 확인. 미래정보 검사 해소 확인: 누수 주입 B(봉 0)·C(전 기간 분위수)·E(다음 봉)·D(난수) void, 정당 전략 F(장전 기사 + 봉 0 정보)·G([D,N]·[D] 열·날 안 횡단 집계)·H(분 축 누적·침묵 뒤 첫 기사) 통과.",
+ "bug": {
+  "lint": "허용된 하위 모듈(np.random)을 변수에 담으면(r = np.random) 그 변수는 체인 검사를 거치지 않아 r.bit_generator.re.enum.bltns.exec(...) 로 builtins 의 exec 가 실행됐다(리뷰어 무해 주입으로 확인). pd.compat.pickle_compat.pkl 도 같은 방식으로 열렸다.",
+  "lockbox": "고정 모드에서도 유니버스를 현재 stocks 표로 걸러, 빌드 뒤 폐지·합병·이전상장 한 건으로 그 종목이 있던 모든 날의 해시가 바뀌어 --final 이 거부될 수 있었다."
+ },
+ "changes": {
+  "lint": "모듈로 풀리는 속성(허용 하위 모듈 포함)도 다른 속성 접근의 바탕으로만 쓸 수 있다(변수·인자·반환 금지). 속성 이름 exec·open·compile·bltns·enum·re·pkl·compat·bit_generator·mtrand·builtin* 금지.",
+  "lockbox": "빌드 때 잠금 절반 종목별 시장(거래소·코스닥)을 lock_universe.json 에 함께 저장하고, 고정 모드는 그 값을 쓰며 stocks 표로 거르지 않는다."
+ },
+ "graduation_changes": "없다.",
+ "disclosure": "본 것: 확인 심사 보고서, 빌드 로그, --smoke. 점수·알파·순수익은 보지 않았다.",
+ "verdict_rule": "그대로."
+}
