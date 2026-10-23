@@ -35,7 +35,8 @@ repos:
     hooks:
       - id: detect-secrets
         args: [--baseline, .secrets.baseline]
-        exclude: package-lock.json|.env.example
+        # sha256 매니페스트는 늘 고엔트로피 hex 라 오탐 — 비밀값이 들어갈 자리가 아니다
+        exclude: package-lock.json|.env.example|scripts/eval/autoresearch/MANIFEST.json
 
 ci:
   autofix_commit_msg: "style: auto-fix by pre-commit hooks"

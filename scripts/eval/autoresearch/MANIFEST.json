@@ -1,0 +1,9 @@
+{
+ "scripts/eval/autoresearch/prepare.py": "4c5230c91472dcd8066444f2a42f44483c1cbb1f390235bef9993a8f3fe14491",
+ "scripts/eval/costs.py": "69549ff773b093157c52c640cd4adfd1f7cf065b1f155726c4edf870c62846eb",
+ "scripts/eval/krx_session.py": "16e88685760060536a719abee9faa99d418bab7c59abb9954374e1991af85746",
+ "src/daytrade_it/domain/services/krx_session.py": "9ec54206fe4650a27f095065a01b073859cce3afc98ff59e6e9263d04b4e06b6",
+ "uv.lock": "54df363c8acfde6dc7c17d943d92867fb8e08d87a4f7173e577813fa7ce1b7ed",
+ "docs/research/frozen/2026-10-24-autoresearch-prereg.json": "25ae68f96663ba4ae9d06856729bc68ec2c55e06346abccd1b937c393b62c33e",
+ "cache/search_s0.pkl": "67f3ce91c1ad60026ee33b1327b0ce0af05389759ef76ca13c0b8c646c9b0f40"
+}
