@@ -42,7 +42,20 @@ def signals(V: dict, x: dict) -> dict:
     lag = np.concatenate([np.zeros(cs.shape[:2] + (10,)), cs[:, :, :-10]], axis=2)
     ma10 = (cs - lag) / np.minimum(m + 1, 10)[None, None, :]  # 직전 10분 종가 평균(봉 m 포함)
     pull = ~(V["C"] > ma10)  # 짧은 평균 아래 — 상승 추세(VWAP 위) 안의 눌림
-    cand = new & above & day_up & dip & pull & (up < x["theta"]) & V["uni"][:, :, None]
+    falling = (V["ret20"] < 0) & (V["ret5"] < 0)  # 장전 기사 있고 며칠·몇 주 하락
+    avg_v = np.cumsum(V["Vol"], axis=2) / (m + 1)[None, None, :]
+    calm_v = ~(V["Vol"] > avg_v)  # 기사 봉 거래량이 오늘 평균 이하(아직 반응 전)
+    cand = (
+        new
+        & above
+        & day_up
+        & dip
+        & pull
+        & calm_v
+        & ~falling[:, :, None]
+        & (up < x["theta"])
+        & V["uni"][:, :, None]
+    )
     score = np.broadcast_to(V["tv_rank"][:, :, None], cand.shape)
     return {"cand": cand, "score": score}
 
