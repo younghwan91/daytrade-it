@@ -1,5 +1,5 @@
 {
- "scripts/eval/autoresearch/prepare.py": "7155606ec7dc8ac5717ab6c5f3fac738139b0d0b5d39a81aad8ab2916805123c",
+ "scripts/eval/autoresearch/prepare.py": "e54e9ea7e4ff31d59dd073590e4d789cc6b1171064a3ce2e7f96ecdf32acc4b6",
  "scripts/eval/costs.py": "69549ff773b093157c52c640cd4adfd1f7cf065b1f155726c4edf870c62846eb",
  "scripts/eval/krx_session.py": "16e88685760060536a719abee9faa99d418bab7c59abb9954374e1991af85746",
  "src/daytrade_it/domain/services/krx_session.py": "9ec54206fe4650a27f095065a01b073859cce3afc98ff59e6e9263d04b4e06b6",
@@ -8,6 +8,7 @@
  "docs/research/frozen/2026-10-24-autoresearch-prereg-amend1.json": "20906e41ef1af7b17dc112a2a58e03a69d4a7c9e73138f0d6c8962b0671cbde7",
  "docs/research/frozen/2026-10-24-autoresearch-prereg-amend2.json": "1b4f198cb288f2e059082e7d116ad09bdfb0c6311bcd0a91567daf63854d120c",
  "docs/research/frozen/2026-10-24-autoresearch-prereg-amend3.json": "34fda776dfe01c1eb86acf99806014aaa45ec82c9dba86feaf06bbff3e7b68a3",
- "cache/search_s0.pkl": "dba6cd71446351f3b8ec26236c8b85e9005e710ee1959dfe1900e2900213468d",
- "cache/lock_universe.json": "9b32a438be451c43a87af2c6c5950e42b1ef448eab2c5428de279d2182dbce66"
+ "docs/research/frozen/2026-10-24-autoresearch-prereg-amend4.json": "09b8f8c41f78bba1871b62897bdb13885cd4febb975284117237c42992558eb4",
+ "cache/search_s0.pkl": "5e7345df8d27615e7151a7d7b31d9d4a68e87007b3befaf05ae0a1e31926bacb",
+ "cache/lock_universe.json": "96499e8d5cb40d604f9e126e2ba453cafa13d2b297548603767ac7d0eacb95bc"
 }

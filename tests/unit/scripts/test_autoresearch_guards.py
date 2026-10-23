@@ -470,6 +470,33 @@ def test_peer_benchmark_uses_same_characteristic_bucket():
     assert abs(t["alpha"].iloc[0]) < 0.01  # 코스닥 기울기는 알파가 아니다(전체 평균이면 +5%)
 
 
+def test_benchmark_ignores_peers_not_yet_traded():
+    # 기준선 리뷰 C1: 개장 지연 종목(첫 체결 09:02, 전일 종가 대비 −10%)이 전일 종가부터 재여 09:01 진입 알파를 깎았다
+    D = toy(n=12)
+    for k in ("O", "H", "L", "C"):
+        D[k][0, 6:, :2] = np.nan
+        D[k][0, 6:, 2:] = 9000.0
+    D["Vol"][0, 6:, :2] = 0
+    P._derive(D)
+    t = P.simulate(D, sig_at(D, 0, 0, 0), CFG)  # 09:01 진입, 평탄 가격
+    assert t["entry"].iloc[0] == 1
+    assert t["alpha"].iloc[0] == pytest.approx(
+        -t["cost"].iloc[0], abs=1e-6
+    )  # 체결 전 동료는 벤치마크에서 빠진다
+    assert P.daily_factors(D, np.array([0]))[0, 0] == pytest.approx(0.0, abs=1e-9)
+    assert np.nanmax(np.abs(D["mkt"][0, 2:] - 1)) < 1e-6  # 시장 경로는 첫 체결가 기준
+
+
+def test_open_spread_charged_on_entry_side_only():
+    from costs import MEASURED_SPREAD
+
+    co, cl = P.trade_costs(
+        dt.date(2026, 3, 3), "코스닥", 30000.0
+    )  # 호가 50 → 50/30000 = 16.7bp < 측정 스프레드
+    want = (MEASURED_SPREAD[("코스닥", True)] - MEASURED_SPREAD[("코스닥", False)]) / 2
+    assert co - cl == pytest.approx(want, abs=1e-9)  # 장초 몫은 편도 하나만
+
+
 def test_rank_null_degenerate_is_excluded_not_failed():
     assert P.beats_null(-30.0, [-30.0] * 100) is None
     assert P.beats_null(5.0, list(np.linspace(-20, 4, 100))) is True

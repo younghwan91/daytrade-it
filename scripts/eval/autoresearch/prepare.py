@@ -78,9 +78,10 @@ LEDGER_DIRS = (
     Path(os.path.expanduser("~/.cache/daytrade-it/autoresearch_ledger")),
     Path(os.path.expanduser("~/.local/state/daytrade-it/autoresearch_ledger")),
 )
-BEST, LAST = CACHE / "BEST.json", CACHE / "last_run.json"
 MANIFEST = HERE / "MANIFEST.json"
-PREREG_TAG = "daytrade-autoresearch-prereg-4"
+PREREG_TAG = "daytrade-autoresearch-prereg-5"
+#: 평가기 판(태그)마다 따로 — 정의가 바뀐 평가기의 BEST 와 비교하지 않는다
+BEST, LAST = CACHE / f"BEST-{PREREG_TAG}.json", CACHE / f"last_run-{PREREG_TAG}.json"
 #: 사전등록 1 커밋 — HEAD 의 조상이어야 한다(sha 라 detect-secrets 오탐)
 PREREG_COMMIT = "33d3a6fcca20016ec674ee30abf3e79ab9292616"  # pragma: allowlist secret
 AGENT_FILE = "scripts/eval/autoresearch/train.py"
@@ -94,6 +95,7 @@ GUARDED_FILES = (
     "docs/research/frozen/2026-10-24-autoresearch-prereg-amend1.json",
     "docs/research/frozen/2026-10-24-autoresearch-prereg-amend2.json",
     "docs/research/frozen/2026-10-24-autoresearch-prereg-amend3.json",
+    "docs/research/frozen/2026-10-24-autoresearch-prereg-amend4.json",
 )
 
 START, END = (
@@ -125,6 +127,8 @@ OTHERDAY_PROBES = 12  # 다른 날 대체 검사에서 그대로 두는 날 수
 LOCK_DRIFT_MAX = 0.02  # --final 때 잠금 절반 날별 해시가 달라도 되는 날 비율
 COVERAGE_OK = 0.97  # 행 중 분봉 있는 비율 — 미만인 폴드는 생존 선택이 섞였다(b8)
 PEER_MIN = 5
+#: 정규장이 늦게 끝난 날(수능일 10:00~16:30) — 그다음 날의 전일 종가는 이 시각 전 마지막 봉
+LATE_CLOSE = {dt.date(2025, 11, 13): dt.time(16, 33)}
 VOID_SCORE = -999.0
 N_NULL = 100
 CFG_BOUNDS = {
@@ -427,7 +431,11 @@ def _prev_regular_close(cur, codes: list[str], p: dt.date) -> dict[str, float]: 
     cur.execute(
         "select distinct on (code) code, close from minute_bars where code = any(%s) and ts >= %s "
         "and ts < %s order by code, ts desc",
-        (codes, dt.datetime.combine(p, REGULAR_OPEN), dt.datetime.combine(p, REGULAR_END)),
+        (
+            codes,
+            dt.datetime.combine(p, REGULAR_OPEN),
+            dt.datetime.combine(p, LATE_CLOSE.get(p, REGULAR_END)),
+        ),
     )
     return {c: float(v) for c, v in cur.fetchall() if v and v > 0}
 
@@ -439,16 +447,29 @@ def _markets(stocks: pd.DataFrame, fixed: dict | None) -> dict[str, str]:
     return dict(stocks[["code", "market"]].values)
 
 
+def trade_costs(d: dt.date, market: str, pc: float) -> tuple[float, float]:
+    """(장초 진입 왕복, 장중 진입 왕복). 스프레드 = max(측정값, 호가 단위/가격). round_trip_cost 는 편도 슬리피지를 두 배로
+    잡으므로 장초 진입은 진입 쪽만 장초 스프레드, 청산 쪽은 장중 스프레드다(15:00 청산)."""
+    from costs import MEASURED_SPREAD
+    from krx_quant_core.costs.model import round_trip_cost
+    from krx_quant_core.market.codes import Market
+    from krx_quant_core.market.ticks import tick_size_int
+
+    tick = tick_size_int(pc)
+    sp_o, sp_l = (max(MEASURED_SPREAD[(market, o)], tick / pc) for o in (True, False))
+    m = Market.KOSDAQ if market == "코스닥" else Market.KOSPI
+    return (
+        round_trip_cost(d, m, slippage_one_way=(sp_o + sp_l) / 4),
+        round_trip_cost(d, m, slippage_one_way=sp_l / 2),
+    )
+
+
 def build_half(con, half: int, fixed: dict | None = None) -> dict:  # noqa: ANN001, C901
     """한 절반의 캐시. 날짜·종목코드는 ``days``·``codes`` 에만 두고 V 로 넘기지 않는다.
 
     ``fixed`` = {"days": [...], "codes": [[...], ...]} 이면 그 날짜·종목 목록 그대로 다시 만든다(잠금 절반 --final — 그사이
     stocks 표에서 폐지·합병 종목이 빠져도 유니버스가 같다)."""
-    from costs import MEASURED_SPREAD
-    from krx_quant_core.costs.model import round_trip_cost
-    from krx_quant_core.market.codes import Market
     from krx_quant_core.market.limits import limit_down_price, limit_up_price
-    from krx_quant_core.market.ticks import tick_size_int
     from krx_session import regular_daily
 
     mk = _markets(
@@ -566,14 +587,7 @@ def build_half(con, half: int, fixed: dict | None = None) -> dict:  # noqa: ANN0
             lu[di, i], ld[di, i] = limit_up_price(pc), limit_down_price(pc)
             nd = r["next_date"]
             nxt[di, i] = r["next_open"] if isinstance(nd, dt.date) and nd <= END else np.nan
-            tick = tick_size_int(pc)
-            for at_open, arr in ((True, cost_o), (False, cost_l)):
-                sp = max(MEASURED_SPREAD[(mk[code], at_open)], tick / pc)
-                arr[di, i] = round_trip_cost(
-                    d,
-                    Market.KOSDAQ if mk[code] == "코스닥" else Market.KOSPI,
-                    slippage_one_way=sp / 2,
-                )
+            cost_o[di, i], cost_l[di, i] = trade_costs(d, mk[code], pc)
             a = art_by_code.get(code)
             if a is None:
                 for k in ("pre_all", "pre_feat", "pre_move", "hist5"):
@@ -652,13 +666,20 @@ def _derive(D: dict) -> None:
     Cf = np.where(np.isfinite(Cf), Cf, pc0).astype(np.float32)
     prevc = np.concatenate([np.broadcast_to(pc0, C.shape[:2] + (1,)), Cf[:, :, :-1]], axis=2)
     D["has"] = has
+    D["traded"] = (
+        np.cumsum(has, axis=2) > 0
+    )  # 봉 m 까지 한 번이라도 체결 — 그 전 가격은 전일 종가라 시간창 수익에 쓰지 않는다
     D["PC"] = Cf  # 봉 m 종가 시점의 마지막 거래가
     D["PO"] = np.where(has, O, prevc).astype(np.float32)  # 봉 m 시가 시점의 가격
     tp = np.where(has, C, 0.0).astype(np.float64) * V
     cv = np.cumsum(V, axis=2, dtype=np.float64)
+    first = np.argmax(has, axis=2)
+    base = np.take_along_axis(
+        np.where(has, O, np.nan), first[:, :, None], axis=2
+    )  # 첫 체결 봉 시가
     with np.errstate(invalid="ignore", divide="ignore"):
         D["vwap"] = np.where(cv > 0, np.cumsum(tp, axis=2) / cv, np.nan).astype(np.float32)
-        rel = D["PC"] / D["PO"][:, :, :1]
+        rel = np.where(D["traded"], D["PC"] / base, np.nan)
     u = D["uni"][:, :, None] & np.isfinite(rel)
     with np.errstate(invalid="ignore"):
         D["mkt"] = (np.where(u, rel, 0).sum(1) / np.maximum(u.sum(1), 1)).astype(np.float32)
@@ -998,7 +1019,7 @@ def simulate_day(D: dict, d: int, cand: np.ndarray, score: np.ndarray, c: dict) 
             pa = D["PO"][d, :, e]
             pb = D["PO"][d, :, k] if when == "o" else D["PC"][d, :, k]
             with np.errstate(invalid="ignore"):
-                valid = uni & np.isfinite(pa) & np.isfinite(pb) & (pa > 0)
+                valid = uni & D["traded"][d, :, e] & np.isfinite(pa) & np.isfinite(pb) & (pa > 0)
             p = _peers(D, d, n, valid)
             bench = float(np.mean(pb[p] / pa[p]) - 1) if p.any() else 0.0
             net = px / E - 1 - cost
@@ -1404,7 +1425,9 @@ def daily_factors(D: dict, days: np.ndarray) -> np.ndarray:
     """그날 유니버스 절반의 09:01 시가 → 15:00 종가 수익으로 만든 4요인: 시장·소형−대형·코스닥−거래소·저변동−고변동."""
     out = []
     for d in days:
-        v = D["uni"][d]
+        v = (
+            D["uni"][d] & D["traded"][d, :, 1]
+        )  # 09:01 까지 체결된 종목만(개장 지연 종목은 전일 종가 갭이 섞인다)
         with np.errstate(invalid="ignore", divide="ignore"):
             r = D["PC"][d, :, FLAT] / D["PO"][d, :, 1] - 1
         v = v & np.isfinite(r)
