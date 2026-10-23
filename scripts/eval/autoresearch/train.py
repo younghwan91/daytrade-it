@@ -35,7 +35,10 @@ def signals(V: dict, x: dict) -> dict:
     new = (V["na"] > 0) & (m >= 4)[None, None, :]  # 장중 기사만, 장초(진입 < 09:05) 제외
     with np.errstate(invalid="ignore", divide="ignore"):
         up = V["C"] / V["prev_close"][:, :, None] - 1.0
-    cand = new & (up < x["theta"]) & V["uni"][:, :, None]
+    above = V["C"] > V["vwap"]  # 기사 봉 종가가 VWAP 위(그날 산 사람들이 이익인 쪽)
+    day_up = V["C"] > V["O"][:, :, :1]  # 오늘 시가보다 위(갭 뒤 장중으로도 오르는 중)
+    dip = V["C"] < np.maximum.accumulate(V["C"], axis=2)  # 오늘 최고 종가 아래(신고 종가 추격 아님)
+    cand = new & above & day_up & dip & (up < x["theta"]) & V["uni"][:, :, None]
     score = np.broadcast_to(V["tv_rank"][:, :, None], cand.shape)
     return {"cand": cand, "score": score}
 
