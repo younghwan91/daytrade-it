@@ -80,7 +80,7 @@ LEDGER_DIRS = (
 )
 BEST, LAST = CACHE / "BEST.json", CACHE / "last_run.json"
 MANIFEST = HERE / "MANIFEST.json"
-PREREG_TAG = "daytrade-autoresearch-prereg-3"
+PREREG_TAG = "daytrade-autoresearch-prereg-4"
 #: 사전등록 1 커밋 — HEAD 의 조상이어야 한다(sha 라 detect-secrets 오탐)
 PREREG_COMMIT = "33d3a6fcca20016ec674ee30abf3e79ab9292616"  # pragma: allowlist secret
 AGENT_FILE = "scripts/eval/autoresearch/train.py"
@@ -93,6 +93,7 @@ GUARDED_FILES = (
     "docs/research/frozen/2026-10-24-autoresearch-prereg.json",
     "docs/research/frozen/2026-10-24-autoresearch-prereg-amend1.json",
     "docs/research/frozen/2026-10-24-autoresearch-prereg-amend2.json",
+    "docs/research/frozen/2026-10-24-autoresearch-prereg-amend3.json",
 )
 
 START, END = (
@@ -233,6 +234,7 @@ BANNED_ATTR = re.compile(
     r"multiprocessing|signal|gc|weakref|abc|warnings|site|runpy|pkgutil|codecs|tempfile|glob|io|common|"
     r"get_handle|psycopg2|urllib|http|contextlib|logging|platform|resource|mmap|fcntl|asyncio|sqlite3|"
     r"dump|dumps|to_string|write|writelines|ExcelWriter|HDFStore|(gi|cr|ag|f|tb|co)_\w+|"
+    r"exec|open|compile|bltns|enum|re|pkl|compat|bit_generator|mtrand|builtin\w*|"
     r"read_\w+|to_(pickle|csv|parquet|sql|json|excel|hdf|feather|clipboard|html|latex|markdown|xml|stata|orc)|"
     r"year|month|day|dayofweek|weekday|quarter|date|dates|days|codes|code)$"
 )
@@ -259,6 +261,13 @@ def _resolve(modname: str, attrs: list[str]) -> str | None:
         if isinstance(obj, types.ModuleType) and path not in SUBMODULE_OK:
             return ".".join(path)
     return None
+
+
+def _resolve_obj(modname: str, attrs: list[str]) -> object:
+    obj: object = importlib.import_module(modname)
+    for a in attrs:
+        obj = getattr(obj, a, None) if isinstance(obj, types.ModuleType) else None
+    return obj
 
 
 def lint_train(src: str) -> list[str]:
@@ -307,6 +316,12 @@ def lint_train(src: str) -> list[str]:
                 hit = _resolve(alias[root], attrs)
                 if hit:
                     bad.append(f"line {node.lineno}: 하위 모듈 {hit}")
+                elif isinstance(_resolve_obj(alias[root], attrs), types.ModuleType):
+                    up = parent.get(node)
+                    if not (isinstance(up, ast.Attribute) and up.value is node):
+                        bad.append(
+                            f"line {node.lineno}: 모듈 {root}.{'.'.join(attrs)} 을 값으로 쓴다"
+                        )
         elif isinstance(node, ast.Constant):
             v = node.value
             if isinstance(v, str) and (re.search(r"\d{6}", v) or re.search(r"(19|20)\d{2}", v)):
@@ -417,6 +432,13 @@ def _prev_regular_close(cur, codes: list[str], p: dt.date) -> dict[str, float]: 
     return {c: float(v) for c, v in cur.fetchall() if v and v > 0}
 
 
+def _markets(stocks: pd.DataFrame, fixed: dict | None) -> dict[str, str]:
+    """종목 → 시장. 고정 모드는 빌드 때 저장한 값(그사이 폐지·이전상장돼도 같다), 아니면 지금 stocks 표."""
+    if fixed is not None:
+        return dict(fixed["market"])
+    return dict(stocks[["code", "market"]].values)
+
+
 def build_half(con, half: int, fixed: dict | None = None) -> dict:  # noqa: ANN001, C901
     """한 절반의 캐시. 날짜·종목코드는 ``days``·``codes`` 에만 두고 V 로 넘기지 않는다.
 
@@ -429,10 +451,9 @@ def build_half(con, half: int, fixed: dict | None = None) -> dict:  # noqa: ANN0
     from krx_quant_core.market.ticks import tick_size_int
     from krx_session import regular_daily
 
-    mk = dict(
-        pd.read_sql(
-            "select code, market from stocks where market in ('거래소','코스닥')", con
-        ).values
+    mk = _markets(
+        pd.read_sql("select code, market from stocks where market in ('거래소','코스닥')", con),
+        fixed,
     )
     daily = regular_daily(con, START - dt.timedelta(days=70), END)
     daily = daily[daily["code"].isin(mk)].sort_values(["code", "date"])
@@ -601,7 +622,14 @@ def build_half(con, half: int, fixed: dict | None = None) -> dict:  # noqa: ANN0
         cost_l=cost_l[sl],
         cov=cov[sl],
     )
-    D.update(days=keep_days, codes=codes_by_day, half=half, diag=diag)
+    used = {c for cs in codes_by_day for c in cs}
+    D.update(
+        days=keep_days,
+        codes=codes_by_day,
+        half=half,
+        diag=diag,
+        market={c: mk[c] for c in sorted(used) if c in mk},
+    )
     _derive(D)
     return D
 
@@ -693,7 +721,12 @@ def build() -> None:
     log(f"뉴스 커버리지(행 중 기사 있는 비율) 일 중앙 {np.median(cov):.3f}, 최소 {cov.min():.3f}")
     # 잠금 절반 — 배열은 디스크에 두지 않고 날짜·종목 목록과 날짜별 해시만(레포 밖, sha 는 MANIFEST)
     DL = build_half(con, 1)
-    lock = {"days": [str(d) for d in DL["days"]], "codes": DL["codes"], "day_hash": day_hashes(DL)}
+    lock = {
+        "days": [str(d) for d in DL["days"]],
+        "codes": DL["codes"],
+        "market": DL["market"],
+        "day_hash": day_hashes(DL),
+    }
     (CACHE / "lock_universe.json").write_text(json.dumps(lock))
     write_manifest()
 

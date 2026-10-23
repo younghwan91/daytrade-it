@@ -245,19 +245,27 @@ def test_lint_accepts_baseline_and_ordinary_numpy_pandas():
     assert P.lint_train(ok) == []
 
 
-def test_loaded_module_namespace_rejects_smuggled_module(tmp_path):
-    p = tmp_path / "s.py"
-    p.write_text(
-        "import numpy as np\nM = np.random\n"
-        "def get_strategy():\n    return {'params': {}, 'signals': None, 'cfg': None}\n"
+def test_module_cannot_be_held_as_value_even_allowed_submodule():
+    # 3차 리뷰: r = np.random → r.bit_generator.re.enum.bltns.exec(...) 로 builtins 에 닿았다
+    esc = (
+        "import numpy as np\nr = np.random\nb = r.bit_generator.re.enum.bltns\n"
+        "b.exec('import json', {})\n"
     )
-    assert P.load_strategy(p)["sha"]  # np.random 은 허용
-    q = tmp_path / "t.py"
-    q.write_text(
-        "import numpy as np\nimport functools\nM = functools.reduce\n"
-        "def get_strategy():\n    return {'params': {}, 'signals': None, 'cfg': None}\n"
-    )
-    assert P.load_strategy(q)["src"].startswith("import")
+    bad = P.lint_train(esc)
+    assert any("값으로" in b for b in bad) and any(".exec" in b for b in bad)
+    assert P.lint_train("import pandas as pd\nk = pd.compat\n")
+    assert P.lint_train("import numpy as np\nx = np.random.default_rng(0).random(3)\n") == []
+
+
+def test_lockbox_markets_frozen_at_build():
+    import pandas as pd
+
+    now = pd.DataFrame(
+        {"code": ["000001"], "market": ["거래소"]}
+    )  # 000002 는 그사이 폐지, 000001 은 이전상장
+    fixed = {"market": {"000001": "코스닥", "000002": "코스닥"}}
+    assert P._markets(now, fixed) == {"000001": "코스닥", "000002": "코스닥"}
+    assert P._markets(now, None) == {"000001": "거래소"}
 
 
 def test_stray_ignored_pyc_only_when_source_exists(tmp_path):
