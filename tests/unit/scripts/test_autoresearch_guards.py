@@ -222,6 +222,13 @@ def test_no_entry_after_last_signal_bar():
         "import numpy.random\n",
         "from numpy import *\n",
         "import typing\n",
+        # 2차 리뷰 N3: 생성기 프레임 → builtins, 모듈을 값으로, 파일 쓰기, 동적 dunder 조립
+        "def g():\n    yield 1\nb = g().gi_frame.f_builtins\n",
+        "import numpy as np\ndef f():\n    x = np\n    return x.core\n",
+        "import numpy as np\ndef f(h):\n    return h(np)\n",
+        "def f(a):\n    a.dump('p')\n",
+        "import pandas as pd\ndef f():\n    pd.DataFrame({}).to_string(buf='p')\n",
+        "k = '__imp' + 'ort__'\n",
     ],
 )
 def test_lint_rejects_escape_and_hindsight(src):
@@ -251,6 +258,30 @@ def test_loaded_module_namespace_rejects_smuggled_module(tmp_path):
         "def get_strategy():\n    return {'params': {}, 'signals': None, 'cfg': None}\n"
     )
     assert P.load_strategy(q)["src"].startswith("import")
+
+
+def test_stray_ignored_pyc_only_when_source_exists(tmp_path):
+    (tmp_path / "scripts/eval").mkdir(parents=True)
+    (tmp_path / "scripts/eval/costs.py").write_text("")
+    out = (
+        "!! scripts/eval/__pycache__/costs.cpython-313.pyc\n"
+        "!! scripts/eval/__pycache__/numpy.cpython-313.pyc\n"
+        "!! scripts/eval/autoresearch/numpy.pyc\n"
+        "!! scripts/eval/autoresearch/results.tsv\n"
+    )
+    assert P._stray(out, tmp_path) == [
+        "!! scripts/eval/__pycache__/numpy.cpython-313.pyc",
+        "!! scripts/eval/autoresearch/numpy.pyc",
+    ]
+
+
+def test_day_hashes_cover_engine_inputs():
+    D = toy()
+    h0 = P.day_hashes(D)
+    D["cost_l"][1, 2] += 0.001
+    D["nm"][2, 0, 5] = 1
+    h1 = P.day_hashes(D)
+    assert h0[0] == h1[0] and h0[1] != h1[1] and h0[2] != h1[2]
 
 
 def test_stray_files_outside_agent_file_are_reported():
@@ -284,6 +315,8 @@ def _rand_toy(nd: int = 20) -> dict:
     D["C"] = (10000 * np.cumprod(1 + rng.normal(0, 0.002, D["C"].shape), axis=2)).astype(np.float32)
     D["O"], D["H"], D["L"] = D["C"].copy(), D["C"] * 1.001, D["C"] * 0.999
     D["na"][:] = (rng.random(D["na"].shape) < 0.01).astype(np.uint8)  # 드문 기사
+    D["pre_all"][:] = (rng.random(D["pre_all"].shape) < 0.5).astype(np.float32)  # 장전 기사
+    D["vol20"][:] = rng.random(D["vol20"].shape).astype(np.float32)
     P._derive(D)
     return D
 
@@ -311,6 +344,14 @@ RES = {"folds": [{"params": {}}]}
         # 검사 중인지 알아채기: 마지막 봉 NaN 여부(v2 는 다른 날 실제 값으로 바꿔 모양·값이 같다) + 미래 엿보기
         "def signals(V, x):\n    f = np.roll(V['C'], -2, axis=2)\n    peek = ~np.isnan(V['C'][:, :, -1:])\n"
         "    return {'cand': (V['na'] > 0) & (f > V['C']) & peek, 'score': f}\n",
+        # 2차 리뷰 N1: 장전 경로(봉 0) — 09:05 종가를 보고 09:01 시가에 산다
+        "def signals(V, x):\n    c = np.zeros(V['C'].shape, bool)\n"
+        "    c[:, :, 0] = (V['pre_all'] > 0) & (V['C'][:, :, 5] > V['C'][:, :, 0])\n"
+        "    return {'cand': c, 'score': V['C'] * 0}\n",
+        # 2차 리뷰 N2: 순서와 무관한 날짜 횡단 계산(전 기간 분위수)
+        "def signals(V, x):\n    thr = np.nanquantile(V['vol20'], 0.5)\n"
+        "    c = (V['na'] > 0) & (V['vol20'] < thr)[:, :, None]\n"
+        "    return {'cand': c, 'score': V['C'] * 0}\n",
     ],
 )
 def test_causality_catches_lookahead(tmp_path, body):

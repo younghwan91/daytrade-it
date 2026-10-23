@@ -1,11 +1,12 @@
 {
- "scripts/eval/autoresearch/prepare.py": "8784d25800b0e241e01af17091ed7c1d041e53f16bcd9a22c25879fbf8c7959e",
+ "scripts/eval/autoresearch/prepare.py": "1c029c8b86a4bab464c22fb4d488ea43b3fc1beadfb8a8f804fc38550460a677",
  "scripts/eval/costs.py": "69549ff773b093157c52c640cd4adfd1f7cf065b1f155726c4edf870c62846eb",
  "scripts/eval/krx_session.py": "16e88685760060536a719abee9faa99d418bab7c59abb9954374e1991af85746",
  "src/daytrade_it/domain/services/krx_session.py": "9ec54206fe4650a27f095065a01b073859cce3afc98ff59e6e9263d04b4e06b6",
  "uv.lock": "54df363c8acfde6dc7c17d943d92867fb8e08d87a4f7173e577813fa7ce1b7ed",
  "docs/research/frozen/2026-10-24-autoresearch-prereg.json": "25ae68f96663ba4ae9d06856729bc68ec2c55e06346abccd1b937c393b62c33e",
  "docs/research/frozen/2026-10-24-autoresearch-prereg-amend1.json": "20906e41ef1af7b17dc112a2a58e03a69d4a7c9e73138f0d6c8962b0671cbde7",
- "cache/search_s0.pkl": "7b2cb0d2a563633939dc948d3bdd176072c3b740b988ed4f489ca2b5aa28e7e9",
- "lockbox_half1": "75354c0d16a19b4cc391aee9aa2d6289fd654467bd1f5b307c6570e05e681faf"
+ "docs/research/frozen/2026-10-24-autoresearch-prereg-amend2.json": "1b4f198cb288f2e059082e7d116ad09bdfb0c6311bcd0a91567daf63854d120c",
+ "cache/search_s0.pkl": "673b4d293a1711c8a3704e2f7cbc7e740063b00cb3df452ca64a3823a50e31fa",
+ "cache/lock_universe.json": "cbe37fa7a7975e52d3e69a76a1c28f60369ff5c1745a23bb80fde619129b1469"
 }

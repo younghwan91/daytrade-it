@@ -39,26 +39,31 @@ v2 = 평가기 리뷰(2026-10-24, CRITICAL 1·MAJOR 4) 반영, 사전등록 정�
 # ruff: noqa: E741 — O·H·L·C 는 분봉 배열 이름 그대로 쓴다
 from __future__ import annotations
 
-import argparse
-import ast
-import datetime as dt
-import hashlib
-import importlib
-import importlib.util
-import json
-import math
-import multiprocessing as mp
-import os
-import pickle
-import re
-import subprocess
 import sys
-import time
-import types
 from pathlib import Path
 
-import numpy as np
-import pandas as pd
+_HERE0 = Path(__file__).resolve().parent
+if sys.path and sys.path[0] and Path(sys.path[0]).resolve() == _HERE0:
+    sys.path.pop(0)  # 평가기 폴더의 가짜 numpy·pandas(소스 없는 pyc 등)가 먼저 잡히지 않게
+
+import argparse  # noqa: E402
+import ast  # noqa: E402
+import datetime as dt  # noqa: E402
+import hashlib  # noqa: E402
+import importlib  # noqa: E402
+import importlib.util  # noqa: E402
+import json  # noqa: E402
+import math  # noqa: E402
+import multiprocessing as mp  # noqa: E402
+import os  # noqa: E402
+import pickle  # noqa: E402
+import re  # noqa: E402
+import subprocess  # noqa: E402
+import time  # noqa: E402
+import types  # noqa: E402
+
+import numpy as np  # noqa: E402
+import pandas as pd  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
@@ -75,7 +80,7 @@ LEDGER_DIRS = (
 )
 BEST, LAST = CACHE / "BEST.json", CACHE / "last_run.json"
 MANIFEST = HERE / "MANIFEST.json"
-PREREG_TAG = "daytrade-autoresearch-prereg-2"
+PREREG_TAG = "daytrade-autoresearch-prereg-3"
 #: 사전등록 1 커밋 — HEAD 의 조상이어야 한다(sha 라 detect-secrets 오탐)
 PREREG_COMMIT = "33d3a6fcca20016ec674ee30abf3e79ab9292616"  # pragma: allowlist secret
 AGENT_FILE = "scripts/eval/autoresearch/train.py"
@@ -87,6 +92,7 @@ GUARDED_FILES = (
     "uv.lock",
     "docs/research/frozen/2026-10-24-autoresearch-prereg.json",
     "docs/research/frozen/2026-10-24-autoresearch-prereg-amend1.json",
+    "docs/research/frozen/2026-10-24-autoresearch-prereg-amend2.json",
 )
 
 START, END = (
@@ -112,8 +118,10 @@ MAX_THIN_FOLDS = 2
 MIN_OOS_TRADES = 600
 DISPERSION = 0.5
 KEEP_DSCORE, KEEP_P, KEEP_TOP_SLACK = 2.0, 0.05, 2.0  # bp, 부트스트랩 단측 p, bp
-BOOT_N, BOOT_BLOCK, BOOT_MIN_DAYS = 2000, 5, 40
+BOOT_N, BOOT_BLOCK, BOOT_MIN_DAYS = 2000, 10, 40
 CAUSAL_CUTS = 16
+OTHERDAY_PROBES = 12  # 다른 날 대체 검사에서 그대로 두는 날 수
+LOCK_DRIFT_MAX = 0.02  # --final 때 잠금 절반 날별 해시가 달라도 되는 날 비율
 COVERAGE_OK = 0.97  # 행 중 분봉 있는 비율 — 미만인 폴드는 생존 선택이 섞였다(b8)
 PEER_MIN = 5
 VOID_SCORE = -999.0
@@ -224,6 +232,7 @@ BANNED_ATTR = re.compile(
     r"inspect|importlib|import_module|subprocess|builtins|types|pickle|shutil|pathlib|socket|threading|"
     r"multiprocessing|signal|gc|weakref|abc|warnings|site|runpy|pkgutil|codecs|tempfile|glob|io|common|"
     r"get_handle|psycopg2|urllib|http|contextlib|logging|platform|resource|mmap|fcntl|asyncio|sqlite3|"
+    r"dump|dumps|to_string|write|writelines|ExcelWriter|HDFStore|(gi|cr|ag|f|tb|co)_\w+|"
     r"read_\w+|to_(pickle|csv|parquet|sql|json|excel|hdf|feather|clipboard|html|latex|markdown|xml|stata|orc)|"
     r"year|month|day|dayofweek|weekday|quarter|date|dates|days|codes|code)$"
 )
@@ -279,7 +288,14 @@ def lint_train(src: str) -> list[str]:
                     getattr(importlib.import_module(mod), a.name, None), types.ModuleType
                 ):
                     alias[a.asname or a.name] = f"{mod}.{a.name}"  # from numpy import random as r
+    parent = {c: n for n in ast.walk(tree) for c in ast.iter_child_nodes(n)}
     for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id in alias:
+            up = parent.get(node)
+            if not (isinstance(up, ast.Attribute) and up.value is node):
+                bad.append(
+                    f"line {node.lineno}: 모듈 {node.id} 를 값으로 쓴다(별칭·인자·반환 금지)"
+                )
         if isinstance(node, ast.Name) and node.id in BANNED_NAMES:
             bad.append(f"line {node.lineno}: 이름 {node.id}")
         elif isinstance(node, ast.Attribute):
@@ -295,6 +311,10 @@ def lint_train(src: str) -> list[str]:
             v = node.value
             if isinstance(v, str) and (re.search(r"\d{6}", v) or re.search(r"(19|20)\d{2}", v)):
                 bad.append(f"line {node.lineno}: 종목코드·날짜 같은 문자열 {v!r}")
+            if isinstance(v, str) and ("__" in v or v.endswith("_") or v.startswith("_")):
+                bad.append(
+                    f"line {node.lineno}: 밑줄로 시작·끝나는 문자열 {v[:20]!r}(동적 속성 조립 금지)"
+                )
             if isinstance(v, int) and not isinstance(v, bool) and v in YEAR_LIKE:
                 bad.append(f"line {node.lineno}: 연도 같은 정수 {v}")
     return sorted(set(bad))
@@ -397,8 +417,11 @@ def _prev_regular_close(cur, codes: list[str], p: dt.date) -> dict[str, float]: 
     return {c: float(v) for c, v in cur.fetchall() if v and v > 0}
 
 
-def build_half(con, half: int) -> dict:  # noqa: ANN001, C901
-    """한 절반의 캐시. 날짜·종목코드는 ``days``·``codes`` 에만 두고 V 로 넘기지 않는다."""
+def build_half(con, half: int, fixed: dict | None = None) -> dict:  # noqa: ANN001, C901
+    """한 절반의 캐시. 날짜·종목코드는 ``days``·``codes`` 에만 두고 V 로 넘기지 않는다.
+
+    ``fixed`` = {"days": [...], "codes": [[...], ...]} 이면 그 날짜·종목 목록 그대로 다시 만든다(잠금 절반 --final — 그사이
+    stocks 표에서 폐지·합병 종목이 빠져도 유니버스가 같다)."""
     from costs import MEASURED_SPREAD
     from krx_quant_core.costs.model import round_trip_cost
     from krx_quant_core.market.codes import Market
@@ -433,7 +456,10 @@ def build_half(con, half: int) -> dict:  # noqa: ANN001, C901
     cur = con.cursor()
     sess = [d for d in cal if START <= d <= END]
     uni_by_day: dict[dt.date, list[str]] = {}
-    for d in sess:
+    if fixed is not None:
+        sess = [dt.date.fromisoformat(x) for x in fixed["days"]]
+        uni_by_day = dict(zip(sess, fixed["codes"], strict=True))
+    for d in sess if fixed is None else []:
         x = daily[(daily["date"] == d) & np.isfinite(daily["prev_tv"])]
         top = (
             x.sort_values(["prev_tv", "code"], ascending=[False, True])["code"]
@@ -475,7 +501,7 @@ def build_half(con, half: int) -> dict:  # noqa: ANN001, C901
         )
         rows = cur.fetchall()
         have = {r[0] for r in rows}
-        if len(have) < 0.5 * len(codes):
+        if fixed is None and len(have) < 0.5 * len(codes):
             diag["days_skipped"].append((str(d), len(have), len(codes)))
             continue
         row_of = {c: i for i, c in enumerate(codes)}
@@ -497,6 +523,8 @@ def build_half(con, half: int) -> dict:  # noqa: ANN001, C901
         h_lo = pd.Timestamp(dt.datetime.combine(p5, dt.time(15, 0)))
         n_cov = 0
         for code, i in row_of.items():
+            if (d, code) not in dk.index:
+                continue
             r = dk.loc[(d, code)]
             pc = raw_pc.get(code, float("nan"))
             if not (pc > 0):
@@ -578,8 +606,8 @@ def build_half(con, half: int) -> dict:  # noqa: ANN001, C901
     return D
 
 
-def _tercile(x: np.ndarray, valid: np.ndarray) -> np.ndarray:
-    out = np.full(x.shape, 1, np.int8)
+def _tercile(x: np.ndarray, valid: np.ndarray, nan_to: int = 1) -> np.ndarray:
+    out = np.full(x.shape, nan_to, np.int8)
     v = valid & np.isfinite(x)
     if v.sum() >= 3:
         q1, q2 = np.quantile(x[v], [1 / 3, 2 / 3])
@@ -615,7 +643,7 @@ def _derive(D: dict) -> None:
     for d in range(len(r)):
         v = D["uni"][d]
         size = _tercile(-D["tv_prev"][d], v)  # 0 = 큰 종목
-        vol = _tercile(D["vol20"][d], v)
+        vol = _tercile(D["vol20"][d], v, nan_to=2)  # 이력 없는 종목(신규 상장 등)은 고변동 칸
         bucket[d] = np.where(v, (D["kosdaq"][d] > 0) * 9 + size * 3 + vol, -1)
     D["bucket"] = bucket
     if "cov" not in D:
@@ -624,12 +652,27 @@ def _derive(D: dict) -> None:
         )
 
 
-def _lock_hash(D: dict) -> str:
-    h = hashlib.sha256()
-    for k in ("O", "H", "L", "C", "Vol", "na", "prev_close", "uni"):
-        h.update(np.ascontiguousarray(D[k]).tobytes())
-    h.update(json.dumps([str(d) for d in D["days"]]).encode())
-    return h.hexdigest()
+LOCK_HASH_KEYS = (
+    *BAR_KEYS[:5],
+    *BAR_KEYS[6:],
+    *STATIC_KEYS,
+    "lu",
+    "ld",
+    "next_px",
+    "cost_o",
+    "cost_l",
+)
+
+
+def day_hashes(D: dict) -> list[str]:
+    """날짜별 sha256 — 엔진·V 입력 전부(분봉·뉴스·정적 열·가격제한·비용·다음 날 가격)와 그날 종목 목록."""
+    out = []
+    for d in range(len(D["days"])):
+        h = hashlib.sha256(json.dumps([str(D["days"][d]), D["codes"][d]]).encode())
+        for k in LOCK_HASH_KEYS:
+            h.update(np.ascontiguousarray(D[k][d]).tobytes())
+        out.append(h.hexdigest())
+    return out
 
 
 def build() -> None:
@@ -648,21 +691,21 @@ def build() -> None:
         f"전일 종가 일봉 대체 {D['diag']['prev_close_daily_fallback']}"
     )
     log(f"뉴스 커버리지(행 중 기사 있는 비율) 일 중앙 {np.median(cov):.3f}, 최소 {cov.min():.3f}")
-    DL = build_half(
-        con, 1
-    )  # 잠금 절반 — 디스크에 두지 않고 sha 만(--final 때 같은 데이터인지 대조)
-    write_manifest(lock_hash=_lock_hash(DL))
+    # 잠금 절반 — 배열은 디스크에 두지 않고 날짜·종목 목록과 날짜별 해시만(레포 밖, sha 는 MANIFEST)
+    DL = build_half(con, 1)
+    lock = {"days": [str(d) for d in DL["days"]], "codes": DL["codes"], "day_hash": day_hashes(DL)}
+    (CACHE / "lock_universe.json").write_text(json.dumps(lock))
+    write_manifest()
 
 
-def write_manifest(lock_hash: str | None = None) -> None:
+def write_manifest() -> None:
     """의존 파일·캐시 sha256 → MANIFEST.json. 태그 뒤에는 MANIFEST 자체가 바뀌면 평가 거부(integrity)."""
     missing = [p for p in GUARDED_FILES if not (ROOT / p).exists()]
     if missing:
         raise SystemExit(f"의존 파일이 없다: {missing}")
-    old = json.loads(MANIFEST.read_text()) if MANIFEST.exists() else {}
     man = {p: sha_file(ROOT / p) for p in GUARDED_FILES}
-    man["cache/search_s0.pkl"] = sha_file(CACHE / "search_s0.pkl")
-    man["lockbox_half1"] = lock_hash or old.get("lockbox_half1")
+    for f in ("search_s0.pkl", "lock_universe.json"):
+        man[f"cache/{f}"] = sha_file(CACHE / f)
     MANIFEST.write_text(json.dumps(man, indent=1) + "\n")
     log(f"MANIFEST.json 기록 — {len(man)} 항목")
 
@@ -683,13 +726,19 @@ def tagged() -> bool:
     return _git("rev-parse", "-q", "--verify", f"refs/tags/{PREREG_TAG}").returncode == 0
 
 
-def _stray(porcelain: str) -> list[str]:
-    """scripts·src 의 추적 안 된·바뀐 파일 중 에이전트 파일 말고 남은 것."""
+def _stray(porcelain: str, root: Path | None = None) -> list[str]:
+    """scripts·src 의 추적 안 된·무시된·바뀐 파일 중 에이전트 파일·results.tsv·소스가 있는 __pycache__ pyc 말고 남은 것."""
     out = []
     for line in porcelain.splitlines():
         path = line[3:].strip()
-        if path and path != AGENT_FILE:
-            out.append(line)
+        if not path or path in (AGENT_FILE, "scripts/eval/autoresearch/results.tsv"):
+            continue
+        q = Path(path)
+        if line.startswith("!!") and q.suffix == ".pyc" and q.parent.name == "__pycache__":
+            src = q.parent.parent / (q.name.split(".")[0] + ".py")
+            if root is None or (root / src).exists():
+                continue
+        out.append(line)
     return out
 
 
@@ -709,7 +758,10 @@ def integrity(check_cache: bool = True, allow_untagged: bool = False) -> None:
             f"평가기·의존 파일이 사전등록({PREREG_TAG}) 뒤 바뀌었다 — 평가 거부.\n{changed}\n{dirty}"
         )
     stray = _stray(
-        _git("status", "--porcelain", "--untracked-files=all", "--", "scripts", "src").stdout
+        _git(
+            "status", "--porcelain", "--ignored", "--untracked-files=all", "--", "scripts", "src"
+        ).stdout,
+        ROOT,
     )
     if stray:
         raise SystemExit(
@@ -717,8 +769,6 @@ def integrity(check_cache: bool = True, allow_untagged: bool = False) -> None:
         )
     man = json.loads(MANIFEST.read_text())
     for p, h in man.items():
-        if p == "lockbox_half1":
-            continue
         if p.startswith("cache/"):
             if check_cache and sha_file(CACHE / p[6:]) != h:
                 raise SystemExit(f"캐시 {p} sha 불일치 — 평가 거부")
@@ -759,7 +809,7 @@ def view(
     """train.py 에 넘기는 묶음 — 읽기 전용 복사본, 날짜·종목코드 없음(C3·M7).
 
     가격 O·H·L·C 는 빈 봉을 직전 거래가로 채운 값, Vol·뉴스 수는 빈 봉 0. 미래정보 검사용:
-    ``perm`` = 날짜 순서를 섞는다. ``cuts`` = {날짜 d: (분 m, 다른 날 donor)} — d 의 봉 m+1 이후를 donor 날의 실제 값으로 바꾼다
+    ``perm`` = 날짜 인덱스 배열(순열이면 섞기, 복원추출이면 다른 날 대체). ``cuts`` = {날짜 d: (분 m, 다른 날 donor)} — d 의 봉 m+1 이후를 donor 날의 실제 값으로 바꾼다
     (모양·값 분포가 같아 검사 중인지 알 수 없다)."""
     has, fill = D["has"], D["PC"]
     V = {
@@ -1098,9 +1148,11 @@ def _same(a: dict, b: dict, mask_a: np.ndarray | None = None) -> str | None:
 
 
 def causality(D: dict, res: dict, train_path: Path = TRAIN) -> tuple[bool, str]:
-    """미래정보 검사(C2) — (1) 날짜 순열 등변성 2회, (2) 후보가 있는 (날짜, 분)에서 그 분·한 분 앞 절단, 미래는 다른 날 실제 값.
+    """미래정보 검사(C2) — (1) 날짜 순열 등변성 2회, (1b) 다른 날 대체: 고른 날 12개만 두고 나머지 날을 다른 날의 복원추출로
+    바꿔도 고른 날 신호가 같다(전 기간 분위수·정규화처럼 순서와 무관한 날짜 횡단 계산을 잡는다) 2회, (2) 후보가 있는 (날짜, 분)
+    — 봉 0(장전 경로) 포함 — 에서 그 분·한 분 앞 절단, 미래는 다른 날 실제 값.
 
-    폴드 파라미터 3개(첫·가운데·마지막 폴드). 날짜끼리 독립이 (1)로 강제되므로 (2)는 날짜 하나에 한 곳씩 한 번에 바꾼다."""
+    폴드 파라미터 3개(첫·가운데·마지막 폴드). 날짜끼리 독립이 (1)(1b)로 강제되므로 (2)는 날짜 하나에 한 곳씩 한 번에 바꾼다."""
     nd = len(D["days"])
     rng = np.random.default_rng(SEED + 17)
     fs = res["folds"]
@@ -1120,10 +1172,21 @@ def causality(D: dict, res: dict, train_path: Path = TRAIN) -> tuple[bool, str]:
             )
             if why:
                 return False, f"날짜 순열 등변성 위반(날짜끼리 독립이 아니다): {why}"
+    for _ in range(2):
+        keep = rng.choice(nd, min(OTHERDAY_PROBES, nd), replace=False)
+        idx = rng.integers(0, nd, nd)
+        idx[keep] = keep
+        Vo = view(D, perm=idx)
+        mask = np.zeros(D["O"].shape, bool)
+        mask[keep] = True
+        for x, full in zip(xs, fulls, strict=True):
+            so = load_strategy(train_path)["signals"](Vo, x)
+            why = _same(full, so, mask)
+            if why:
+                return False, f"다른 날 대체 검사 위반(날짜 횡단 계산): {why}"
     union = np.zeros(D["O"].shape, bool)
     for full in fulls:
         union |= np.asarray(full["cand"], bool)
-    union[:, :, 0] = False
     union[:, :, LAST_SIGNAL + 1 :] = False
     hit_days = np.flatnonzero(union.any((1, 2)))
     pick = (
@@ -1139,8 +1202,11 @@ def causality(D: dict, res: dict, train_path: Path = TRAIN) -> tuple[bool, str]:
         cuts = {}
         for d in pick:
             ms = np.flatnonzero(union[d].any(0))
-            m = int(rng.choice(ms)) if len(ms) else int(rng.integers(1, LAST_SIGNAL))
-            m = max(m - back, 0)
+            if len(ms) and ms[0] == 0 and rng.random() < 0.5:
+                m = 0  # 장전 경로(봉 0) — 반은 여기서 자른다
+            else:
+                m = int(rng.choice(ms)) if len(ms) else int(rng.integers(0, LAST_SIGNAL + 1))
+            m = m - back if m - back >= 0 else m
             donor = int((d + 1 + rng.integers(nd - 1)) % nd)
             cuts[int(d)] = (m, donor)
         Vc = view(D, cuts=cuts)
@@ -1370,6 +1436,12 @@ def final(workers: int) -> None:
         raise SystemExit(f"잠금 절반은 이미 {used}회 열렸다(최대 {LOCKBOX_MAX}) — 사전등록")
     if n_trials() == 0:
         raise SystemExit("시행 원장이 비었다 — 루프를 돈 뒤에 실행해야 시행 수 N 이 맞다")
+    runs = _read_ledger("RUNS.jsonl")
+    flagged = sorted({r["train_sha"] for r in runs if r.get("src") and lint_train(r["src"])})
+    if flagged:
+        raise SystemExit(
+            f"원장의 train.py 원문 중 지금 허용 목록을 어기는 시행이 있다 — 검토 전 거부: {flagged}"
+        )
     _G["t0"] = time.time()
     S = load_strategy()
     D = load_search()
@@ -1392,10 +1464,14 @@ def final(workers: int) -> None:
     dsr = deflated_sharpe_from_sample(daily["alpha"].to_numpy(), N)
     con = psycopg2.connect(_dsn())
     con.set_session(readonly=True)
-    DL = build_half(con, 1)  # 잠금 절반 — 메모리에서만
-    want = json.loads(MANIFEST.read_text()).get("lockbox_half1")
-    if want and _lock_hash(DL) != want:
-        raise SystemExit("잠금 절반 데이터가 빌드 때와 다르다(DB 가 바뀌었다) — 정정 사전등록으로")
+    fixed = json.loads((CACHE / "lock_universe.json").read_text())
+    DL = build_half(con, 1, fixed=fixed)  # 잠금 절반 — 빌드 때 날짜·종목 목록 그대로, 메모리에서만
+    pairs = zip(day_hashes(DL), fixed["day_hash"], strict=True)
+    drift = [fixed["days"][i] for i, (a, b) in enumerate(pairs) if a != b]
+    if len(drift) > LOCK_DRIFT_MAX * len(fixed["days"]):
+        raise SystemExit(
+            f"잠금 절반이 빌드 때와 {len(drift)}일 다르다(DB 변경) — 정정 사전등록으로: {drift[:10]}"
+        )
     lock = walk_forward(DL, workers)
     s1 = summarize(lock)
     bars = {
@@ -1420,6 +1496,7 @@ def final(workers: int) -> None:
         "nulls_median": {k: float(np.median(v)) for k, v in nulls.items()},
         "nulls_beaten": null_ok,
         "lockbox": s1,
+        "lockbox_drift_days": drift,
         "factor_daily_net": {"alpha": a_t[0], "t_nw": a_t[1], "factors": "mkt·smb·kq·lowvol"},
         "dsr_daily_alpha": dsr,
         "bars": bars,
