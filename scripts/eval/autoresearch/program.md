@@ -6,34 +6,41 @@
 시작 전에 이 파일, 사전등록, `prepare.py`(읽기만), `train.py` 를 읽는다. 레포 `CLAUDE.md` 의 운영 체크아웃 규칙도 지킨다.
 
 ## 파일
-- `scripts/eval/autoresearch/prepare.py` — 고정 평가기. 캐시(탐색 절반), 워크포워드(학습 3개월 → 시험 1개월, 11폴드),
-  파라미터 점 48개 → 폴드마다 고원 선택, 분봉 체결, 비용, 점수, keep 판정. **고치지 않는다**(고치면 평가가 거부된다).
+- `scripts/eval/autoresearch/prepare.py` — 고정 평가기 v2. 캐시(탐색 절반), 워크포워드(학습 3개월 → 시험 1개월, 11폴드),
+  파라미터 점 48개 → 폴드마다 고원 선택, 분봉 체결, 비용, 점수, 미래정보 검사, keep 판정·BEST 기록. **고치지 않는다**
+  (고치거나 scripts·src 에 다른 파일을 두면 평가가 거부된다).
 - `scripts/eval/autoresearch/train.py` — 네가 고치는 유일한 파일. `get_strategy()` 계약과 V 의 열은 파일 머리말에 있다.
 - `scripts/eval/autoresearch/results.tsv` — 실험 기록(git 추적 안 함). 머리줄:
-  `commit	score	folds_pos	oos_trades	trades_per_day	top1pct_removed	alpha_bp	net_bp	payoff	status	description`
+  `commit	score	late_score	folds_pos	oos_trades	trades_per_day	top1pct_removed	alpha_bp	net_bp	payoff	status	description`
 
 ## 실험 한 번
 1. `train.py` 를 아이디어 하나로 고친다 → `git commit -m "exp: <한 줄>"`
 2. 작업 트리 루트에서 `uv run python scripts/eval/autoresearch/prepare.py > run.log 2>&1` (20분 넘으면 죽이고 crash)
 3. `grep -A30 "^---" run.log` — 비었으면 `tail -n 50 run.log`. 쉬운 오류(허용 목록 위반·모양 오류)면 고쳐 다시, 아니면 crash 로 적고 넘어간다.
 4. `results.tsv` 에 한 줄 덧붙인다(모든 시도 — discard·crash 포함. 지우지 않는다. 평가기 원장은 따로 자동 기록된다).
-5. **keep 은 평가기가 정한다:** `beats_best: True` 면 `uv run python scripts/eval/autoresearch/prepare.py --accept` 후 keep.
-   아니면 `git reset --hard HEAD~1` (discard). 너는 keep 조건을 바꾸거나 해석하지 않는다.
+5. **keep 은 평가기가 정하고 기록한다:** `beats_best: True` 면 평가기가 이미 BEST 를 갱신했다 → 커밋을 남긴다(keep).
+   아니면 `git reset --hard HEAD~1` (discard). 너는 keep 조건을 바꾸거나 해석하지 않는다. keep 조건 = Δscore ≥ 2bp ∧ 일별
+   알파 쌍 차이 블록 부트스트랩 p < 0.05 ∧ 상위 1% 제거 점수 악화 ≤ 2bp(잡음 변형은 대개 떨어진다).
 6. 다시 1.
 
 ## 점수가 뜻하는 것
-거래마다 알파 = 순수익(비용 차감) − 같은 진입·청산 시각 사이 그날 유니버스 절반 동일가중 수익. score = 11 시험 폴드
-거래당 알파 평균(bp)의 평균 − 0.5 × 표준편차. 장중 하락 흐름과 시각 선택은 점수에 0 이다 — **무엇을 사나(선정)와 청산 메뉴**만 점수가 된다.
-비용이 거래당 37~45bp 라 0 을 넘으려면 그만큼의 선정 알파가 필요하다. 지금까지 이 레포의 매치드 널 선정 알파는 +1.6bp(se 3.4)였다.
-**음수에서 시작하는 것이 정상이다.** `net_bp`(실제 순수익, 흐름 포함)는 보고 열이다.
+거래마다 알파 = 순수익(비용 차감) − 같은 날 같은 특성 칸(코스닥 × 규모 3분위 × 20일 변동성 3분위, 자기 제외) 종목들의 같은
+진입·청산 시각 사이 동일가중 수익. score = 11 시험 폴드 거래당 알파 평균(bp)의 평균 − 0.5 × 표준편차. 장중 흐름·시각 선택·
+베타·규모·코스닥 기울기는 점수에 0 이다 — **같은 부류 안에서 무엇을 사나(선정)와 청산 메뉴**만 점수가 된다.
+비용이 거래당 32~45bp(2025 년 매도세 0.15%, 2026 년 0.20%, 장초·코스닥·저가주가 비싸다)라 0 을 넘으려면 그만큼의 선정 알파가 필요하다.
+지금까지 이 레포의 매치드 널 선정 알파는 +1.6bp(se 3.4)였다. **음수에서 시작하는 것이 정상이다.** `net_bp`(실제 순수익, 흐름 포함)와
+`late_score`(분봉 커버리지 ≥ 97% 인 2026 년 폴드만)는 보고 열이다.
 
 ## 하지 말 것(어기면 결과 무효)
 - `prepare.py`·사전등록·데이터·의존성 변경, 캐시·원장·`~/.cache/daytrade-it/` 파일 읽기·쓰기, `--final`·`--build`·`--manifest` 실행.
 - 2026-10-13 이후 데이터, 운영 체크아웃(`~/git/daytrade-it`)·크론·데몬·`data/live_STOP` 건드리기, LLM API 호출(크레딧).
 - 잠금 절반 종목 접근(코드 해시 짝홀을 추론해 피하거나 겨냥하지 않는다). 행 순서·값으로 날짜나 종목을 알아내려는 시도.
 - 미래 정보: 봉 m 의 신호는 봉 m 종가까지의 값만. 그날 전체에 대한 집계(그날 고가·거래량 합·마지막 봉)는 미래다. 평가기가 절단 재계산으로 잡는다.
+- 날짜를 가로지르는 계산(다른 날 값, 날짜 인덱스로 구간 끄기·켜기)은 쓰지 않는다 — 평가기가 날짜 순열 검사로 void 처리한다.
+  전날 맥락은 `ret1`·`hist5`·`mkt_prev1` 같은 [D,N]·[D] 열로만.
 - 숫자 맞추기: 상수를 손으로 바꿔 점수를 올리지 않는다 — 숫자는 `params` 범위로 내고 평가기에 맡긴다. 범위를 한 점으로 좁히는 것도 손 맞추기다.
-- 청산은 메뉴만(`close`·`vwap`·`ma`·`struct` + 하드 손절 ≥ 1.5% + 15:00). 신호로 익절·추적·시간 손절을 흉내 내지 않는다.
+- 청산은 메뉴만(`close`·`vwap`·`ma`·`struct` + 하드 손절 ≥ 1.5% + 15:00). `vwap`·`ma` 는 추세 이탈형 조건 청산이다(추적 손절 성격이 있다 —
+  짧은 창으로 사실상 좁은 손절을 만드는 쪽은 사용자 원칙 위반으로 본다). 신호로 익절·추적·시간 손절을 흉내 내지 않는다.
 - 거래를 줄여 거래당 숫자를 올리는 방향(체결 < 30 인 폴드가 2개 초과 또는 전체 < 600 이면 void).
 
 ## 사용자 매매 원칙(설계 공간)

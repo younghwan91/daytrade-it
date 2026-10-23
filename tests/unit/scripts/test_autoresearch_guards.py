@@ -211,14 +211,52 @@ def test_no_entry_after_last_signal_bar():
         "def f(V):\n    V['C'].setflags(write=True)\n",
         "print(1)\n",
         "def f(a):\n    return a.base\n",
+        # 평가기 리뷰 M-4(a) 우회 예시와 그 이웃
+        "import dataclasses\nm = dataclasses.inspect.importlib.import_module('subprocess')\n",
+        "import pandas as pd\nh = pd.io.common.get_handle('x', 'w')\n",
+        "import numpy as np\nx = np._core\n",
+        "import numpy as np\nx = np.random.mtrand\n",
+        "from numpy import random as r\nx = r.mtrand\n",
+        "import collections\nx = collections.abc\n",
+        "from pandas import io\n",
+        "import numpy.random\n",
+        "from numpy import *\n",
+        "import typing\n",
     ],
 )
 def test_lint_rejects_escape_and_hindsight(src):
     assert P.lint_train(src)
 
 
-def test_lint_accepts_baseline():
+def test_lint_accepts_baseline_and_ordinary_numpy_pandas():
     assert P.lint_train(P.TRAIN.read_text(encoding="utf-8")) == []
+    ok = (
+        "import numpy as np\nimport pandas as pd\nfrom numpy import random as r\n"
+        "a = np.random.default_rng(0)\nb = np.linalg.norm([1.0])\nc = r.default_rng(1)\n"
+        "d = pd.DataFrame({'x': [1.0]}).rolling(1).mean().to_numpy()\n"
+    )
+    assert P.lint_train(ok) == []
+
+
+def test_loaded_module_namespace_rejects_smuggled_module(tmp_path):
+    p = tmp_path / "s.py"
+    p.write_text(
+        "import numpy as np\nM = np.random\n"
+        "def get_strategy():\n    return {'params': {}, 'signals': None, 'cfg': None}\n"
+    )
+    assert P.load_strategy(p)["sha"]  # np.random 은 허용
+    q = tmp_path / "t.py"
+    q.write_text(
+        "import numpy as np\nimport functools\nM = functools.reduce\n"
+        "def get_strategy():\n    return {'params': {}, 'signals': None, 'cfg': None}\n"
+    )
+    assert P.load_strategy(q)["src"].startswith("import")
+
+
+def test_stray_files_outside_agent_file_are_reported():
+    out = "?? scripts/eval/krx_quant_core/__init__.py\n M scripts/eval/autoresearch/train.py\n"
+    assert P._stray(out) == ["?? scripts/eval/krx_quant_core/__init__.py"]
+    assert P._stray(" M scripts/eval/autoresearch/train.py\n") == []
 
 
 def test_view_is_read_only_copy_without_dates_or_codes():
@@ -240,37 +278,51 @@ def _write(tmp_path, body: str) -> Path:
     return p
 
 
-def test_causality_catches_intraday_and_cross_day_lookahead(tmp_path):
-    D = toy(n=3, nd=12)
+def _rand_toy(nd: int = 20) -> dict:
+    D = toy(n=3, nd=nd)
     rng = np.random.default_rng(0)
     D["C"] = (10000 * np.cumprod(1 + rng.normal(0, 0.002, D["C"].shape), axis=2)).astype(np.float32)
     D["O"], D["H"], D["L"] = D["C"].copy(), D["C"] * 1.001, D["C"] * 0.999
+    D["na"][:] = (rng.random(D["na"].shape) < 0.01).astype(np.uint8)  # 드문 기사
     P._derive(D)
-    res = {"folds": [{"params": {}}]}
-    peek = _write(
-        tmp_path,
-        "def signals(V, x):\n    f = np.roll(V['C'], -1, axis=2)\n"
-        "    return {'cand': f > V['C'], 'score': f}\n",
-    )
-    assert not P.causality(D, res, peek)[0]
-    dayhi = _write(
-        tmp_path,
+    return D
+
+
+RES = {"folds": [{"params": {}}]}
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # 한 봉 앞 엿보기(모든 봉 후보)
+        "def signals(V, x):\n    f = np.roll(V['C'], -1, axis=2)\n    return {'cand': f > V['C'], 'score': f}\n",
+        # 그날 고가(장 마감 뒤에 안다)
         "def signals(V, x):\n    h = np.nanmax(V['H'], axis=2, keepdims=True)\n"
         "    return {'cand': V['C'] >= 0.995 * h, 'score': V['C'] * 0}\n",
-    )
-    assert not P.causality(D, res, dayhi)[0]  # 그날 고가(장 마감 뒤에 알 수 있다)
-    nxt = _write(
-        tmp_path,
+        # 다음 날 가격
         "def signals(V, x):\n    t = np.roll(V['C'][:, :, -1:], -1, axis=0)\n"
         "    return {'cand': V['C'] < t, 'score': V['C'] * 0}\n",
-    )
-    assert not P.causality(D, res, nxt)[0]  # 다음 날 가격
-    honest = _write(
-        tmp_path,
+        # 리뷰 C-1: 드문 후보 — 기사 봉에서 다음 봉이 양봉이면(한 봉 앞)
+        "def signals(V, x):\n    nxt = np.roll(V['C'], -1, axis=2)\n"
+        "    return {'cand': (V['na'] > 0) & (nxt > V['C']), 'score': V['C'] * 0}\n",
+        # 리뷰 C3: 달력(날짜 인덱스)으로 구간을 끄기
+        "def signals(V, x):\n    c = V['na'] > 0\n    c = c.copy()\n    c[:5] = False\n"
+        "    return {'cand': c, 'score': V['C'] * 0}\n",
+        # 검사 중인지 알아채기: 마지막 봉 NaN 여부(v2 는 다른 날 실제 값으로 바꿔 모양·값이 같다) + 미래 엿보기
+        "def signals(V, x):\n    f = np.roll(V['C'], -2, axis=2)\n    peek = ~np.isnan(V['C'][:, :, -1:])\n"
+        "    return {'cand': (V['na'] > 0) & (f > V['C']) & peek, 'score': f}\n",
+    ],
+)
+def test_causality_catches_lookahead(tmp_path, body):
+    assert not P.causality(_rand_toy(), RES, _write(tmp_path, body))[0]
+
+
+def test_causality_passes_honest_sparse_strategy(tmp_path):
+    body = (
         "def signals(V, x):\n    p = np.concatenate([V['C'][:, :, :1], V['C'][:, :, :-1]], axis=2)\n"
-        "    return {'cand': V['C'] > p, 'score': V['C'] - p}\n",
+        "    return {'cand': (V['na'] > 0) & (V['C'] > p), 'score': V['C'] - p + V['mkt_prev1'][:, None, None]}\n"
     )
-    assert P.causality(D, res, honest)[0]
+    assert P.causality(_rand_toy(), RES, _write(tmp_path, body)) == (True, "ok")
 
 
 # ---------------------------------------------------------------- 선택·keep·원장(M1·M8)
@@ -322,20 +374,65 @@ def test_summarize_voids_thin_trading():
     assert s["void"] and s["score"] == P.VOID_SCORE
 
 
-def test_beats_requires_paired_fold_improvement(tmp_path, monkeypatch):
+def test_beats_requires_paired_bootstrap_not_noise(tmp_path, monkeypatch):
     monkeypatch.setattr(P, "BEST", tmp_path / "BEST.json")
+    rng = np.random.default_rng(1)
+    base = {i: float(v) for i, v in enumerate(rng.normal(-40, 60, 200))}
     (tmp_path / "BEST.json").write_text(
-        json.dumps({"score": 0.0, "top1": 0.0, "fold_alpha": [0.0] * 11})
+        json.dumps({"score": -50.0, "top1": -55.0, "daily_alpha": base})
     )
-    one_big = {
-        "void": False,
-        "score": 5.0,
-        "_fold_alpha": [60.0] + [-0.1] * 10,
-    }  # 한 폴드만 크게(잡음 겨냥)
-    assert not P.beats(one_big, 0.0)[0]
-    broad = {"void": False, "score": 3.0, "_fold_alpha": [3.0] * 11}
-    assert P.beats(broad, 0.0)[0]
-    assert not P.beats(broad, -5.0)[0]  # 상위 1% 를 빼면 무너지는 개선
+    noise = {k: v + float(rng.normal(0, 60)) for k, v in base.items()}  # 잡음만 바뀐 변형
+    noise_mean = np.mean([noise[k] - base[k] for k in base])
+    s_noise = {"void": False, "score": -50.0 + max(3.0, noise_mean), "_daily_alpha": noise}
+    ok, why = P.beats(s_noise, -55.0)
+    assert not ok or P.paired_boot_p(noise, base)[0] < P.KEEP_P, why
+    better = {k: v + 15.0 + float(rng.normal(0, 5)) for k, v in base.items()}  # 날마다 고르게 +15bp
+    assert P.beats({"void": False, "score": -35.0, "_daily_alpha": better}, -45.0)[0]
+    assert not P.beats({"void": False, "score": -35.0, "_daily_alpha": better}, -60.0)[
+        0
+    ]  # 상위 1% 빼면 무너짐
+    assert not P.beats({"void": False, "score": -49.0, "_daily_alpha": better}, -45.0)[
+        0
+    ]  # Δscore < 2bp
+
+
+def test_paired_bootstrap_rejects_pure_noise_most_of_the_time():
+    rng = np.random.default_rng(7)
+    base = {i: float(v) for i, v in enumerate(rng.normal(0, 80, 220))}
+    hits = sum(
+        P.paired_boot_p({k: v + float(rng.normal(0, 80)) for k, v in base.items()}, base, seed=r)[0]
+        < P.KEEP_P
+        for r in range(40)
+    )
+    assert hits <= 6  # 무작위면 ~5% (이항 40회 95% 상한 근처)
+
+
+def test_peer_benchmark_uses_same_characteristic_bucket():
+    D = toy(n=12)
+    D["kosdaq"][0, 6:] = 1.0  # 행 6~11 코스닥
+    D["tv_prev"][0] = np.arange(12, 0, -1)
+    P._derive(D)
+    D["O"][0, 6:, 300:] = D["H"][0, 6:, 300:] = D["L"][0, 6:, 300:] = D["C"][0, 6:, 300:] = (
+        11000.0  # 코스닥만 +10%
+    )
+    P._derive(D)
+    t = P.simulate(D, sig_at(D, 0, 7, 10), CFG)  # 코스닥 종목 하나
+    assert t["net"].iloc[0] == pytest.approx(0.10 - 0.004, rel=1e-3)
+    assert abs(t["alpha"].iloc[0]) < 0.01  # 코스닥 기울기는 알파가 아니다(전체 평균이면 +5%)
+
+
+def test_rank_null_degenerate_is_excluded_not_failed():
+    assert P.beats_null(-30.0, [-30.0] * 100) is None
+    assert P.beats_null(5.0, list(np.linspace(-20, 4, 100))) is True
+    assert P.beats_null(0.0, list(np.linspace(-20, 4, 100))) is False
+
+
+def test_factor_intercept_t_recovers_planted_alpha():
+    rng = np.random.default_rng(3)
+    F = rng.normal(0, 0.01, (400, 4))
+    y = 0.002 + F @ np.array([1.0, 0.5, -0.3, 0.2]) + rng.normal(0, 0.003, 400)
+    a, t = P.nw_intercept_t(y, F)
+    assert a == pytest.approx(0.002, abs=5e-4) and t > 5
 
 
 def test_ledger_is_double_written_and_survives_one_copy_loss(tmp_path, monkeypatch):
