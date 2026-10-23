@@ -42,9 +42,12 @@ def signals(V: dict, x: dict) -> dict:
     lag = np.concatenate([np.zeros(cs.shape[:2] + (10,)), cs[:, :, :-10]], axis=2)
     ma10 = (cs - lag) / np.minimum(m + 1, 10)[None, None, :]  # 직전 10분 종가 평균(봉 m 포함)
     pull = ~(V["C"] > ma10)  # 짧은 평균 아래 — 상승 추세(VWAP 위) 안의 눌림
-    falling = (V["ret20"] < 0) & (V["ret5"] < 0)  # 장전 기사 있고 며칠·몇 주 하락
+    falling = (V["ret20"] < 0) & (V["ret5"] < 0)  # 며칠·몇 주 모두 내리는 종목(떨어지는 칼날)
     avg_v = np.cumsum(V["Vol"], axis=2) / (m + 1)[None, None, :]
     calm_v = ~(V["Vol"] > avg_v)  # 기사 봉 거래량이 오늘 평균 이하(아직 반응 전)
+    c_pub = np.concatenate(
+        [np.repeat(V["O"][:, :, :1], 5, axis=2), V["C"][:, :, :-5]], axis=2
+    )  # 기사 작성 시각(5분 전) 종가
     cand = (
         new
         & above
@@ -53,6 +56,7 @@ def signals(V: dict, x: dict) -> dict:
         & pull
         & calm_v
         & ~falling[:, :, None]
+        & (c_pub > V["O"][:, :, :1])
         & (up < x["theta"])
         & V["uni"][:, :, None]
     )
