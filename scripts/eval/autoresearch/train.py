@@ -68,7 +68,6 @@ def signals(V: dict, x: dict) -> dict:
         new
         & above
         & day_up
-        & dip
         & pull
         & calm_v
         & ~falling[:, :, None]
@@ -86,6 +85,7 @@ def signals(V: dict, x: dict) -> dict:
         & (kq | rare | (c_pub > vw_pub))
         & ~(np.cumsum(V["nf"], axis=2) > 0)
         & (rs > 0)
+        & dip
     )  # 그날 앞선 기본 신호 중에서만
     score = np.broadcast_to(V["tv_rank"][:, :, None], cand.shape)
     return {"cand": cand, "score": score}
