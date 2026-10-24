@@ -1,0 +1,27 @@
+{
+ "title": "autoresearch 사전등록 1 정정 2 — 평가기 v2 확인 심사(새 CRITICAL 1·MAJOR 3) 반영, 평가기 v3(결과 전)",
+ "at": "2026-10-24",
+ "amends": "docs/research/frozen/2026-10-24-autoresearch-prereg-amend1.json (커밋 11f6978) 과 평가기 v2 (1d44378, 태그 daytrade-autoresearch-prereg-2). 새 태그 daytrade-autoresearch-prereg-3. v1·v2 태그로는 평가가 거부된다.",
+ "invalid_run_seen": "아니다. v2 로는 --smoke(점수 출력·원장 기록 없음)만 돌렸다. 리뷰어도 점수·수익을 계산하지 않았다.",
+ "review": "quant-reviewer 확인 심사(같은 리뷰어). M-1 벤치마크(같은 칸 87.9%, 코스닥×규모 12.1%)·M-2 keep(합성 널 거짓 keep 4.7%)·태그 필수·untracked 거부·평가기 BEST 기록은 해소로 확인.",
+
+ "bug": {
+  "N1_bar0_unchecked": "v2 절단 검사가 봉 0 을 후보 집합에서 빼고(union[:, :, 0] = False) 대체 분도 m ≥ 1 이라, 장전 경로(봉 0 신호 → 09:01 진입)의 미래정보가 검사되지 않았다. 리뷰어 주입: 장전 기사 종목을 09:05 종가로 골라 09:01 에 사는 전략이 검사를 통과.",
+  "N2_order_free_cross_day": "순열 등변성은 날짜 순서와 무관한 날짜 횡단 계산(전 기간 분위수·z-score)을 못 잡고, 절단 검사는 [D,N]·[D] 열을 건드리지 않았다. 리뷰어 주입: 전 기간 vol20 중앙값 문턱이 통과.",
+  "N3_lint_bypass": "생성기 프레임(g().gi_frame.f_builtins)으로 builtins 의 import 함수에 닿아 임의 모듈 import 가 실행 중 성공했다. 함수 안에서 모듈을 값으로 다시 묶기(x = np; x.core), dump·to_string(buf=) 파일 쓰기가 통과했다. 무시된 파일(소스 없는 pyc)을 _stray 가 보지 않았고 스크립트 폴더가 sys.path[0] 이었다.",
+  "N4_lockbox_fragile": "잠금 절반 해시가 현재 상장 종목 표(stocks)로 고른 유니버스에 묶여, 빌드와 --final 사이 폐지·합병 하나로 영구 거부될 수 있었고, 해시가 일부 열(O·H·L·C·Vol·na·prev_close·uni)만 덮었다.",
+  "minor": "vol20 NaN(이력 없는 종목)이 가운데 변동성 칸으로 들어갔다. 블록 5일은 자기상관 0.3 에서 거짓 keep 7.7%. 정정 1 의 '전일 원 종가' 표기는 틀렸다 — 분봉 자체도 일부 종목은 소급 수정 가격이라(리뷰어 확인, 예 356860 2025-11-25) 전일 종가가 호가 격자 밖인 행·일이 3.9% 남는다(가격제한 판정 오류 가능 — 분봉끼리라 수익 계산은 영향 없음). 신호에 난수 동점 처리를 쓰면 순열 검사가 void 로 본다(정당한 구성이 거짓 void)."
+ },
+
+ "changes": {
+  "C2_lookahead": "(2) 절단 검사에 봉 0 포함 — 고른 날에 봉 0 후보가 있으면 반은 m = 0 에서 자른다, back = 1 은 m = 0 이면 건너뛴다. (1b) 새 '다른 날 대체' 검사 2회: 고른 날 12개만 그대로 두고 나머지 날 전부를 다른 날의 복원추출(모든 열 — 분봉·[D,N]·[D])로 바꾼 V 에서 고른 날의 신호가 같아야 한다. 순서와 무관한 날짜 횡단 계산을 잡는다. 신호는 결정론이어야 한다(난수 금지 — 계약·program.md 에 명시).",
+  "C1_lint": "금지 추가: gi_·cr_·ag_·f_·tb_·co_ 로 시작하는 속성, dump·dumps·to_string·write·writelines·ExcelWriter·HDFStore, 모듈 별칭을 속성 접근의 주체가 아닌 값으로 쓰기(대입·인자·반환), 밑줄 두 개가 들었거나 밑줄로 시작·끝나는 문자열 상수. _stray 는 무시된 파일도 보고(--ignored), 같은 폴더에 소스가 있는 __pycache__ pyc·results.tsv 만 허용. 평가기는 자기 폴더가 sys.path[0] 이면 numpy 를 불러오기 전에 뺀다. --final 은 원장의 모든 train.py 원문을 지금 lint 로 다시 검사해 어기는 시행이 있으면 거부한다. 루프 세션은 레포 밖 캐시·원장 경로 Read 거부와 평가기·사전등록 Edit/Write 거부를 걸고 띄운다(정적 검사는 샌드박스가 아니다).",
+  "C4_bench": "vol20 NaN 은 고변동 칸으로.",
+  "M8_keep": "부트스트랩 블록 10일.",
+  "lockbox": "빌드 때 잠금 절반의 날짜·날짜별 종목 목록·날짜별 sha256(엔진·V 입력 전부 — 분봉·뉴스 4열·정적 열 전부·가격제한·비용·다음 날 가격·종목 목록)을 레포 밖 ~/.cache/daytrade-it/autoresearch/lock_universe.json 에 두고 그 파일 sha 를 MANIFEST 에 남긴다(종목 목록이 레포에 들어가지 않게). --final 은 stocks 표가 아니라 그 목록으로 다시 만들고, 날짜별 해시가 다른 날이 2% 를 넘으면 거부, 그 이하면 다른 날 목록을 결과에 남긴다."
+ },
+ "graduation_changes": "없다(정정 1 의 바 b1~b8 그대로).",
+ "known_limits_added": "b8(late_score) 은 11 폴드 중 9 폴드라 score 와 거의 같아 변별력이 작다. 2026-01·02 폴드의 학습 구간(2025-10~12)은 커버리지가 낮은 달이다. cut 의 donor 값은 다른 종목 가격이라 적대적 에이전트는 검사 중임을 알 수 있다 — 정직한 실수는 잡지만 의도적 회피는 program.md 위반(결과 무효)과 원장 원문 감사로 막는다. 태그를 강제로 옮기는 것은 막지 못한다 — 원장의 tag_commit 으로 사후 확인한다.",
+ "disclosure": "정정 전후로 본 것: 확인 심사 보고서, 빌드 로그, --smoke. 점수·알파·순수익은 보지 않았다.",
+ "verdict_rule": "원 사전등록·정정 1 의 판정 규칙 그대로."
+}

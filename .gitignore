@@ -165,3 +165,7 @@ frontend/node_modules/
 
 # OMC local state
 .omc/
+
+# autoresearch 루프 산출물(원장은 레포 밖 ~/.cache·~/.local/state)
+scripts/eval/autoresearch/results.tsv
+run.log
