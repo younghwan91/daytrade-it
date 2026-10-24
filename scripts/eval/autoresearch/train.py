@@ -48,6 +48,22 @@ def signals(V: dict, x: dict) -> dict:
     c_pub = np.concatenate(
         [np.repeat(V["O"][:, :, :1], 5, axis=2), V["C"][:, :, :-5]], axis=2
     )  # 기사 작성 시각(5분 전) 종가
+    v = np.where(V["uni"], V["vol20"], np.nan)
+    h = np.where(V["uni"], V["hist5"], np.nan)
+    with np.errstate(invalid="ignore"):
+        vmed = np.nanmedian(v, axis=1, keepdims=True)
+        hmed = np.nanmedian(h, axis=1, keepdims=True)
+    lively = (~(V["vol20"] < vmed) | (V["kosdaq"] > 0) | ~(V["hist5"] > hmed))[
+        :, :, None
+    ]  # 변동성 큼 ∨ 코스닥 ∨ 덜 다뤄짐
+    rare = ~(V["hist5"] > hmed)[:, :, None]  # 덜 다뤄진 종목
+    kq = (V["kosdaq"] > 0)[:, :, None]
+    c_pre = np.concatenate(
+        [np.repeat(V["O"][:, :, :1], 15, axis=2), V["C"][:, :, :-15]], axis=2
+    )  # 작성 10분 전 종가
+    vw_pub = np.concatenate(
+        [np.repeat(V["vwap"][:, :, :1], 5, axis=2), V["vwap"][:, :, :-5]], axis=2
+    )  # 작성 시각 VWAP
     cand = (
         new
         & above
@@ -60,6 +76,14 @@ def signals(V: dict, x: dict) -> dict:
         & (up < x["theta"])
         & V["uni"][:, :, None]
     )
+    order = np.cumsum(cand.sum(axis=1, keepdims=True), axis=2)  # 오늘 봉 m 까지 기본 신호 수(누적)
+    cand = (
+        cand
+        & (order <= x["slots"])
+        & (lively | (c_pub > c_pre))
+        & (kq | rare | (c_pub > vw_pub))
+        & ~(np.cumsum(V["nf"], axis=2) > 0)
+    )  # 그날 앞선 기본 신호 중에서만
     score = np.broadcast_to(V["tv_rank"][:, :, None], cand.shape)
     return {"cand": cand, "score": score}
 
