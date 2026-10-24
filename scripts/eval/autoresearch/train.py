@@ -76,6 +76,8 @@ def signals(V: dict, x: dict) -> dict:
         & (up < x["theta"])
         & V["uni"][:, :, None]
     )
+    with np.errstate(invalid="ignore", divide="ignore"):
+        rs = V["C"] / V["O"][:, :, :1] - V["mkt"][:, None, :]
     order = np.cumsum(cand.sum(axis=1, keepdims=True), axis=2)  # 오늘 봉 m 까지 기본 신호 수(누적)
     cand = (
         cand
@@ -83,6 +85,7 @@ def signals(V: dict, x: dict) -> dict:
         & (lively | (c_pub > c_pre))
         & (kq | rare | (c_pub > vw_pub))
         & ~(np.cumsum(V["nf"], axis=2) > 0)
+        & (rs > 0)
     )  # 그날 앞선 기본 신호 중에서만
     score = np.broadcast_to(V["tv_rank"][:, :, None], cand.shape)
     return {"cand": cand, "score": score}
