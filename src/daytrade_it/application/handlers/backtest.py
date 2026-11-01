@@ -33,9 +33,7 @@ import pandas as pd
 import structlog
 from krx_quant_core.backtest.ledger import performance_metrics
 from krx_quant_core.backtest.replay import run_replay
-from krx_quant_core.execution.book import PositionBook
 from krx_quant_core.execution.engine import Bar, Event, StrategyContext
-from krx_quant_core.execution.events import Fill
 from krx_quant_core.execution.guards import OrderGuardConfig
 from krx_quant_core.execution.orders import OrderIntent
 from krx_quant_core.market.session import KST
@@ -287,26 +285,9 @@ class BacktestHandler:
             bars,
             guard_config=_REPLAY_GUARD,
             market_of=lambda _code: self._market.value,
+            cost_model=self._cost_model,
+            liquidate_at_end=True,
         )
-
-        # Re-book the fills with this handler's cost model (run_replay's own
-        # book uses core default rates), then liquidate what is still open.
-        book = PositionBook(market_of=lambda _code: self._market.value, cost_model=self._cost_model)
-        for row in replay.fills.to_dict("records"):
-            book.apply(Fill(**{**row, "ts": pd.Timestamp(row["ts"]).to_pydatetime()}))
-        last_bar = {bar.code: bar for bar in bars}
-        for code, holding in book.positions().items():
-            bar = last_bar[code]
-            book.apply(
-                Fill(
-                    ord_no="END",
-                    code=code,
-                    side="sell",
-                    qty=holding.qty,
-                    price=int(bar.close),
-                    ts=bar.ts,
-                )
-            )
 
         trades = [
             BacktestTrade(
@@ -320,7 +301,7 @@ class BacktestHandler:
                 pnl=Decimal(str(round(row["pnl"], 2))),
                 pnl_pct=Decimal(str(round(row["exit_price"] / row["entry_price"] - 1, 4))),
             )
-            for row in book.to_frame().to_dict("records")
+            for row in replay.trades.to_dict("records")
         ]
         return trades, runner.equity_curve
 

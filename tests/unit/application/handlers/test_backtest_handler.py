@@ -121,3 +121,26 @@ async def test_open_position_is_liquidated_at_the_last_close_with_costs() -> Non
     assert float(trade.pnl) == round(_expected_pnl(qty, 10_000, 10_100, 3), 2)
     gross = (trade.exit_price - trade.entry_price) * trade.quantity
     assert trade.pnl != gross
+
+
+async def test_equity_and_sizing_use_the_handlers_cost_model() -> None:
+    # 자산곡선·수량을 정하는 장부와 거래 손익을 내는 장부가 같은 비용 모델이어야 한다.
+    # 전엔 run_replay 안쪽 장부(코어 기본 = 슬리피지 0)가 자산곡선·현금을 정하고, 거래는
+    # 핸들러 비용 모델(슬리피지 포함)로 다시 적어서 둘이 어긋났다.
+    bars = [
+        _bar(1, 10_000, volume=2_000_000),  # BUY @10,000
+        _bar(2, 9_900),  # bought
+        _bar(3, 10_600),  # SELL @10,600
+        _bar(4, 10_700),  # sold
+        _bar(5, 10_000, volume=2_000_000),  # BUY again — size from post-cost cash
+        _bar(6, 9_900),  # bought
+    ]
+    handler = BacktestHandler(market_data_client=_FakeMarketData(bars))  # type: ignore[arg-type]
+
+    result = await handler.handle(_command())
+
+    first, second = result.trades
+    day4 = next(p for p in result.equity_curve if p["date"].startswith("2026-09-04"))
+    assert Decimal(str(round(day4["equity"], 2))) == Decimal("10000000") + first.pnl
+    cash = 10_000_000 + _expected_pnl(int(10_000_000 * 0.1 / 10_000), 10_000, 10_600, 4)
+    assert second.quantity == Decimal(int(cash * 0.1 / 10_000))
