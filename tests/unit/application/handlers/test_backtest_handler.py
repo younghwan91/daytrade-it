@@ -16,7 +16,7 @@ from krx_quant_core.execution.book import PositionBook
 from krx_quant_core.execution.events import Fill
 
 from daytrade_it.application.handlers.backtest import BacktestCommand, BacktestHandler
-from daytrade_it.domain.services.cost_model import KoreanCostModel
+from daytrade_it.domain.services.cost_model import CostModelConfig, KoreanCostModel
 from daytrade_it.infrastructure.brokers.base import KST
 from daytrade_it.infrastructure.external.quant_airflow_db_client import AdjustedDailyBar
 
@@ -52,8 +52,10 @@ def _command() -> BacktestCommand:
     )
 
 
-def _expected_pnl(qty: int, buy: int, sell: int, sell_day: int) -> float:
-    book = PositionBook(cost_model=KoreanCostModel())
+def _expected_pnl(
+    qty: int, buy: int, sell: int, sell_day: int, cost: KoreanCostModel | None = None
+) -> float:
+    book = PositionBook(cost_model=cost or KoreanCostModel())
     ts = dt.datetime(2026, 9, 1, 15, 30, tzinfo=KST)
     book.apply(Fill(ord_no="b", code="005930", side="buy", qty=qty, price=buy, ts=ts))
     sell_ts = dt.datetime(2026, 9, sell_day, 15, 30, tzinfo=KST)
@@ -121,3 +123,49 @@ async def test_open_position_is_liquidated_at_the_last_close_with_costs() -> Non
     assert float(trade.pnl) == round(_expected_pnl(qty, 10_000, 10_100, 3), 2)
     gross = (trade.exit_price - trade.entry_price) * trade.quantity
     assert trade.pnl != gross
+
+
+def _costly() -> KoreanCostModel:
+    # 수수료 1% — 코어 기본(0.015%)과 크게 달라 어느 비용 모델로 셌는지 수량·자산에서 드러난다.
+    return KoreanCostModel(CostModelConfig(commission_rate=Decimal("0.01")))
+
+
+async def test_equity_and_sizing_use_the_handlers_cost_model() -> None:
+    # 수량을 정하는 현금·자산곡선·거래 손익이 같은 비용 모델(핸들러의 것)이어야 한다. 전엔 run_replay
+    # 안쪽 장부(코어 기본 비용)가 현금·자산곡선을 정하고 거래만 핸들러 비용 모델로 다시 적었다.
+    bars = [
+        _bar(1, 10_000, volume=2_000_000),  # BUY @10,000
+        _bar(2, 9_900),  # bought
+        _bar(3, 10_600),  # SELL @10,600
+        _bar(4, 10_700),  # sold
+        _bar(5, 10_050, volume=2_000_000),  # BUY again — qty from post-cost cash
+        _bar(6, 10_000),  # bought @10,050
+    ]
+    cost = _costly()
+    handler = BacktestHandler(market_data_client=_FakeMarketData(bars), cost_model=cost)  # type: ignore[arg-type]
+
+    result = await handler.handle(_command())
+
+    first, second = result.trades
+    day4 = next(p for p in result.equity_curve if p["date"].startswith("2026-09-04"))
+    assert Decimal(str(round(day4["equity"], 2))) == Decimal("10000000") + first.pnl
+    cash = 10_000_000 + _expected_pnl(100, 10_000, 10_600, 4, cost)
+    assert int(cash * 0.1 / 10_050) == 99  # 코어 기본 비용이면 100 이 된다
+    assert second.quantity == Decimal(99)
+
+
+async def test_final_capital_includes_end_liquidation_costs() -> None:
+    bars = [
+        _bar(1, 10_000, volume=2_000_000),
+        _bar(2, 9_900),  # bought at 10,000, still open at the end
+        _bar(3, 10_100),
+    ]
+    handler = BacktestHandler(market_data_client=_FakeMarketData(bars), cost_model=_costly())  # type: ignore[arg-type]
+
+    result = await handler.handle(_command())
+
+    [trade] = result.trades
+    assert result.final_capital == Decimal(str(10_000_000 + float(trade.pnl)))
+    last = result.equity_curve[-1]
+    assert last["cash"] == last["equity"]
+    assert last["drawdown"] > 0  # 청산 비용만큼 고점(초기자본) 아래

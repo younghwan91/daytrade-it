@@ -35,7 +35,6 @@ from krx_quant_core.backtest.ledger import performance_metrics
 from krx_quant_core.backtest.replay import run_replay
 from krx_quant_core.execution.book import PositionBook
 from krx_quant_core.execution.engine import Bar, Event, StrategyContext
-from krx_quant_core.execution.events import Fill
 from krx_quant_core.execution.guards import OrderGuardConfig
 from krx_quant_core.execution.orders import OrderIntent
 from krx_quant_core.market.session import KST
@@ -287,26 +286,11 @@ class BacktestHandler:
             bars,
             guard_config=_REPLAY_GUARD,
             market_of=lambda _code: self._market.value,
+            cost_model=self._cost_model,
+            liquidate_at_end=True,
         )
-
-        # Re-book the fills with this handler's cost model (run_replay's own
-        # book uses core default rates), then liquidate what is still open.
-        book = PositionBook(market_of=lambda _code: self._market.value, cost_model=self._cost_model)
-        for row in replay.fills.to_dict("records"):
-            book.apply(Fill(**{**row, "ts": pd.Timestamp(row["ts"]).to_pydatetime()}))
-        last_bar = {bar.code: bar for bar in bars}
-        for code, holding in book.positions().items():
-            bar = last_bar[code]
-            book.apply(
-                Fill(
-                    ord_no="END",
-                    code=code,
-                    side="sell",
-                    qty=holding.qty,
-                    price=int(bar.close),
-                    ts=bar.ts,
-                )
-            )
+        if not replay.fills.empty and (replay.fills["ord_no"] == "END").any():
+            runner.close_out(replay.book)
 
         trades = [
             BacktestTrade(
@@ -320,7 +304,7 @@ class BacktestHandler:
                 pnl=Decimal(str(round(row["pnl"], 2))),
                 pnl_pct=Decimal(str(round(row["exit_price"] / row["entry_price"] - 1, 4))),
             )
-            for row in book.to_frame().to_dict("records")
+            for row in replay.trades.to_dict("records")
         ]
         return trades, runner.equity_curve
 
@@ -448,6 +432,25 @@ class _SignalStrategy:
             oms.sell(ev.code, holding.qty, price)
 
         self._record_equity(ev, ctx, cash)
+
+    def close_out(self, book: PositionBook) -> None:
+        """기간 끝 청산(END) 뒤 장부로 마지막 자산 점을 다시 적는다.
+
+        봉마다 적는 자산은 보유를 종가로 평가해 청산 비용(수수료·세금)이 빠져 있다. 끝에 남은
+        보유를 장부에서 청산하고 나면 ``final_capital`` 이 초기자본 + 거래 손익 합과 같아야 한다.
+        """
+        last_key = next(reversed(self._by_date))
+        equity = self._initial + book.realized_krw
+        # 덮어쓰는 점의 평가액이 고점이었을 수 있으니 고점은 그 앞 점들로 다시 잡는다.
+        earlier = [p["equity"] for k, p in self._by_date.items() if k != last_key]
+        self._peak = max([self._initial, *earlier, equity])
+        drawdown = (self._peak - equity) / self._peak if self._peak > 0 else 0
+        self._by_date[last_key] = {
+            **self._by_date[last_key],
+            "equity": equity,
+            "drawdown": drawdown,
+            "cash": equity,
+        }
 
     def _record_equity(self, ev: Bar, ctx: StrategyContext, cash: float) -> None:
         book = ctx.oms.book
