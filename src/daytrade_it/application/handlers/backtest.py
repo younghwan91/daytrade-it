@@ -33,6 +33,7 @@ import pandas as pd
 import structlog
 from krx_quant_core.backtest.ledger import performance_metrics
 from krx_quant_core.backtest.replay import run_replay
+from krx_quant_core.execution.book import PositionBook
 from krx_quant_core.execution.engine import Bar, Event, StrategyContext
 from krx_quant_core.execution.guards import OrderGuardConfig
 from krx_quant_core.execution.orders import OrderIntent
@@ -288,6 +289,8 @@ class BacktestHandler:
             cost_model=self._cost_model,
             liquidate_at_end=True,
         )
+        if not replay.fills.empty and (replay.fills["ord_no"] == "END").any():
+            runner.close_out(replay.book)
 
         trades = [
             BacktestTrade(
@@ -429,6 +432,25 @@ class _SignalStrategy:
             oms.sell(ev.code, holding.qty, price)
 
         self._record_equity(ev, ctx, cash)
+
+    def close_out(self, book: PositionBook) -> None:
+        """기간 끝 청산(END) 뒤 장부로 마지막 자산 점을 다시 적는다.
+
+        봉마다 적는 자산은 보유를 종가로 평가해 청산 비용(수수료·세금)이 빠져 있다. 끝에 남은
+        보유를 장부에서 청산하고 나면 ``final_capital`` 이 초기자본 + 거래 손익 합과 같아야 한다.
+        """
+        last_key = next(reversed(self._by_date))
+        equity = self._initial + book.realized_krw
+        # 덮어쓰는 점의 평가액이 고점이었을 수 있으니 고점은 그 앞 점들로 다시 잡는다.
+        earlier = [p["equity"] for k, p in self._by_date.items() if k != last_key]
+        self._peak = max([self._initial, *earlier, equity])
+        drawdown = (self._peak - equity) / self._peak if self._peak > 0 else 0
+        self._by_date[last_key] = {
+            **self._by_date[last_key],
+            "equity": equity,
+            "drawdown": drawdown,
+            "cash": equity,
+        }
 
     def _record_equity(self, ev: Bar, ctx: StrategyContext, cash: float) -> None:
         book = ctx.oms.book
