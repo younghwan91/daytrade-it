@@ -9,7 +9,7 @@
 - IMPORTANT: `~/git/daytrade-it` 는 크론이 도는 런타임이다. 08:45 `scripts/preopen_check.sh`, 08:55
   `scripts/news_signal_daemon.sh`, 15:50 `scripts/eval/forward_gate.py`, 18:30 `kqc nightly` 가 이 디렉터리의
   코드와 `data/`(장부·판정·`live_STOP`)를 쓴다. 이 디렉터리는 main 에 두고, 브랜치를 바꾸거나 커밋하지 않는다.
-  작업은 워크트리에서: `git worktree add ../daytrade-it-<주제> -b <브랜치> origin/main` (훅이 checkout/switch 를 막는다).
+  작업은 워크트리에서: `git worktree add ~/git/.harness-wt/daytrade-it-<주제> -b <브랜치> origin/main` (훅이 checkout/switch 를 막는다).
 - 워크트리는 `.venv` 를 따로 만든다(`uv sync --extra dev`). main 의 `.venv` 를 심링크하면 editable install 이
   워크트리 `src` 를 가리켜 런타임 데몬이 워크트리 코드로 돈다.
 - `~/git/daytrade-it-rlnews`(3c409b6, detached)도 런타임이다. 16:30 크론 `scripts/eval/pipeline/collect_toss_daily.sh`
@@ -70,6 +70,15 @@ uv run mypy src            # application·infrastructure·interfaces 는 pyproje
 - 분봉 수집은 scalp-it `cli_intraday --universe-top 1400` 이 한다. 소형주는 분봉이 없어 봉 종가로 폴백된다.
 - 데몬은 KRX 휴장일에도 돌아 종이 체결을 남긴다. 게이트·리플레이는 분봉 없는 날을 뺀다.
 
+## 뉴스 LLM 판정 (`infrastructure/external/anthropic_client.py`)
+
+- 모델은 `claude-haiku-5-5` 만. Haiku 4.5 는 쓰지 않는다(4.5 결과는 `data/legacy/`·quant-airflow DB `legacy` 스키마 보관분).
+- 프롬프트 캐싱 의무 — 고정 지시문은 `cache_control` 붙은 `system` 으로, 건마다 다른 부분(기사·종목·이력)만 user 로. 지시문을 기사 뒤에 두지 않는다. 걸렸는지는 `usage.cache_read_input_tokens` 로 확인(5.5 최소 접두 512토큰).
+- Batch API 의무 — 재판정·프롬프트 평가(`scripts/eval/eval_news_prompts.py`)·새 판정기를 동기 `messages.create` 루프로 만들지 않는다.
+  장중 데몬처럼 지연이 문제면 먼저 묻는다.
+- 5.5 는 thinking 기본 켜짐 → `thinking: {type: "disabled"}`, temperature 는 보내지 않는다.
+- 참고 구현: quant-airflow `collectors/news_judge.py`(배치 원장, create 재시도 금지), swing-it `src/swing_it/news/judge.py`.
+
 ## 연구 절차 (이 레포 관례)
 
 1. 사전등록 `docs/research/frozen/<날짜>-<주제>-prereg.json` 을 결과 전에 커밋한다: `research(prereg): … — 결과 전 고정`.
@@ -84,6 +93,11 @@ uv run mypy src            # application·infrastructure·interfaces 는 pyproje
 - 결과를 믿기 전에: 결과와 같은 기간의 양으로 만든 표본·순위·필터, 체결 여부로 고른 부분집합이 있는지 본다
   (대시보드 소속 +233bp 등 이 레포에서 4번 반복된 거짓 우위). 스윕 풀 결과는 실매매 풀에서 6번 뒤집혔다 —
   채택 전엔 실매매 코드를 그대로 돌리는 리플레이(`application/replay`, `scripts/eval/replay_parity.py`)로 확인한다.
+- 보고·선택은 승률이 아니라 **손익비·기대값**으로 한다(사용자 "승률이 높은 건 중요하지 않아. 난 퀀트야"). 승률이 높은데 손익비 < 1 이면 승자를 일찍 자르는 청산부터 의심한다 — 손절을 좁혀 손익비를 만드는 것은 답이 아니다.
+- 비용은 정가로. 수수료 면제·할인·리베이트처럼 관계나 기간에 묶인 조건은 비용 가정에 넣지 않는다. 정가에서 살아남는 전략만 채택한다.
+- 브로커 API 동작 가설(파라미터명·체결·트리거 방식)은 문서·로그 추론만으로 실매매 코드에 넣지 않는다 — 실서버 조회 스모크(실주문은 사용자 승인)로 먼저 확인한다. 목 테스트는 파라미터명 오류를 못 잡는다.
+- 실험·세대 결과마다 `quant-reviewer` 에이전트를 같이(또는 직후) 띄우고, 거래·사건 재계산은 `haiku-verifier` 10~20개를 한 메시지에서 병렬로. 리뷰의 CRITICAL/MAJOR 를 반영하기 전엔 결론을 보고하지 않는다.
+- 한 실험(세대) = 한 세션이 기본. 결정·결과는 `docs/research/<날짜>-<주제>.md`·`docs/research/README.md` 색인에 바로 적고 새 세션은 그 파일에서 출발한다. 컨텍스트가 60%를 넘으면 그 파일을 갱신한 뒤 새 세션을 제안한다.
 
 ## 문서
 
