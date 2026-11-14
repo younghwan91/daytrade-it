@@ -54,7 +54,13 @@ confirm:
   already used the correct value; only the order-request path had the wrong
   one.
 - `trde_tp` (order-type) for a limit order: `"0"`, not `"00"`.
-- `org_ord_no`, `stk_cd`, `ord_qty`, `ord_uv` field names all match exactly.
+- `stk_cd`, `ord_qty`, `ord_uv` field names match exactly for buy/sell.
+
+CORRECTION (2026-11-14): "22 live submissions, all `return_code == 0`" above
+is wrong. Only 8 (1-share buy 4, sell 4) were `return_code == 0`; all 14
+cancels (`kt10003`, body `org_ord_no` + `ord_qty`) were `return_code == 2`.
+Kiwoom's official spec JSON names the cancel fields `orig_ord_no` and
+`cncl_qty` -- see `_ORIG_ORDER_NO_FIELD`.
 
 `_ORDER_TYPE_MARKET` ("03") remains **unverified** -- `scalp-it` places
 limit orders only and has never sent a market order through this endpoint.
@@ -121,9 +127,16 @@ _ORDER_TYPE_MARKET = TRDE_TP_MARKET
 #: call proves it wrong.
 _ORDER_TYPE_FIELD = "trde_tp"
 
-#: Same ambiguity for "original order number" on modify/cancel: README uses
-#: `org_ord_no`, examples/trading.py uses `orig_ord_no`.
-_ORIG_ORDER_NO_FIELD = "org_ord_no"
+#: Cancel (`kt10003`) body field names, from Kiwoom's official spec JSON
+#: (Kiwoom-Securities/Kiwoom-REST-API `kiwoom/_data/kiwoom_api_spec.json`,
+#: c7a3d25, checked 2026-11-14): `dmst_stex_tp`, `orig_ord_no`, `stk_cd`,
+#: `cncl_qty` ("0" = cancel all remaining). The old guess `org_ord_no` +
+#: `ord_qty` (from kiwoom-client's README) got `return_code == 2` on all 14
+#: live cancels in scalp-it's `data/pair_orders.log` -- no live cancel has
+#: succeeded yet, so these names are still UNVERIFIED by a live call
+#: (scalp-it `scripts/smoke_cancel.py`).
+_ORIG_ORDER_NO_FIELD = "orig_ord_no"
+_CANCEL_QTY_FIELD = "cncl_qty"
 
 #: return_code values kiwoom-client (via `_check_return_code`) treats as
 #: success. Anything else raises `KiwoomAPIError` inside kiwoom-client
@@ -282,10 +295,12 @@ class KiwoomBroker(BrokerInterface):
     def cancel_order(self, order_id: str) -> bool:
         """Cancel an open order.
 
-        Kiwoom's cancel TR (`kt10003`) requires `stk_cd` and the remaining
-        `ord_qty` alongside `org_ord_no` -- confirmed by scalp-it's
-        `adapters/kiwoom_order.py.cancel()`, which sends all four fields.
-        `BrokerInterface.cancel_order` only takes `order_id`, so those two
+        Kiwoom's cancel TR (`kt10003`) body is `dmst_stex_tp`, `orig_ord_no`,
+        `stk_cd`, `cncl_qty` (official spec JSON; see `_ORIG_ORDER_NO_FIELD`).
+        Not yet confirmed by a live cancel -- every live cancel so far used the
+        old `org_ord_no`/`ord_qty` body and got `return_code == 2`.
+        `BrokerInterface.cancel_order` only takes `order_id`, so `stk_cd` and the
+        remaining quantity -- the two
         extra fields are looked up here via `unfilled_orders` (the same TR
         `get_order_status` already uses) rather than widening the interface.
         """
@@ -304,10 +319,10 @@ class KiwoomBroker(BrokerInterface):
             return False
 
         kwargs = {
-            _ORIG_ORDER_NO_FIELD: order_id,
             "dmst_stex_tp": _KRX_EXCHANGE_CODE,
+            _ORIG_ORDER_NO_FIELD: order_id,
             "stk_cd": normalize_code(row.get("stk_cd")),
-            "ord_qty": str(int(self._map_order_status(order_id, row).remaining_quantity)),
+            _CANCEL_QTY_FIELD: str(int(self._map_order_status(order_id, row).remaining_quantity)),
         }
         try:
             raw = self._api.order.cancel_order(**kwargs)
