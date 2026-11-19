@@ -132,9 +132,9 @@ _ORDER_TYPE_FIELD = "trde_tp"
 #: c7a3d25, checked 2026-11-14): `dmst_stex_tp`, `orig_ord_no`, `stk_cd`,
 #: `cncl_qty` ("0" = cancel all remaining). The old guess `org_ord_no` +
 #: `ord_qty` (from kiwoom-client's README) got `return_code == 2` on all 14
-#: live cancels in scalp-it's `data/pair_orders.log` -- no live cancel has
-#: succeeded yet, so these names are still UNVERIFIED by a live call
-#: (scalp-it `scripts/smoke_cancel.py`).
+#: live cancels in scalp-it's `data/pair_orders.log`. Live-verified 2026-11-16:
+#: a 1-share limit buy (000947, order 0000009) cancelled with this body got
+#: `return_code == 0` and left 0 unfilled (krx-quant-core #24 smoke).
 _ORIG_ORDER_NO_FIELD = "orig_ord_no"
 _CANCEL_QTY_FIELD = "cncl_qty"
 
@@ -297,8 +297,8 @@ class KiwoomBroker(BrokerInterface):
 
         Kiwoom's cancel TR (`kt10003`) body is `dmst_stex_tp`, `orig_ord_no`,
         `stk_cd`, `cncl_qty` (official spec JSON; see `_ORIG_ORDER_NO_FIELD`).
-        Not yet confirmed by a live cancel -- every live cancel so far used the
-        old `org_ord_no`/`ord_qty` body and got `return_code == 2`.
+        Live-verified 2026-11-16 (`return_code == 0`); the old
+        `org_ord_no`/`ord_qty` body got `return_code == 2` on all 14 earlier cancels.
         `BrokerInterface.cancel_order` only takes `order_id`, so `stk_cd` and the
         remaining quantity -- the two
         extra fields are looked up here via `unfilled_orders` (the same TR
