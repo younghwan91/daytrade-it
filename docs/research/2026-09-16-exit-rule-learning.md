@@ -156,7 +156,7 @@ engine on the 7 dashboard-pool days (`scripts/eval/dash7_exits.py`, 0 errors on 
 | `consensus` (my folds' 5/5 config) | **−1,973** | 59 | 31 | −4,680 | **0.004** | 0/7 | false |
 
 **The old result reproduces to the won**: base +39,915, `trail_2_1` −547, p = 0.016, μ = −5,043,
-1/7 days — identical to the pre-registered table in `2026-09-16-bayes-pipeline-eval.md`. `orb30`
+1/7 days — identical to the pre-registered table in the bayes-pipeline-eval doc (removed from this public copy because it contained live-account trade records). `orb30`
 likewise reproduces at p = 0.801, 5/7.
 
 **The evidence that turned trailing off still stands.** It was not an artifact of the bug.

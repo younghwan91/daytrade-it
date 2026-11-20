@@ -1,0 +1,35 @@
+[
+  {
+    "id": "toss:91ea5c191baf",
+    "category": "synthetic",
+    "title": "[예시] 가상 기업 A 분기 실적 개선",
+    "url": "https://example.com/synthetic/1",
+    "text": "합성 예시 문장입니다. 실제 기사가 아닙니다.",
+    "tickers": [
+      "000001"
+    ],
+    "published_at": "2026-01-01T09:00:00"
+  },
+  {
+    "id": "toss:132529b71eaf",
+    "category": "synthetic",
+    "title": "[예시] 가상 기업 B 공급 계약 체결",
+    "url": "https://example.com/synthetic/2",
+    "text": "합성 예시 문장입니다. 실제 기사가 아닙니다.",
+    "tickers": [
+      "000002"
+    ],
+    "published_at": "2026-01-01T09:10:00"
+  },
+  {
+    "id": "toss:c2be23c20b16",
+    "category": "synthetic",
+    "title": "[예시] 가상 기업 C 생산 차질",
+    "url": "https://example.com/synthetic/3",
+    "text": "합성 예시 문장입니다. 실제 기사가 아닙니다.",
+    "tickers": [
+      "000003"
+    ],
+    "published_at": "2026-01-01T09:20:00"
+  }
+]

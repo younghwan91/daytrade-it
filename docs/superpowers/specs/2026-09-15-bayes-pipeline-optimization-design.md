@@ -112,7 +112,7 @@
 
 - `src/daytrade_it/infrastructure/brokers/sim_broker.py` 등 리플레이 엔진 + 단위 테스트
 - `scripts/eval/replay_*.py`, `scripts/eval/bayes_*.py` (진입점에서 `require_backtest_host()`)
-- 결과 문서 `docs/research/2026-09-XX-bayes-pipeline-eval.md`: 동일성 게이트 결과, 단계별 사후분포, 채택/탈락
+- 결과 문서 `2026-09-XX-bayes-pipeline-eval` (공개본에서는 실계좌 거래 기록 때문에 삭제됨): 동일성 게이트 결과, 단계별 사후분포, 채택/탈락
 - 채택 규칙은 `TradingLimits`·필터 설정 변경 PR로 따로. **운영 반영은 사용자 결정.**
 
 ## 제외

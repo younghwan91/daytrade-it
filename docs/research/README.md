@@ -35,7 +35,7 @@
 | 09-13 | news-prompt-eval | 프롬프트 v2 vs 기준선 | +1.27% 기준선 자체가 결과 조건부였다(오류 1번). 폐기 |
 | 09-15 | exit-rule-eval | TP/트레일링/시간 청산 | 15:00 청산보다 나쁨 -- 큰 승자를 자른다 |
 | 09-15 | news-policy-optimization | Optuna 정책 최적화 | 운영 정책이 OOF 에서 최적화안을 이김; 유일 안정 파라미터 = 장전→시가→15:00 |
-| 09-16 | bayes-pipeline-eval, bandit-entry-design | 베이즈 밴딧 진입 | 7일·550쌍으로 OOF 실패(p=0.14) |
+| 09-16 | bayes-pipeline-eval(문서 삭제 — 실계좌 거래 기록 포함), bandit-entry-design | 베이즈 밴딧 진입 | 7일·550쌍으로 OOF 실패(p=0.14) |
 | 09-16 | dashboard-edge-test, entry-label-decontamination | 대시보드 풀 우위 | 대시보드 소속 자체가 +233bp 결과 조건부. 탈오염 후 우위 없음 |
 | 09-16 | rl-minimal-entry-selection | 최소 RL 선정 | 선정·게이트가 같은 표본을 두 번 쓰는 함정 경고. 우위 없음 |
 | 09-16 | exit-rule-learning, live-exit-knobs, stall-breakeven-rules, far-target-live-pool | 청산 규칙 학습·주춤·본절·먼목표 | 스윕 풀에서 도움된 3개가 운영 풀에서 전부 손해. 모두 꺼짐 |
@@ -48,7 +48,7 @@
 | 09-22 | neural-exit-rl | REINFORCE 청산 | 네트워크가 테이블보다 유의하게 나쁨(p=0.005). 청산 4번째 닫힘 |
 | 09-22 | intraday-history-sources | 분봉 복원 소스 | 15:00 복원봉 기준가 불일치 수정 |
 | 10-05 | size-ramp-slippage | 1~100주 왕복 비용 | 1→30주 +2bp, 100주 중앙값 48.1(p75 73.9). 고정비 23bp(거세 20+수수료 3)가 바닥. 레버는 수량이 아니라 가격대(코스닥·2만원 미만은 1주에도 30~85bp). n=32 |
-| 10-05 | replay-parity | 리플레이가 실매매를 재현하나 | main 에는 라이브 패리티 리플레이가 없음(연구 브랜치에만). 09-14·15 재현 PASS, 09-16 불타기 2건 누락(SimBroker 현금 이중 차감), 종이일은 분봉 없어 불가. 불일치 17건. → fc2826d 로 main 이식 완료(SimBroker 현금 수정, baseline 에 sha·한도·예수금 기록) |
+| 10-05 | replay-parity(문서 삭제 — 실계좌 거래 기록 포함) | 리플레이가 실매매를 재현하나 | main 에는 라이브 패리티 리플레이가 없음(연구 브랜치에만). 09-14·15 재현 PASS, 09-16 불타기 2건 누락(SimBroker 현금 이중 차감), 종이일은 분봉 없어 불가. 불일치 17건. → fc2826d 로 main 이식 완료(SimBroker 현금 수정, baseline 에 sha·한도·예수금 기록) |
 | 09-23 / 10-05 | stage23-result | 2·3단계 진입·청산 + "확실한 것만 확률적으로" 승률 보정 (사전등록 frozen/2026-09-23-stage23-prereg.json) | **실패 셋 다.** 결정론 정책 linear·mlp16 이 상수로 수렴(stage 2 −42.6 = last_candidate, stage 3 −62.3 = hold), 노이즈 best-of-10 미초과, 기준선 대비 +2 SE 없음(최대 +17.6 ± 14.1). 승률 규칙 `all` p≥0.39 증거 −17.5 bp/후보 < 노이즈 최대 +0.4. 모든 칸 음수 → [문서](2026-10-05-stage23-result.md) |
 | 10-05 | news-multiday-drift | 1단계 순위(mfe_n)의 15:00 이후 지평(야간·1~20거래일) | 야간 상위 10% +43.7bp 중 +37.8 은 유니버스 드리프트, 순위의 널 대비 alpha +9.5 [−5, +25] < 23bp. 1~20일은 선정 구간에서 유의하게 음수(t+20 −161 [−259, −57]), 깨끗한 74일에서 0 근처. 기술만, 판정 없음 |
 | 10-05 | cross-repo-synthesis | 두 레포 종합 — 왜 못 버나, 오늘 잰 세 축, 일봉 결함, 남은 선택지 | 새 칸 없음. `daily_bars.close` 09-14 부터 NXT 야간가로 오염. PEAD 미운용. 사용자 결정 4개 → [문서](2026-10-05-cross-repo-synthesis.md) |
