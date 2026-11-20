@@ -282,21 +282,24 @@ class TestPlaceOrderFieldNames:
         assert kwargs["trde_tp"] == "03"
         assert "ord_uv" not in kwargs  # no limit price for market orders
 
-    def test_cancel_order_uses_org_ord_no(
+    def test_cancel_order_uses_official_kt10003_fields(
         self, broker: KiwoomBroker, fake_api: _FakeKiwoomAPI
     ) -> None:
+        # Official kt10003 body (Kiwoom-Securities/Kiwoom-REST-API spec JSON,
+        # c7a3d25): dmst_stex_tp, orig_ord_no, stk_cd, cncl_qty. The old
+        # org_ord_no/ord_qty body got return_code=2 on all 14 live cancels
+        # in scalp-it's data/pair_orders.log.
         assert broker.cancel_order("001") is True
         method, kwargs = fake_api.order.calls[0]
         assert method == "cancel_order"
-        assert _ORIG_ORDER_NO_FIELD == "org_ord_no"
-        assert kwargs["org_ord_no"] == "001"
-        assert "orig_ord_no" not in kwargs
-        # Kiwoom's cancel TR also requires stk_cd + remaining ord_qty
-        # (confirmed via scalp-it's cancel() body) -- looked up from
-        # unfilled_orders since BrokerInterface.cancel_order only takes an
-        # order_id.
+        assert _ORIG_ORDER_NO_FIELD == "orig_ord_no"
+        assert list(kwargs) == ["dmst_stex_tp", "orig_ord_no", "stk_cd", "cncl_qty"]
+        assert kwargs["orig_ord_no"] == "001"
+        assert "org_ord_no" not in kwargs and "ord_qty" not in kwargs
+        # stk_cd + remaining qty are looked up from unfilled_orders since
+        # BrokerInterface.cancel_order only takes an order_id.
         assert kwargs["stk_cd"] == "005930"
-        assert kwargs["ord_qty"] == "7"  # the still-open quantity (oso_qty), not ord_qty
+        assert kwargs["cncl_qty"] == "7"  # the still-open quantity (oso_qty), not ord_qty
         assert kwargs["dmst_stex_tp"] == "KRX"
 
     def test_cancel_order_returns_false_when_order_not_found(
