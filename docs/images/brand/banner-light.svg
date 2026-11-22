@@ -1,0 +1,104 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 280" width="1200" height="280" fill="none">
+  <defs>
+    <linearGradient id="dt-bl-bg" x1="0" y1="0" x2="1200" y2="280" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#F8FAFC"/>
+      <stop offset="65%" stop-color="#F1F5F9"/>
+      <stop offset="100%" stop-color="#FFFBEB"/>
+    </linearGradient>
+    <linearGradient id="dt-bl-mark" x1="0" y1="0" x2="64" y2="64" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#0F172A"/>
+      <stop offset="100%" stop-color="#1E293B"/>
+    </linearGradient>
+    <linearGradient id="dt-bl-gold" x1="16" y1="48" x2="48" y2="16" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#F59E0B"/>
+      <stop offset="100%" stop-color="#FBBF24"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Card Surface -->
+  <rect width="1200" height="280" rx="16" fill="url(#dt-bl-bg)"/>
+  <rect x="0.5" y="0.5" width="1199" height="279" rx="15.5" stroke="#CBD5E1"/>
+
+  <!-- Left: Brand Mark (64x64) -->
+  <g transform="translate(48, 46)">
+    <rect width="64" height="64" rx="14" fill="url(#dt-bl-mark)"/>
+    <rect x="1" y="1" width="62" height="62" rx="13" stroke="#F59E0B" stroke-opacity="0.35" stroke-width="1"/>
+    <line x1="18" y1="22" x2="18" y2="46" stroke="#94A3B8" stroke-width="2" stroke-linecap="round"/>
+    <rect x="14.5" y="28" width="7" height="12" rx="1.5" fill="#F87171"/>
+    <line x1="30" y1="16" x2="30" y2="44" stroke="#94A3B8" stroke-width="2" stroke-linecap="round"/>
+    <rect x="26.5" y="22" width="7" height="15" rx="1.5" fill="#34D399"/>
+    <line x1="42" y1="14" x2="42" y2="38" stroke="#FBBF24" stroke-width="2" stroke-linecap="round"/>
+    <rect x="38.5" y="18" width="7" height="13" rx="1.5" fill="url(#dt-bl-gold)"/>
+    <path d="M46 37L53 40V45.5C53 49.5 49.8 52.3 46 53.5C42.2 52.3 39 49.5 39 45.5V40L46 37Z" fill="#0F172A" stroke="#34D399" stroke-width="2" stroke-linejoin="round"/>
+    <path d="M43.2 45.2L45.1 47.1L49.1 43.1" stroke="#34D399" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+
+  <!-- Left: Title & Tagline -->
+  <text x="130" y="78" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" font-size="36" font-weight="800" fill="#0F172A" letter-spacing="-0.02em">daytrade-it</text>
+  <text x="130" y="104" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" font-size="14" font-weight="600" fill="#D97706" letter-spacing="0.06em">INTRADAY NEWS &amp; DISCLOSURE RESEARCH</text>
+
+  <text x="48" y="152" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" font-size="17" font-weight="500" fill="#334155">KOSPI/KOSDAQ news day-trading system &amp; empirical edge research.</text>
+
+  <!-- Left: Tech Pills -->
+  <g transform="translate(48, 184)">
+    <rect width="114" height="30" rx="15" fill="#F1F5F9" stroke="#CBD5E1"/>
+    <text x="57" y="20" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" font-size="13" font-weight="600" fill="#0F172A">Python 3.12+</text>
+
+    <rect x="124" width="166" height="30" rx="15" fill="#FEF3C7" stroke="#FCD34D"/>
+    <text x="207" y="20" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" font-size="13" font-weight="600" fill="#92400E">Toss · DART · Kiwoom</text>
+
+    <rect x="300" width="114" height="30" rx="15" fill="#ECFDF5" stroke="#6EE7B7"/>
+    <text x="357" y="20" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" font-size="13" font-weight="600" fill="#065F46">Risk-Gated</text>
+  </g>
+
+  <!-- Right: Domain Artwork (Intraday Candles + 15:00 Exit + Risk Shield) -->
+  <g>
+    <rect x="724" y="28" width="428" height="224" rx="14" fill="#FFFFFF" stroke="#E2E8F0"/>
+    <path d="M748 80H1128M748 124H1128M748 168H1128" stroke="#F1F5F9" stroke-width="1"/>
+    <!-- 15:00 KST Exit Line -->
+    <line x1="1064" y1="48" x2="1064" y2="226" stroke="#F59E0B" stroke-width="1.5" stroke-dasharray="4 4"/>
+    <rect x="1032" y="42" width="64" height="20" rx="6" fill="#FEF3C7" stroke="#FCD34D"/>
+    <text x="1064" y="56" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" font-size="11" font-weight="700" fill="#92400E">15:00 EXIT</text>
+
+    <!-- Volume bars at bottom -->
+    <rect x="768" y="202" width="14" height="18" rx="2" fill="#CBD5E1"/>
+    <rect x="802" y="196" width="14" height="24" rx="2" fill="#A7F3D0"/>
+    <rect x="836" y="206" width="14" height="14" rx="2" fill="#FECACA"/>
+    <rect x="870" y="186" width="14" height="34" rx="2" fill="#A7F3D0"/>
+    <rect x="904" y="176" width="14" height="44" rx="2" fill="#FDE68A"/>
+    <rect x="938" y="194" width="14" height="26" rx="2" fill="#A7F3D0"/>
+    <rect x="972" y="198" width="14" height="22" rx="2" fill="#FECACA"/>
+    <rect x="1006" y="188" width="14" height="32" rx="2" fill="#A7F3D0"/>
+
+    <!-- Intraday Candlesticks -->
+    <line x1="775" y1="126" x2="775" y2="174" stroke="#94A3B8" stroke-width="2" stroke-linecap="round"/>
+    <rect x="767" y="138" width="16" height="24" rx="3" fill="#F87171"/>
+
+    <line x1="809" y1="114" x2="809" y2="168" stroke="#94A3B8" stroke-width="2" stroke-linecap="round"/>
+    <rect x="801" y="124" width="16" height="30" rx="3" fill="#10B981"/>
+
+    <line x1="843" y1="118" x2="843" y2="164" stroke="#94A3B8" stroke-width="2" stroke-linecap="round"/>
+    <rect x="835" y="128" width="16" height="22" rx="3" fill="#F87171"/>
+
+    <line x1="877" y1="92" x2="877" y2="148" stroke="#94A3B8" stroke-width="2" stroke-linecap="round"/>
+    <rect x="869" y="102" width="16" height="32" rx="3" fill="#10B981"/>
+
+    <line x1="911" y1="68" x2="911" y2="128" stroke="#D97706" stroke-width="2" stroke-linecap="round"/>
+    <rect x="903" y="78" width="16" height="34" rx="3" fill="#F59E0B"/>
+
+    <line x1="945" y1="76" x2="945" y2="126" stroke="#94A3B8" stroke-width="2" stroke-linecap="round"/>
+    <rect x="937" y="86" width="16" height="26" rx="3" fill="#10B981"/>
+
+    <line x1="979" y1="88" x2="979" y2="136" stroke="#94A3B8" stroke-width="2" stroke-linecap="round"/>
+    <rect x="971" y="96" width="16" height="24" rx="3" fill="#F87171"/>
+
+    <line x1="1013" y1="74" x2="1013" y2="122" stroke="#94A3B8" stroke-width="2" stroke-linecap="round"/>
+    <rect x="1005" y="84" width="16" height="26" rx="3" fill="#10B981"/>
+
+    <!-- Risk Gate Shield Badge -->
+    <g transform="translate(1082, 134)">
+      <path d="M24 0L46 9V25C46 37.5 36.5 46.5 24 50C11.5 46.5 2 37.5 2 25V9L24 0Z" fill="#0F172A" stroke="#10B981" stroke-width="2.5" stroke-linejoin="round"/>
+      <path d="M15 24.5L21 30.5L34 17.5" stroke="#34D399" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    </g>
+  </g>
+</svg>
