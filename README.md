@@ -1,6 +1,15 @@
-# daytrade-it
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/brand/wordmark-dark.svg">
+  <img alt="daytrade-it" src="docs/images/brand/wordmark-light.svg" height="56">
+</picture>
+
+**English** | [한국어](README.ko.md)
 
 **KOSPI/KOSDAQ news day-trading system, and the research that measures whether it has an edge.**
+
+[![CI](https://github.com/younghwan91/daytrade-it/actions/workflows/ci.yml/badge.svg)](https://github.com/younghwan91/daytrade-it/actions/workflows/ci.yml)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 The system reads Toss news and DART disclosures, has an LLM (Anthropic Claude Haiku) judge each item,
 buys one share at a limit price and exits at 15:00 KST. Orders go through a Kiwoom Securities broker adapter
