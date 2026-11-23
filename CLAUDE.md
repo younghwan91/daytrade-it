@@ -107,4 +107,4 @@ uv run mypy src            # application·infrastructure·interfaces 는 pyproje
 - `docs/adr/`, `docs/mcp/README.md` — 구조 결정, MCP 도구.
 - `PLAN.md` (85KB) — gpt-quant-v2 → KRX 이전 8단계 기록. 옛 결정의 이유를 찾을 때만.
 
-커밋 메시지는 한국어 conventional(`feat(news): …`, `fix(eval): …`, `docs(research): …`, `research(prereg): …`).
+커밋 메시지는 영어 Conventional Commits(`feat(news): …`, `fix(eval): …`, `docs(research): …`, `research(prereg): …`) 형식을 씁니다.
