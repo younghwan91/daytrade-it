@@ -24,7 +24,27 @@
 > [`docs/research/`](docs/research/README.md)의 리서치 결과, 이 방식의 뉴스 매매는 **왕복 거래비용(약 36.7 bp)을 넘는 우위가 없음**이 확인되었습니다.
 > 종료된 가설, 사전 등록(pre-registration), 포워드 게이트가 해당 문서에 정리되어 있습니다. 이 저장소는 수익 전략이 아닌 리서치 기록 및 레퍼런스 구현으로 참고하세요.
 
-## 빠른 시작
+## 핵심 결과
+
+모두 [`docs/research/README.md`](docs/research/README.md)에 있는 실측입니다. 부정적 결과도 그대로 적었습니다.
+
+- **결론: 왕복 비용(36.7 bp)을 넘는 우위 없음.** 선정·진입 시점·청산·지연·순위·불타기 가설이 모두 한 번 이상 닫혔습니다.
+- **전진 게이트 7개 중 3개만 통과, `promote=false`.** 거래당 평균 +38.8 bp 는 상위 1건(+3,022 bp)이 만든 값이고, 상위 1% 제외 시 −16.4 bp, Deflated Sharpe 0.005 입니다(55거래, 2026-10-05).
+- **순위는 맞히지만 돈이 되지 않습니다.** 1단계 확인 구간 IC 0.132(t=8.3)였으나 경제 곡선은 전 구간 음수였습니다. 사전등록한 2·3단계 진입·청산 시점은 증거월에서 기준선을 못 이겼습니다 ([결과](docs/research/2026-10-05-stage23-result.md)).
+- **에이전트 루프 약 1,000 구조 탐색(autoresearch)도 기각.** 순수익 −2.4 bp, 알파는 상위 1.4% 거래·한 종목에 몰렸습니다 ([문서](docs/research/2026-10-24-autoresearch.md)).
+- **견고한 비뉴스 사실 하나:** 11년간 오버나이트 +25.7 bp/일, 일중 −28.6 bp/일. 15:00 청산 보유는 이 역풍을 매일 먹습니다.
+
+## 바로 해 보기 (키·DB 없이)
+
+```bash
+git clone https://github.com/younghwan91/daytrade-it.git && cd daytrade-it && uv sync --extra dev
+uv run python scripts/demo_cost_wall.py 10000   # 가격 변동 0 인 1주 왕복의 비용(bp): 비용의 벽을 직접 확인
+uv run pytest tests/unit --no-cov -q            # 단위 테스트 771건, 약 10초
+```
+
+2026-11-26 확인: 코스피 33.0 bp, 코스닥 53.0 bp(1만원 기준; 모델 기본값. 위의 36.7 bp 는 실제 체결 평균).
+
+## 전체 설치
 
 Python 3.12+, [uv](https://docs.astral.sh/uv/), Docker가 필요합니다.
 
@@ -79,6 +99,14 @@ uv run gptq trade --paper
 | [`krx-quant-core`](https://github.com/younghwan91/krx-quant-core) | KRX 시장 규칙, 비용 모델, 리스크 게이트, 실행 상수 |
 | [`quant-airflow`](https://github.com/younghwan91/quant-airflow) | TimescaleDB 배치 적재 파이프라인 (여기서 읽기 전용 조회) |
 | [`swing-it`](https://github.com/younghwan91/swing-it) | 코스피·코스닥 스윙 리서치 (실매매 없음) |
+
+## 같은 저자의 도구
+
+| 레포 | 한 줄 |
+|---|---|
+| [`kiwoom-client`](https://github.com/younghwan91/kiwoom-client) | 키움증권 REST API 파이썬 클라이언트 |
+| [`fin-checkup`](https://github.com/younghwan91/fin-checkup) | DART 공시로 상장사 재무를 신호등으로 보여 주는 MCP 서버 |
+| [`scalp-it`](https://github.com/younghwan91/scalp-it) | 같은 계좌를 쓰는 스캘핑 리서치·실행 레포 |
 
 ## 라이선스
 
