@@ -26,7 +26,27 @@ Reads Toss news and DART disclosures, judges each item with Anthropic Claude Hai
 > gate are indexed there. Treat this repository as a research record and a reference
 > implementation, not as a profitable strategy.
 
-## Quick start
+## Key results
+
+All from [`docs/research/README.md`](docs/research/README.md); negative results included.
+
+- **Verdict: no edge over the ~36.7 bp round-trip cost.** Selection, entry timing, exits, latency, ranking and pyramiding were each closed at least once.
+- **Forward gate: 3 of 7 conditions pass, `promote=false`.** The +38.8 bp/trade mean comes from one trade (+3,022 bp); without the top 1% it is -16.4 bp; Deflated Sharpe 0.005 (55 trades, 2026-10-05).
+- **Ranking works, money does not.** Stage-1 confirm IC 0.132 (t=8.3) but the economic curve is negative everywhere; the pre-registered stage 2/3 entry/exit timing failed to beat baseline ([result](docs/research/2026-10-05-stage23-result.md)).
+- **Agent-loop search over ~1,000 structures (autoresearch) rejected:** net -2.4 bp, alpha concentrated in 1.4% of trades and one ticker ([doc](docs/research/2026-10-24-autoresearch.md)).
+- **One robust non-news fact:** over 11 years overnight +25.7 bp/day, intraday -28.6 bp/day.
+
+## Try it now (no keys, no DB)
+
+```bash
+git clone https://github.com/younghwan91/daytrade-it.git && cd daytrade-it && uv sync --extra dev
+uv run python scripts/demo_cost_wall.py 10000   # round-trip cost in bp of a flat 1-share trade
+uv run pytest tests/unit --no-cov -q            # 771 unit tests, ~10 s
+```
+
+Checked 2026-11-26: KOSPI 33.0 bp, KOSDAQ 53.0 bp at 10,000 KRW (model defaults; the 36.7 bp above is the realized average).
+
+## Full setup
 
 Requires Python 3.12+, [uv](https://docs.astral.sh/uv/) and Docker.
 
@@ -83,6 +103,14 @@ Market-generic logic (tick sizes, cost model, disclosure risk gate, Kiwoom const
 | [`krx-quant-core`](https://github.com/younghwan91/krx-quant-core) | KRX market rules, costs, risk gate, execution constants |
 | [`quant-airflow`](https://github.com/younghwan91/quant-airflow) | Batch ingestion into TimescaleDB, read here |
 | [`swing-it`](https://github.com/younghwan91/swing-it) | KOSPI/KOSDAQ research, no live trading |
+
+## Tools by the same author
+
+| Repo | One line |
+|---|---|
+| [`kiwoom-client`](https://github.com/younghwan91/kiwoom-client) | Python client for the Kiwoom Securities REST API |
+| [`fin-checkup`](https://github.com/younghwan91/fin-checkup) | MCP server that shows Korean listed-company financials as traffic lights from DART filings |
+| [`scalp-it`](https://github.com/younghwan91/scalp-it) | Scalping research and execution repo sharing the same account |
 
 ## License
 
